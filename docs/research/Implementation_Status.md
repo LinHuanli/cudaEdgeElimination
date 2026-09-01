@@ -27,11 +27,13 @@
 | M4.3b3b2b2b2b2b1 CPU long-tail | 完成（128-cell 基线） | 缓存后交叉点；融合矩阵分流；CPU/CUDA proof 规范计数 |
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
-| M5 中大型调优 | 待开始 | 首期不设最低加速比；pcb3038 尚未形成认证运行记录 |
+| M5 中大型调优 | 进行中（JV 基线完成） | pcb3038/rl5915/d15112 clean-commit 五次门禁；进程内 8.132×/25.679×/37.426×；proof 全重放；CSR 快路径 |
 
 ## 当前基准结果
 
 pr299 输入 1208 条边；JV 两个 epoch 后保留 1122 条，提交 86 条删除。CPU 与 CUDA 的最终内容哈希均为 `b9b67e9981518177`。这些数字是正确性回归结果，不构成论文性能结论。
+
+M5 JV 正式基准绑定 `cac180f`：pcb3038、rl5915、d15112 分别从 `6883/29143/166499` 条边删除 `179/550/7312` 条，最终哈希为 `90d13888e351df17`、`0174cf46124ce870`、`76e196dd53d887d5`。进程内 CUDA 算法中位数为 `2.396/7.681/74.829 ms`，相对 CPU 为 `8.132×/25.679×/37.426×`；独立 CLI wall 加速为 `0.186×/0.940×/6.139×`。所有运行逐份 CPU 重放并比较输出；pcb3038 的 137,694 最优 tour 还通过 0 缺边门禁。另两实例尚缺本地最优 tour witness，不能标成 tour-checked。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
@@ -79,4 +81,4 @@ HT epoch commit：`ht-commit` 可重复接收同一不可变快照上的 recursi
 
 ## 安全边界
 
-`gpu-eliminate` 的自动候选器目前仍只实现 JV；HT 使用显式 `ht-prove -> ht-commit` sidecar 链，尚不自动扫描全图目标。`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集；M3.1 仍为 pending。仍严禁从未完整验证的局部结果、过期 HT sidecar 或 cuOpt 浮点 reduced cost 直接构造删除记录。
+`gpu-eliminate` 的自动候选器目前仍只实现 JV；HT 使用显式 `ht-prove -> ht-commit` sidecar 链，尚不自动扫描全图目标。M5 数据也只证明 JV 路径的性能，不能外推为完整 Local Elimination 加速。`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集；M3.1 仍为 pending。仍严禁从未完整验证的局部结果、过期 HT sidecar 或 cuOpt 浮点 reduced cost 直接构造删除记录。
