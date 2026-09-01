@@ -12,3 +12,13 @@ CUDA_VISIBLE_DEVICES=1 build/cuda-release/cudaee_kopt_cost_benchmark \
 ```
 
 该基准包含完整 CPU/CUDA 矩阵逐单元比较，并计入同步调用、task H2D、cost D2H 和驻留 cache 键检查；不把首次分配/上传混入稳态中位数。
+
+M5 的有界全图 HT pilot 使用 JV 固定点作为不可变输入，对同一确定性目标切片分别执行 CPU/CUDA wavefront，比较工作签名和最终边文件，并用独立 CPU 进程重放两份 V2 proof：
+
+```bash
+CUDAEE_BENCHMARK_GPU=1 \
+CUDAEE_BENCHMARK_TOUR=artifacts/lkh-tours/pcb3038.tour \
+tools/run_ht_scan_benchmark.sh pcb3038 8
+```
+
+脚本固定记录搜索深度、state/reply/deletion-set 预算；资源耗尽是 `UNRESOLVED`，不是失败或删除授权。`CUDAEE_HT_TARGET_OFFSET` 只选择当前不可变输入上的目标切片；若使用一个已提交的新图开始下一 epoch，必须重新从 offset 0 排序。
