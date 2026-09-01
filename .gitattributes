@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.cu text eol=lf
+*.cuh text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.tsp text eol=lf
+*.edg text eol=lf

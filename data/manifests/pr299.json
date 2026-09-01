@@ -1,0 +1,16 @@
+{
+  "schema": "cudaee-data-manifest-v1",
+  "name": "pr299",
+  "dimension": 299,
+  "distance_type": "EUC_2D",
+  "integer_coordinates": true,
+  "tsp_path": "third_party/ElimTSP/data/pr299.tsp",
+  "tsp_sha256": "5d6f56b38a570e6cb30742b5ef112026f18600828a80993c3f047d20760d976f",
+  "edge_path": "third_party/ElimTSP/data/pr299.edg",
+  "edge_sha256": "2baab6a4e6ed3cf615daf3409441e2aad0e5e67bab06aeeb22993dfe7e4b1552",
+  "edge_count": 1208,
+  "source_commit": "d7bacf0d79ddc1f6f9e77b027df16d446458e58c",
+  "optimum": null,
+  "certificate_status": "not_required_for_rule-level_pr299_regression",
+  "notes": "本清单用于证明重放和 CPU/GPU 差分；不把文件名或已知 tour 当成独立最优性证书。"
+}

@@ -1,0 +1,31 @@
+# 环境与可复现性
+
+## 固定环境
+
+- Linux x86_64，NVIDIA 驱动支持 CUDA 13；
+- CMake >= 3.27、Ninja、C++20 编译器；
+- CUDA toolkit 13.x，目标 `sm_89`；
+- 项目内 `.venv` 安装 `libcuopt-cu13==26.8.0`；
+- ElimTSP 子模块固定提交 `d7bacf0d...`；
+- 外部 Concorde 完整源码树哈希 `f9caef4b41140a48cec906cf0456c266a2e83e5a1392b355694a99b151a819f6`；
+- QSopt `qsopt.a` SHA-256 `5dcf323c7fce85e8b9de7ce79aabc17b672e224b77e2a89370c4e35da07434ee`；
+- QSopt `qsopt.h` SHA-256 `647729f1bd77e1263ecf35e1897c705ef1cb45e2d65dbd9cb8fdf5df5ae65624`。
+
+`tools/bootstrap.sh` 只在仓库内创建环境；不使用 sudo，不修改 shell profile。cuOpt wheel 较大，安装前运行空间门禁。
+
+## GPU 选择
+
+`tools/select_gpu.sh` 从 `nvidia-smi` 查询每卡利用率和空闲显存，选择利用率最低、空闲显存最大的卡并打印索引。调用者设置 `CUDA_VISIBLE_DEVICES`；记录原始物理索引和查询结果。无法查询时不猜测，CPU 自动回退。
+
+## 构建档位
+
+- `cpu-debug`：无 CUDA，Debug，ASan/UBSan；
+- `cuda-release`：CUDA `sm_89`，Release，关闭 fast-math；
+- `cuda-debug`：CUDA 调试，供 compute-sanitizer；
+- `lp-release`：与 cuda-release 相同，运行时从 `.venv` 动态加载 cuOpt。
+
+所有 preset 把输出放在 `build/<preset>`。`compile_commands.json` 只建立仓库内符号链接或由编辑器直接读取 build 文件。
+
+## 运行清单
+
+`run-manifest-v1` 至少包含 Git commit/dirty 状态、子模块提交、编译选项、GPU/驱动、cuOpt 版本、输入哈希、命令行、随机种子、开始结束时间和输出哈希。没有这些字段的性能数字只能作为临时观察。

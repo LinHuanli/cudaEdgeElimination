@@ -1,0 +1,15 @@
+# 研究文档索引
+
+原始方案保留在 [Local_Elimination_GPU_cuOpt_Design.md](design/Local_Elimination_GPU_cuOpt_Design.md)。以下文档把它拆成可执行、可验收的工作包：
+
+1. [设计复核与决策](design/Design_Review_and_Decisions.md)：方案中的事实修正、范围与不变量。
+2. [正确性与证书](research/01_Correctness_and_Certificates.md)：删除规则、LP 下界和 fail-closed 条件。
+3. [GPU 快速消元](research/02_GPU_Fast_Elimination.md)：数据布局、epoch、kernel 和 CPU 复核。
+4. [Concorde/cuOpt 集成](research/03_Concorde_cuOpt_LP_Integration.md)：模型导出、C API 与精确定价边界。
+5. [数据与基准协议](research/04_Data_and_Benchmark_Protocol.md)：实例规范化、标签、指标与实验矩阵。
+6. [路线图与门禁](research/05_Roadmap_and_Gates.md)：里程碑、完成定义和风险。
+7. [环境与复现](development/Environment_and_Reproducibility.md)：固定依赖、GPU 选择和磁盘约束。
+8. [仓库与 Git 工作流](development/Repository_and_Git_Workflow.md)：目录职责、分支、CI 与产物策略。
+9. [实现状态](research/Implementation_Status.md)：已完成证据、当前结果和明确未完成项。
+
+文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

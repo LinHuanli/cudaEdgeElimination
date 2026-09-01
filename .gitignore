@@ -1,0 +1,30 @@
+# 本地构建与依赖
+/build/
+/build-*/
+/.deps/
+/.venv/
+/.tmp/
+
+# 实验产物（保留目录说明）
+/artifacts/*
+!/artifacts/README.md
+/data/cache/
+
+# 编辑器与分析缓存
+.cache/
+.clangd/
+.vscode/
+__pycache__/
+*.py[cod]
+compile_commands.json
+*.swp
+*.swo
+
+# 二进制与覆盖率文件
+*.o
+*.a
+*.so
+*.profraw
+*.profdata
+*.gcda
+*.gcno
