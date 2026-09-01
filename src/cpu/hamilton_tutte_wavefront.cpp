@@ -45,15 +45,6 @@ NodeEdge CanonicalEdge(const std::int32_t first, const std::int32_t second) {
   return first < second ? NodeEdge{first, second} : NodeEdge{second, first};
 }
 
-bool ContainsNode(const NormalizedPathSystem& paths, const std::int32_t needle) {
-  for (const Path& path : paths.paths) {
-    if (std::find(path.begin(), path.end(), needle) != path.end()) {
-      return true;
-    }
-  }
-  return false;
-}
-
 NormalizedPathSystem AddPaths(const NormalizedPathSystem& state, const std::vector<Path>& additions,
                               const std::int32_t dimension) {
   std::vector<Path> raw = state.paths;
@@ -94,57 +85,117 @@ struct PointCandidateSelection {
   double sort_ms{};
 };
 
+struct PointCandidateOrderCache {
+  // 中点评分、度数门禁和严格次序只依赖不可变 graph/target；state 仅过滤已有路径节点。
+  std::vector<std::int32_t> ordered_nodes;
+  std::vector<std::uint8_t> eligible;
+  std::vector<std::uint32_t> state_marks;
+  std::uint32_t generation{};
+  bool initialized{false};
+};
+
 PointCandidateSelection BuildPointCandidateNodes(const GraphSnapshot& graph, const NodeEdge target,
                                                  const NormalizedPathSystem& state,
-                                                 const HtRecursiveOptions& options) {
+                                                 const HtRecursiveOptions& options,
+                                                 PointCandidateOrderCache* const cache) {
   struct RankedNode {
     std::int32_t node{};
     __int128 midpoint_score{};
   };
   PointCandidateSelection selection;
-  std::vector<RankedNode> neighborhood;
-  const auto scan_begin = SteadyClock::now();
-  for (std::int32_t node = 0; node < graph.dimension; ++node) {
-    if (node == target.u || node == target.v || ContainsNode(state, node) ||
-        (options.root_options.max_candidate_degree != 0U &&
-         static_cast<std::uint32_t>(graph.Degree(node)) >
-             options.root_options.max_candidate_degree)) {
+  if (!cache->initialized) {
+    PointCandidateOrderCache prepared;
+    const auto dimension = static_cast<std::size_t>(graph.dimension);
+    prepared.eligible.assign(dimension, 0U);
+    prepared.state_marks.assign(dimension, 0U);
+    std::vector<RankedNode> ranked_nodes;
+    ranked_nodes.reserve(dimension);
+
+    const auto prepare_scan_begin = SteadyClock::now();
+    for (std::int32_t node = 0; node < graph.dimension; ++node) {
+      if (node == target.u || node == target.v ||
+          (options.root_options.max_candidate_degree != 0U &&
+           static_cast<std::uint32_t>(graph.Degree(node)) >
+               options.root_options.max_candidate_degree)) {
+        continue;
+      }
+      const __int128 dx =
+          static_cast<__int128>(2) * graph.points[static_cast<std::size_t>(node)].integer_x -
+          graph.points[static_cast<std::size_t>(target.u)].integer_x -
+          graph.points[static_cast<std::size_t>(target.v)].integer_x;
+      const __int128 dy =
+          static_cast<__int128>(2) * graph.points[static_cast<std::size_t>(node)].integer_y -
+          graph.points[static_cast<std::size_t>(target.u)].integer_y -
+          graph.points[static_cast<std::size_t>(target.v)].integer_y;
+      ranked_nodes.push_back({node, dx * dx + dy * dy});
+      prepared.eligible[static_cast<std::size_t>(node)] = 1U;
+    }
+    selection.scan_ms += ElapsedMilliseconds(prepare_scan_begin);
+
+    const auto prepare_sort_begin = SteadyClock::now();
+    std::sort(
+        ranked_nodes.begin(), ranked_nodes.end(), [](const RankedNode& lhs, const RankedNode& rhs) {
+          return std::tie(lhs.midpoint_score, lhs.node) < std::tie(rhs.midpoint_score, rhs.node);
+        });
+    prepared.ordered_nodes.reserve(ranked_nodes.size());
+    for (const RankedNode& ranked : ranked_nodes) {
+      prepared.ordered_nodes.push_back(ranked.node);
+    }
+    prepared.initialized = true;
+    selection.sort_ms += ElapsedMilliseconds(prepare_sort_begin);
+    *cache = std::move(prepared);
+  }
+
+  selection.nodes_checked = static_cast<std::uint64_t>(graph.dimension);
+  // generation mark 避免每个 frontier state 都清零完整维度的成员位图。
+  if (cache->generation == std::numeric_limits<std::uint32_t>::max()) {
+    std::fill(cache->state_marks.begin(), cache->state_marks.end(), 0U);
+    cache->generation = 1U;
+  } else {
+    ++cache->generation;
+  }
+
+  const auto state_scan_begin = SteadyClock::now();
+  std::uint64_t excluded_eligible = 0U;
+  for (const Path& path : state.paths) {
+    for (const std::int32_t node : path) {
+      if (node < 0 || node >= graph.dimension) {
+        continue;
+      }
+      const auto index = static_cast<std::size_t>(node);
+      if (cache->state_marks[index] == cache->generation) {
+        continue;
+      }
+      cache->state_marks[index] = cache->generation;
+      excluded_eligible += cache->eligible[index];
+    }
+  }
+  if (excluded_eligible > cache->ordered_nodes.size()) {
+    throw std::logic_error("HT point candidate 状态过滤计数非法");
+  }
+  // 保留旧实现完整扫描得到的 ranked 规范计数，不能只统计实际访问的有序前缀。
+  selection.nodes_ranked =
+      static_cast<std::uint64_t>(cache->ordered_nodes.size()) - excluded_eligible;
+  selection.scan_ms += ElapsedMilliseconds(state_scan_begin);
+
+  const auto select_begin = SteadyClock::now();
+  const std::size_t selection_limit =
+      options.root_options.max_neighborhood == 0U
+          ? cache->ordered_nodes.size()
+          : std::min(cache->ordered_nodes.size(),
+                     static_cast<std::size_t>(options.root_options.max_neighborhood));
+  selection.nodes.reserve(selection_limit);
+  for (const std::int32_t node : cache->ordered_nodes) {
+    if (cache->state_marks[static_cast<std::size_t>(node)] == cache->generation) {
       continue;
     }
-    const __int128 dx =
-        static_cast<__int128>(2) * graph.points[static_cast<std::size_t>(node)].integer_x -
-        graph.points[static_cast<std::size_t>(target.u)].integer_x -
-        graph.points[static_cast<std::size_t>(target.v)].integer_x;
-    const __int128 dy =
-        static_cast<__int128>(2) * graph.points[static_cast<std::size_t>(node)].integer_y -
-        graph.points[static_cast<std::size_t>(target.u)].integer_y -
-        graph.points[static_cast<std::size_t>(target.v)].integer_y;
-    neighborhood.push_back({node, dx * dx + dy * dy});
+    selection.nodes.push_back(node);
+    if (options.root_options.max_neighborhood != 0U &&
+        selection.nodes.size() == options.root_options.max_neighborhood) {
+      break;
+    }
   }
-  selection.scan_ms = ElapsedMilliseconds(scan_begin);
-  selection.nodes_checked = static_cast<std::uint64_t>(graph.dimension);
-  selection.nodes_ranked = static_cast<std::uint64_t>(neighborhood.size());
-
-  const auto sort_begin = SteadyClock::now();
-  const auto rank_less = [](const RankedNode& lhs, const RankedNode& rhs) {
-    return std::tie(lhs.midpoint_score, lhs.node) < std::tie(rhs.midpoint_score, rhs.node);
-  };
-  if (options.root_options.max_neighborhood != 0U &&
-      neighborhood.size() > options.root_options.max_neighborhood) {
-    const auto selected_end =
-        neighborhood.begin() + static_cast<std::ptrdiff_t>(options.root_options.max_neighborhood);
-    // 正式搜索只消费有序 top-k；避免先排序随后丢弃几乎全部候选。
-    std::partial_sort(neighborhood.begin(), selected_end, neighborhood.end(), rank_less);
-    neighborhood.resize(options.root_options.max_neighborhood);
-  } else {
-    std::sort(neighborhood.begin(), neighborhood.end(), rank_less);
-  }
-
-  selection.nodes.reserve(neighborhood.size());
-  for (const RankedNode& ranked : neighborhood) {
-    selection.nodes.push_back(ranked.node);
-  }
-  selection.sort_ms = ElapsedMilliseconds(sort_begin);
+  selection.sort_ms += ElapsedMilliseconds(select_begin);
   return selection;
 }
 
@@ -190,6 +241,7 @@ struct WaveBuildContext {
   std::uint32_t reply_frontier_batch_states{256};
   std::uint32_t leaf_frontier_batch_states{256};
   bool fuse_leaf_buckets{false};
+  PointCandidateOrderCache point_candidate_order;
   HtWavefrontResult* result{};
   bool budget_exhausted{false};
   bool path_append_failed{false};
@@ -476,8 +528,9 @@ std::optional<PreparedFrontierChunk> PrepareFrontierCandidates(WaveBuildContext*
     input.state_index = state_index;
     input.point_begin = centers.size();
     if (context->options->enable_point_moves) {
-      PointCandidateSelection selection = BuildPointCandidateNodes(*context->graph, context->target,
-                                                                   state.paths, *context->options);
+      PointCandidateSelection selection =
+          BuildPointCandidateNodes(*context->graph, context->target, state.paths, *context->options,
+                                   &context->point_candidate_order);
       HtWavefrontResult& result = *context->result;
       AddPointCandidateMetric(&result.point_candidate_scans, 1U, "scans");
       AddPointCandidateMetric(&result.point_candidate_nodes_checked, selection.nodes_checked,
@@ -1382,6 +1435,7 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
                            .reply_frontier_batch_states = options.reply_frontier_batch_states,
                            .leaf_frontier_batch_states = options.leaf_frontier_batch_states,
                            .fuse_leaf_buckets = options.fuse_leaf_buckets,
+                           .point_candidate_order = {},
                            .result = &result,
                            .budget_exhausted = false,
                            .path_append_failed = false,
