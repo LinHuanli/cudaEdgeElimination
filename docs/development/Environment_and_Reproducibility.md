@@ -13,6 +13,8 @@
 
 `tools/bootstrap.sh` 只在仓库内创建环境；不使用 sudo，不修改 shell profile。cuOpt wheel 较大，安装前运行空间门禁。
 
+`tools/bootstrap_concorde.sh` 以全部 `.patch` 内容的 SHA-256 前缀选择 `.deps/concorde-03.12.19-<hash>`。补丁集合变化时创建新 overlay，旧目录保持可恢复且不会污染新构建；所有目录均被 Git 忽略。
+
 ## GPU 选择
 
 `tools/select_gpu.sh` 从 `nvidia-smi` 查询每卡利用率和空闲显存，选择利用率最低、空闲显存最大的卡并打印索引。调用者设置 `CUDA_VISIBLE_DEVICES`；记录原始物理索引和查询结果。无法查询时不猜测，CPU 自动回退。

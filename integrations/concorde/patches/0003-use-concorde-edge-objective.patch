@@ -1,0 +1,131 @@
+diff --git a/INCLUDE/lp.h b/INCLUDE/lp.h
+index e547147..dc1b0f8 100644
+--- a/INCLUDE/lp.h
++++ b/INCLUDE/lp.h
+@@ -82,7 +82,7 @@ int
+             double *rmatval, double *weight),
+     CClp_dump_lp (CClp *lp, const char *fname),
+     CClp_dump_lp_epoch (CClp *lp, const char *fname, int edge_count,
+-            const int *edge_u, const int *edge_v),
++            const int *edge_u, const int *edge_v, const int *edge_len),
+     CClp_getgoodlist (CClp *lp, int *goodlist, int *goodlen_p,
+             double *downpen, double *uppen),
+     CClp_strongbranch (CClp *lp, int *candidatelist, int ncand,
+diff --git a/LP/lpqsopt.c b/LP/lpqsopt.c
+index 0c0f366..9b66b21 100644
+--- a/LP/lpqsopt.c
++++ b/LP/lpqsopt.c
+@@ -1454,7 +1454,7 @@ CLEANUP:
+ }
+ 
+ int CClp_dump_lp_epoch (CClp *lp, const char *fname, int edge_count,
+-        const int *edge_u, const int *edge_v)
++        const int *edge_u, const int *edge_v, const int *edge_len)
+ {
+     int rval = 0;
+     int nrows, ncols, objsense, nnz = 0;
+@@ -1470,9 +1470,12 @@ int CClp_dump_lp_epoch (CClp *lp, const char *fname, int edge_count,
+     double *obj = (double *) NULL;
+     double *lower = (double *) NULL;
+     double *upper = (double *) NULL;
++    double *x = (double *) NULL;
+     FILE *out = (FILE *) NULL;
+     unsigned long long hash = 14695981039346656037ULL;
+     double objective_offset = 0.0;
++    double mapped_objective = 0.0;
++    double solver_objective = 0.0;
+     char variable_type = 'C';
+ 
+     if (!lp || !lp->p || !fname || !fname[0]) {
+@@ -1482,7 +1485,8 @@ int CClp_dump_lp_epoch (CClp *lp, const char *fname, int edge_count,
+     }
+     nrows = QSget_rowcount (lp->p);
+     ncols = QSget_colcount (lp->p);
+-    if (nrows < 0 || ncols < 0 || edge_count != ncols || !edge_u || !edge_v) {
++    if (nrows < 0 || ncols < 0 || edge_count != ncols || !edge_u ||
++        !edge_v || !edge_len) {
+         fprintf (stderr, "CClp_dump_lp_epoch: column-edge map mismatch\n");
+         return 1;
+     }
+@@ -1494,15 +1498,31 @@ int CClp_dump_lp_epoch (CClp *lp, const char *fname, int edge_count,
+     obj = CC_SAFE_MALLOC (ncols, double);
+     lower = CC_SAFE_MALLOC (ncols, double);
+     upper = CC_SAFE_MALLOC (ncols, double);
+-    if ((!obj && ncols) || (!lower && ncols) || (!upper && ncols)) {
++    x = CC_SAFE_MALLOC (ncols, double);
++    if ((!obj && ncols) || (!lower && ncols) || (!upper && ncols) ||
++        (!x && ncols)) {
+         fprintf (stderr, "CClp_dump_lp_epoch: out of memory\n");
+         rval = 1; goto CLEANUP;
+     }
+-    rval = QSget_obj (lp->p, obj);
++    /* Concorde 的 graph 是列身份与整数边长的权威来源。用当前最优解复核
++       该映射确实复现 QSopt 目标，避免把求解器内部目标表示误当成原始边长。 */
++    for (i = 0; i < ncols; i++) obj[i] = (double) edge_len[i];
++    rval = QSget_x_array (lp->p, x);
+     if (rval) {
+-        fprintf (stderr, "CClp_dump_lp_epoch: QSget_obj failed\n");
++        fprintf (stderr, "CClp_dump_lp_epoch: QSget_x_array failed\n");
+         goto CLEANUP;
+     }
++    rval = QSget_objval (lp->p, &solver_objective);
++    if (rval) {
++        fprintf (stderr, "CClp_dump_lp_epoch: QSget_objval failed\n");
++        goto CLEANUP;
++    }
++    for (i = 0; i < ncols; i++) mapped_objective += obj[i] * x[i];
++    if (fabs (mapped_objective - solver_objective) >
++        1e-7 * (1.0 + fabs (solver_objective))) {
++        fprintf (stderr, "CClp_dump_lp_epoch: edge objective mismatch\n");
++        rval = 1; goto CLEANUP;
++    }
+     rval = QSget_bounds (lp->p, lower, upper);
+     if (rval) {
+         fprintf (stderr, "CClp_dump_lp_epoch: QSget_bounds failed\n");
+@@ -1603,6 +1622,7 @@ CLEANUP:
+     CC_IFFREE (obj, double);
+     CC_IFFREE (lower, double);
+     CC_IFFREE (upper, double);
++    CC_IFFREE (x, double);
+     if (rowcnt) QSfree (rowcnt);
+     if (rowbeg) QSfree (rowbeg);
+     if (rowind) QSfree (rowind);
+diff --git a/TSP/control.c b/TSP/control.c
+index 39a9c27..ac18c34 100644
+--- a/TSP/control.c
++++ b/TSP/control.c
+@@ -2167,6 +2167,7 @@ CLEANUP:
+             const char *cudaee_certificate = getenv ("CUDAEE_EXACT_CERT_OUT");
+             int *edge_u = (int *) NULL;
+             int *edge_v = (int *) NULL;
++            int *edge_len = (int *) NULL;
+             if (CClp_ncols (lp->lp) != lp->graph.ecount) {
+                 fprintf (stderr, "cudaee epoch: LP column-edge map mismatch\n");
+                 rval = 1;
+@@ -2174,21 +2175,24 @@ CLEANUP:
+             } else {
+                 edge_u = CC_SAFE_MALLOC (lp->graph.ecount, int);
+                 edge_v = CC_SAFE_MALLOC (lp->graph.ecount, int);
+-                if ((!edge_u || !edge_v) && lp->graph.ecount) {
++                edge_len = CC_SAFE_MALLOC (lp->graph.ecount, int);
++                if ((!edge_u || !edge_v || !edge_len) && lp->graph.ecount) {
+                     fprintf (stderr, "cudaee epoch: out of memory\n");
+                     rval = 1;
+                 } else {
+                     for (i = 0; i < lp->graph.ecount; i++) {
+                         edge_u[i] = lp->graph.edges[i].ends[0];
+                         edge_v[i] = lp->graph.edges[i].ends[1];
++                        edge_len[i] = lp->graph.edges[i].len;
+                     }
+                     rval = CClp_dump_lp_epoch (lp->lp, cudaee_epoch_out,
+-                               lp->graph.ecount, edge_u, edge_v);
++                               lp->graph.ecount, edge_u, edge_v, edge_len);
+                     if (rval) fprintf (stderr, "cudaee epoch export failed\n");
+                 }
+             }
+             CC_IFFREE (edge_u, int);
+             CC_IFFREE (edge_v, int);
++            CC_IFFREE (edge_len, int);
+             if (!rval && cudaee_solution_in && cudaee_solution_in[0]) {
+                 const char *wait_text = getenv ("CUDAEE_SIDECAR_TIMEOUT");
+                 if (wait_text && wait_text[0]) wait_limit = atoi (wait_text);

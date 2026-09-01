@@ -20,7 +20,13 @@ cuOpt 固定 Python wheel 提供共享库；自有 sidecar 通过 C API 动态�
 - 边映射要么完整，要么全部为 `-1`；
 - 内容哈希与规范化重算一致。
 
-Concorde patch 在 cut epoch 结束、模型稳定时调用 QSopt getters 导出；不得从 LP 文本反向猜测列身份。
+Concorde patch 在 cut epoch 结束、模型稳定时调用 QSopt getters 导出；不得从 LP 文本反向猜测列身份。列端点与整数目标来自 `lp->graph.edges[i]`，并在导出前用当前 QSopt primal 验证
+
+\[
+\sum_i c_i x_i = \texttt{QSget\_objval}.
+\]
+
+该检查解决了实测中 `QSget_obj` 返回数组不能复现当前 LP 目标的问题，同时把列重排错误变成 fail-closed。CSR、行方向和变量边界仍直接来自当前 QSopt 模型。
 
 ## cuOpt sidecar
 
@@ -38,19 +44,29 @@ Concorde patch 在 cut epoch 结束、模型稳定时调用 QSopt getters 导出
 
 ## Concorde exact pricing 接口
 
-补丁新增一个显式入口，将外部对偶按 Concorde 行顺序写入 `lp->exact_dual`。写入前比较 epoch 行哈希；写入后调用现有 `CCtsp_exact_price` 路径，遍历完整边域并减去所有负 reduced cost。输出：
+补丁新增一个显式入口，将外部对偶按 Concorde 行顺序写入 `lp->exact_dual`。入口要求 solution magic、`END`、模型哈希、`OPTIMAL`、`numerically_accepted=1` 和对偶行数全部匹配；非有限值、越界值和错误符号会被拒绝或按不等式方向裁剪。随后调用现有 `CCtsp_exact_price` 路径，强制遍历完整图并计入所有负 reduced cost 惩罚。
+
+`CUDAEE_CONCORDE_EXACT_V1` 当前输出：
 
 - exact lower bound；
-- 每个活动边的 exact reduced cost；
-- 上界来源及其证书哈希；
-- Concorde/QSopt/补丁版本。
+- `CCbigguy` 原始 words；
+- 完整图标记、对偶行数、模型哈希与当前上界。
 
-若 row mapping、cut 顺序或 complete-edge generator 不一致，入口必须拒绝继续。
+证书证明“本次受信 Concorde 进程已执行完整图定价”，尚不是脱离 Concorde 状态即可独立重放的证明；每边 exact reduced cost、版本清单和消元后边集仍属于 M3.1。`tools/run_concorde_cuopt_epoch.sh` 负责唯一目录、等待完整 epoch、临时解原子发布以及三方哈希检查。
+
+## 已验证结果与数值边界
+
+- 随机 20 点：25 行、43 列；cuOpt 与 QSopt 当前 LP 目标均为 `88`，primal violation `4.44e-15`，reduced-cost residual `1.57e-14`，完整图下界 `87.3932819641`，上界 `88`。
+- pr299：454 行、888 列、8561 nnz；cuOpt 模型目标 `48187.777777780764`，primal violation `8.37e-11`，reduced-cost residual `4.87e-10`；完整图下界 `43977.2693797 <= 48191`。
+- 人为把 solution 哈希替换为零：Concorde 非零退出，日志命中 hash gate，且不生成 exact certificate。
+
+pr299 的完整图下界明显弱于稀疏模型目标。这不是可行性残差问题，而是退化最优对偶在未激活完整图边上产生大量负 reduced cost。直接 dual simplex 实验可把下界提高到 `47891.4521198`，仍未与 QSopt 删除强度等价；PDLP crossover 在 cuOpt 26.8 的该模型上触发堆损坏，因此默认关闭。下一步必须做迭代补列或显式对偶稳定化，不能绕过 exact penalty。
 
 ## 集成测试
 
 - 2×3 整数小 LP：手算最优值与有理下界；
-- 同一 epoch 由 QSopt 与 cuOpt 求解，比较可行性和目标容差；
+- 同一 epoch 由 QSopt 与 cuOpt 求解，比较可行性和目标容差；已覆盖随机 20 点与 pr299；
 - 人为翻转一行方向，确保符号裁剪后下界仍有效；
 - 删除一个未激活列造成负 reduced cost，确保模型内证书不能被标为完整图证书；
-- pr299 一个 cut epoch 的导出—求解—精确定价往返。
+- pr299 一个 cut epoch 的导出—求解—精确定价往返；已覆盖；
+- 错配模型哈希必须拒绝且不落证书；已覆盖。
