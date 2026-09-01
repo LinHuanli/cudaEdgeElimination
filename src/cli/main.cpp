@@ -47,7 +47,7 @@ void PrintHelp() {
       << "                [--reply-backend auto|cpu|cuda]\n"
       << "                [--reply-frontier-batch-states N]\n"
       << "                [--leaf-frontier-batch-states N]\n"
-      << "                [--fuse-leaf-buckets 0|1]\n"
+      << "                [--fuse-leaf-buckets 0|1]（CPU leaf 默认 1，其余默认 0）\n"
       << "                [--cost-batch-size N] [--cuda-min-cost-cells N]\n"
       << "                [--path-append-backend auto|cpu|cuda]\n"
       << "                [--propagation-backend auto|cpu|cuda] [--propagation-blocks N]\n"
@@ -459,12 +459,17 @@ cudaee::HtRecursiveOptions ParseHtRecursiveOptions(const Arguments& arguments) {
 cudaee::HtWavefrontOptions
 ParseHtWavefrontOptions(const Arguments& arguments,
                         const cudaee::HtRecursiveOptions& search_options) {
+  // 三个中大实例的完整门禁都显示 CPU cost 路径从跨桶合批获益。
+  // auto/CUDA 仍保留原调度；显式参数始终覆盖这个后端感知默认值。
+  const bool default_fuse_leaf_buckets = search_options.root_options.leaf_options.cost_backend ==
+                                         cudaee::PathCompatibilityBackend::kCpu;
   return {.search_options = search_options,
           .reply_frontier_batch_states =
               OptionalInteger<std::uint32_t>(arguments, "reply-frontier-batch-states", 256U),
           .leaf_frontier_batch_states =
               OptionalInteger<std::uint32_t>(arguments, "leaf-frontier-batch-states", 256U),
-          .fuse_leaf_buckets = ParseBooleanOption(arguments, "fuse-leaf-buckets", false),
+          .fuse_leaf_buckets =
+              ParseBooleanOption(arguments, "fuse-leaf-buckets", default_fuse_leaf_buckets),
           .propagation_backend =
               ParsePathCompatibilityBackend(Optional(arguments, "propagation-backend", "auto")),
           .propagation_blocks = OptionalInteger<std::uint32_t>(arguments, "propagation-blocks", 0U),
@@ -553,6 +558,7 @@ bool HtProveCommand(const Arguments& arguments) {
   std::uint64_t leaf_cpu_parallel_cost_batches = 0;
   std::uint64_t leaf_cpu_parallel_cost_cells = 0;
   std::uint32_t peak_leaf_cpu_cost_threads = 1U;
+  bool fuse_leaf_buckets = false;
   std::uint64_t hamilton_reply_batches = 0;
   std::uint64_t hamilton_reply_centers = 0;
   std::uint64_t hamilton_reply_unique_centers = 0;
@@ -601,8 +607,11 @@ bool HtProveCommand(const Arguments& arguments) {
     search_status = result.status;
     proof = std::move(result.proof);
   } else if (scheduler == "wavefront") {
+    const cudaee::HtWavefrontOptions wavefront_options =
+        ParseHtWavefrontOptions(arguments, options);
+    fuse_leaf_buckets = wavefront_options.fuse_leaf_buckets;
     cudaee::HtWavefrontResult result =
-        cudaee::ProveEdgeByWavefrontHt(graph, target, ParseHtWavefrontOptions(arguments, options));
+        cudaee::ProveEdgeByWavefrontHt(graph, target, wavefront_options);
     search_status = result.status;
     proof = std::move(result.proof);
     propagation_backend = std::move(result.propagation_backend);
@@ -713,6 +722,7 @@ bool HtProveCommand(const Arguments& arguments) {
               << " path_append_cpu_verified=" << (path_append_cpu_verified ? 1 : 0)
               << " path_append_device_children_verified="
               << (path_append_device_children_verified ? 1 : 0)
+              << " fuse_leaf_buckets=" << (fuse_leaf_buckets ? 1 : 0)
               << " leaf_cost_backend=" << leaf_cost_backend
               << " leaf_cost_device=" << leaf_cost_selected_device
               << " leaf_cpu_verified=" << (leaf_cpu_verified ? 1 : 0)
@@ -1044,9 +1054,10 @@ void HtScanCommand(const Arguments& arguments) {
   std::cout << "scan_status=OK target_order=" << HtTargetOrderName(options.target_order)
             << " eligible=" << scan.eligible_targets << " attempted=" << scan.attempts.size()
             << " proven=" << scan.proven_targets << " unresolved=" << scan.unresolved_targets
-            << " committed=" << scan.elimination.proof.size() << " search_ms=" << scan.search_ms
-            << " work_graph_ms=" << scan.work_graph_ms << " leaf_ms=" << scan.leaf_ms
-            << " hamilton_reply_ms=" << scan.hamilton_reply_ms
+            << " committed=" << scan.elimination.proof.size()
+            << " fuse_leaf_buckets=" << (options.wavefront_options.fuse_leaf_buckets ? 1 : 0)
+            << " search_ms=" << scan.search_ms << " work_graph_ms=" << scan.work_graph_ms
+            << " leaf_ms=" << scan.leaf_ms << " hamilton_reply_ms=" << scan.hamilton_reply_ms
             << " propagation_ms=" << scan.propagation_ms << " commit_ms=" << scan.commit_ms
             << " total_ms=" << scan.total_ms
             << " protected_tour_checked=" << (protected_tour_report != nullptr ? 1 : 0) << '\n';

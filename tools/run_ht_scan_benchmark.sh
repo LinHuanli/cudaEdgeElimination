@@ -171,7 +171,8 @@ run_scan() {
       --tsp "${tsp}" --edges "${jv_edges}" --output "${output}" --proof "${proof}" \
       --report "${report}" "${tour_arguments[@]}" "${ht_arguments[@]}" \
       --backend cpu --reply-backend cpu --path-append-backend cpu \
-      --propagation-backend cpu >"${stdout_file}" 2>"${stderr_file}"
+      --propagation-backend cpu --fuse-leaf-buckets 0 \
+      >"${stdout_file}" 2>"${stderr_file}"
   fi
   end_ns="$(date +%s%N)"
   awk -v first="${start_ns}" -v last="${end_ns}" \

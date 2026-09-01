@@ -137,6 +137,7 @@ add_test(
     --max-point-candidates 5
     --max-end-candidates 5)
 set_tests_properties(integration.ht_wavefront_prove PROPERTIES
+  PASS_REGULAR_EXPRESSION "fuse_leaf_buckets=1"
   LABELS "integration;hamilton-tutte;wavefront")
 
 add_test(
@@ -162,6 +163,7 @@ if(CUDAEE_ENABLE_CUDA)
       --scheduler wavefront
       --backend cpu
       --leaf-backend cuda
+      --fuse-leaf-buckets 0
       --reply-backend cpu
       --path-append-backend cpu
       --propagation-backend cpu
@@ -178,7 +180,7 @@ if(CUDAEE_ENABLE_CUDA)
       --max-point-candidates 5
       --max-end-candidates 5)
   set_tests_properties(integration.ht_wavefront_hybrid_prove PROPERTIES
-    PASS_REGULAR_EXPRESSION "leaf_cost_backend=cuda"
+    PASS_REGULAR_EXPRESSION "fuse_leaf_buckets=0 leaf_cost_backend=cuda"
     LABELS "integration;hamilton-tutte;wavefront;gpu")
 
   add_test(
@@ -250,6 +252,7 @@ add_test(
     --max-point-candidates 5
     --max-end-candidates 5)
 set_tests_properties(integration.ht_scan PROPERTIES
+  PASS_REGULAR_EXPRESSION "fuse_leaf_buckets=1"
   LABELS "integration;hamilton-tutte;scan")
 
 add_test(
