@@ -43,4 +43,4 @@ point/end task 分别形成一个展平数组；candidate 保存数组起点，r
 
 ## 后续
 
-设备端 append-only [规范 child edge SoA](15_Hamilton_Tutte_GPU_Child_Edge_SoA.md) 已完成；后续 [frontier leaf batching](16_Hamilton_Tutte_Frontier_Leaf_Batching.md) 与[增量 leaf 游标](17_Hamilton_Tutte_Incremental_Leaf_Cursors.md)也已按复杂度分桶并融合一般 cost blocks。设备快照缓存、多 block continuation 和 CPU long-tail 必须在独立 V1 proof 等价门禁下逐项加入。
+设备端 append-only [规范 child edge SoA](15_Hamilton_Tutte_GPU_Child_Edge_SoA.md) 已完成；后续 [frontier leaf batching](16_Hamilton_Tutte_Frontier_Leaf_Batching.md)、[增量 leaf 游标](17_Hamilton_Tutte_Incremental_Leaf_Cursors.md)和 [GPU leaf 驻留缓存](18_Hamilton_Tutte_GPU_Leaf_Cache.md)也已完成。多 block continuation 和 CPU long-tail 必须在独立 V1 proof 等价门禁下逐项加入。

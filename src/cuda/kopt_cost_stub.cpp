@@ -13,8 +13,11 @@ bool KOptCostCudaAvailable(std::string* const reason) {
 
 std::vector<std::int64_t> EvaluateKOptTemplateCostsCuda(const GraphSnapshot&,
                                                         const KOptReconnectTable&,
-                                                        const std::vector<KOptCostTask>&, int*) {
+                                                        const std::vector<KOptCostTask>&, int*,
+                                                        KOptCudaCacheUsage*) {
   throw std::runtime_error("当前二进制未编译 CUDA k-opt cost 后端");
 }
+
+void ClearKOptCostCudaCache() {}
 
 } // namespace cudaee::detail

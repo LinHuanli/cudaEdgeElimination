@@ -2,12 +2,16 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
+#include <array>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cudaee::detail {
@@ -21,42 +25,112 @@ void CheckCuda(const cudaError_t status, const char* const operation) {
 
 template <typename T> class DeviceBuffer {
 public:
-  explicit DeviceBuffer(const std::size_t count) : count_(count) {
-    if (count_ != 0) {
+  DeviceBuffer() = default;
+
+  DeviceBuffer(const std::size_t count, const int device) : device_(device), count_(count) {
+    if (count_ != 0U) {
+      if (count_ > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+        throw std::overflow_error("CUDA k-opt buffer 字节数溢出");
+      }
+      CheckCuda(cudaSetDevice(device_), "cudaSetDevice(k-opt buffer allocate)");
       CheckCuda(cudaMalloc(&data_, sizeof(T) * count_), "cudaMalloc(k-opt cost)");
     }
   }
 
-  ~DeviceBuffer() {
-    if (data_ != nullptr) {
-      cudaFree(data_);
-    }
-  }
+  ~DeviceBuffer() { Reset(); }
 
   DeviceBuffer(const DeviceBuffer&) = delete;
   DeviceBuffer& operator=(const DeviceBuffer&) = delete;
 
+  DeviceBuffer(DeviceBuffer&& other) noexcept { MoveFrom(&other); }
+
+  DeviceBuffer& operator=(DeviceBuffer&& other) noexcept {
+    if (this != &other) {
+      Reset();
+      MoveFrom(&other);
+    }
+    return *this;
+  }
+
   [[nodiscard]] T* get() { return data_; }
   [[nodiscard]] const T* get() const { return data_; }
+  [[nodiscard]] std::size_t count() const { return count_; }
+  [[nodiscard]] std::uint64_t bytes() const {
+    return static_cast<std::uint64_t>(count_) * sizeof(T);
+  }
 
-  void CopyFromHost(const T* const source) {
-    if (count_ != 0) {
-      CheckCuda(cudaMemcpy(data_, source, sizeof(T) * count_, cudaMemcpyHostToDevice),
+  void CopyFromHost(const T* const source, const std::size_t count) {
+    if (count > count_) {
+      throw std::logic_error("CUDA k-opt H2D 超出驻留 buffer");
+    }
+    if (count != 0U) {
+      CheckCuda(cudaSetDevice(device_), "cudaSetDevice(k-opt H2D)");
+      CheckCuda(cudaMemcpy(data_, source, sizeof(T) * count, cudaMemcpyHostToDevice),
                 "cudaMemcpy H2D(k-opt cost)");
     }
   }
 
-  void CopyToHost(T* const destination) const {
-    if (count_ != 0) {
-      CheckCuda(cudaMemcpy(destination, data_, sizeof(T) * count_, cudaMemcpyDeviceToHost),
+  void CopyToHost(T* const destination, const std::size_t count) const {
+    if (count > count_) {
+      throw std::logic_error("CUDA k-opt D2H 超出驻留 buffer");
+    }
+    if (count != 0U) {
+      CheckCuda(cudaSetDevice(device_), "cudaSetDevice(k-opt D2H)");
+      CheckCuda(cudaMemcpy(destination, data_, sizeof(T) * count, cudaMemcpyDeviceToHost),
                 "cudaMemcpy D2H(k-opt cost)");
     }
   }
 
 private:
+  void Reset() noexcept {
+    if (data_ != nullptr) {
+      // 析构路径不能抛异常；owner device 防止释放另一个 CUDA context 的指针。
+      static_cast<void>(cudaSetDevice(device_));
+      static_cast<void>(cudaFree(data_));
+    }
+    data_ = nullptr;
+    device_ = -1;
+    count_ = 0U;
+  }
+
+  void MoveFrom(DeviceBuffer* const other) noexcept {
+    data_ = other->data_;
+    device_ = other->device_;
+    count_ = other->count_;
+    other->data_ = nullptr;
+    other->device_ = -1;
+    other->count_ = 0U;
+  }
+
   T* data_{nullptr};
+  int device_{-1};
   std::size_t count_{};
 };
+
+struct KOptTemplateDeviceCache {
+  std::uint32_t k{};
+  std::uint64_t generator_hash{};
+  std::vector<EndpointMatching> host_templates;
+  DeviceBuffer<EndpointMatching> device_templates;
+};
+
+struct KOptDeviceCache {
+  explicit KOptDeviceCache(const int selected_device) : device(selected_device) {}
+
+  int device{-1};
+  std::int32_t dimension{};
+  DistanceType distance_type{DistanceType::kEuc2D};
+  std::vector<std::int64_t> host_x;
+  std::vector<std::int64_t> host_y;
+  DeviceBuffer<std::int64_t> device_x;
+  DeviceBuffer<std::int64_t> device_y;
+  std::array<KOptTemplateDeviceCache, 3U> templates;
+  DeviceBuffer<KOptCostTask> device_tasks;
+  DeviceBuffer<std::int64_t> device_costs;
+};
+
+thread_local std::vector<std::unique_ptr<KOptDeviceCache>> g_kopt_device_caches;
+thread_local int g_kopt_preferred_device = -1;
 
 int SelectDevice(std::string* const reason) {
   int device_count = 0;
@@ -68,6 +142,11 @@ int SelectDevice(std::string* const reason) {
     }
     return -1;
   }
+  if (g_kopt_preferred_device >= 0 && g_kopt_preferred_device < device_count &&
+      cudaSetDevice(g_kopt_preferred_device) == cudaSuccess) {
+    return g_kopt_preferred_device;
+  }
+  g_kopt_preferred_device = -1;
   int best_device = -1;
   std::size_t best_free_bytes = 0;
   for (int device = 0; device < device_count; ++device) {
@@ -89,7 +168,111 @@ int SelectDevice(std::string* const reason) {
     return -1;
   }
   CheckCuda(cudaSetDevice(best_device), "cudaSetDevice(k-opt cost)");
+  g_kopt_preferred_device = best_device;
   return best_device;
+}
+
+KOptDeviceCache& CacheForDevice(const int device) {
+  const auto iterator = std::find_if(
+      g_kopt_device_caches.begin(), g_kopt_device_caches.end(),
+      [device](const std::unique_ptr<KOptDeviceCache>& cache) { return cache->device == device; });
+  if (iterator != g_kopt_device_caches.end()) {
+    return **iterator;
+  }
+  g_kopt_device_caches.push_back(std::make_unique<KOptDeviceCache>(device));
+  return *g_kopt_device_caches.back();
+}
+
+bool SnapshotMatches(const KOptDeviceCache& cache, const GraphSnapshot& graph) {
+  if (cache.dimension != graph.dimension || cache.distance_type != graph.distance_type ||
+      cache.host_x.size() != graph.points.size() || cache.host_y.size() != graph.points.size()) {
+    return false;
+  }
+  // kernel 不读取活动边；逐坐标比较其完整依赖既避免哈希碰撞，也不扫描无关边表。
+  for (std::size_t index = 0U; index < graph.points.size(); ++index) {
+    if (cache.host_x[index] != graph.points[index].integer_x ||
+        cache.host_y[index] != graph.points[index].integer_y) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool PrepareSnapshot(KOptDeviceCache* const cache, const GraphSnapshot& graph) {
+  if (SnapshotMatches(*cache, graph)) {
+    return true;
+  }
+
+  std::vector<std::int64_t> host_x(graph.points.size());
+  std::vector<std::int64_t> host_y(graph.points.size());
+  for (std::size_t index = 0U; index < graph.points.size(); ++index) {
+    host_x[index] = graph.points[index].integer_x;
+    host_y[index] = graph.points[index].integer_y;
+  }
+  DeviceBuffer<std::int64_t> device_x(host_x.size(), cache->device);
+  DeviceBuffer<std::int64_t> device_y(host_y.size(), cache->device);
+  device_x.CopyFromHost(host_x.data(), host_x.size());
+  device_y.CopyFromHost(host_y.data(), host_y.size());
+
+  cache->device_x = std::move(device_x);
+  cache->device_y = std::move(device_y);
+  cache->host_x = std::move(host_x);
+  cache->host_y = std::move(host_y);
+  cache->dimension = graph.dimension;
+  cache->distance_type = graph.distance_type;
+  return false;
+}
+
+bool PrepareTemplates(KOptDeviceCache* const cache, const KOptReconnectTable& table) {
+  KOptTemplateDeviceCache& entry = cache->templates[static_cast<std::size_t>(table.k - 3U)];
+  if (entry.k == table.k && entry.generator_hash == table.generator_hash &&
+      entry.host_templates == table.templates) {
+    return true;
+  }
+
+  DeviceBuffer<EndpointMatching> device_templates(table.templates.size(), cache->device);
+  device_templates.CopyFromHost(table.templates.data(), table.templates.size());
+  entry.device_templates = std::move(device_templates);
+  entry.host_templates = table.templates;
+  entry.k = table.k;
+  entry.generator_hash = table.generator_hash;
+  return false;
+}
+
+std::size_t GrowthCapacity(const std::size_t current, const std::size_t required) {
+  if (current >= required) {
+    return current;
+  }
+  if (current == 0U || current > std::numeric_limits<std::size_t>::max() / 2U) {
+    return required;
+  }
+  return std::max(required, current * 2U);
+}
+
+bool PrepareWorkspace(KOptDeviceCache* const cache, const std::size_t task_count,
+                      const std::size_t cell_count) {
+  const bool hit =
+      cache->device_tasks.count() >= task_count && cache->device_costs.count() >= cell_count;
+  if (cache->device_tasks.count() < task_count) {
+    DeviceBuffer<KOptCostTask> tasks(GrowthCapacity(cache->device_tasks.count(), task_count),
+                                     cache->device);
+    cache->device_tasks = std::move(tasks);
+  }
+  if (cache->device_costs.count() < cell_count) {
+    DeviceBuffer<std::int64_t> costs(GrowthCapacity(cache->device_costs.count(), cell_count),
+                                     cache->device);
+    cache->device_costs = std::move(costs);
+  }
+  return hit;
+}
+
+std::uint64_t ResidentBytes(const KOptDeviceCache& cache) {
+  std::uint64_t bytes = cache.device_x.bytes() + cache.device_y.bytes() +
+                        cache.device_tasks.bytes() + cache.device_costs.bytes();
+  for (const KOptTemplateDeviceCache& entry : cache.templates) {
+    bytes += entry.device_templates.bytes();
+  }
+  return bytes;
 }
 
 __device__ std::uint64_t IntegerSqrtFloorDevice(const std::uint64_t value) {
@@ -213,7 +396,11 @@ bool KOptCostCudaAvailable(std::string* const reason) { return SelectDevice(reas
 std::vector<std::int64_t> EvaluateKOptTemplateCostsCuda(const GraphSnapshot& graph,
                                                         const KOptReconnectTable& table,
                                                         const std::vector<KOptCostTask>& tasks,
-                                                        int* const selected_device) {
+                                                        int* const selected_device,
+                                                        KOptCudaCacheUsage* const cache_usage) {
+  if (cache_usage != nullptr) {
+    *cache_usage = {};
+  }
   std::string reason;
   const int device = SelectDevice(&reason);
   if (device < 0) {
@@ -225,6 +412,9 @@ std::vector<std::int64_t> EvaluateKOptTemplateCostsCuda(const GraphSnapshot& gra
   if (tasks.empty()) {
     return {};
   }
+  if (table.k < 3U || table.k > 5U || table.templates.empty()) {
+    throw std::invalid_argument("CUDA k-opt reconnect table 非法");
+  }
 
   const std::size_t cell_count = tasks.size() * table.templates.size();
   constexpr std::size_t kThreads = 256;
@@ -232,34 +422,34 @@ std::vector<std::int64_t> EvaluateKOptTemplateCostsCuda(const GraphSnapshot& gra
   if (blocks > std::numeric_limits<unsigned int>::max()) {
     throw std::overflow_error("CUDA k-opt cost 网格过大");
   }
-  std::vector<std::int64_t> host_x(graph.points.size());
-  std::vector<std::int64_t> host_y(graph.points.size());
-  for (std::size_t index = 0; index < graph.points.size(); ++index) {
-    host_x[index] = graph.points[index].integer_x;
-    host_y[index] = graph.points[index].integer_y;
-  }
 
-  DeviceBuffer<KOptCostTask> device_tasks(tasks.size());
-  DeviceBuffer<EndpointMatching> device_templates(table.templates.size());
-  DeviceBuffer<std::int64_t> device_x(host_x.size());
-  DeviceBuffer<std::int64_t> device_y(host_y.size());
-  DeviceBuffer<std::int64_t> device_costs(cell_count);
-  device_tasks.CopyFromHost(tasks.data());
-  device_templates.CopyFromHost(table.templates.data());
-  device_x.CopyFromHost(host_x.data());
-  device_y.CopyFromHost(host_y.data());
+  KOptDeviceCache& cache = CacheForDevice(device);
+  const bool snapshot_hit = PrepareSnapshot(&cache, graph);
+  const bool template_hit = PrepareTemplates(&cache, table);
+  const bool workspace_hit = PrepareWorkspace(&cache, tasks.size(), cell_count);
+  cache.device_tasks.CopyFromHost(tasks.data(), tasks.size());
 
   KOptTemplateCostsKernel<<<static_cast<unsigned int>(blocks),
                             static_cast<unsigned int>(kThreads)>>>(
-      table.k, device_tasks.get(), tasks.size(), device_templates.get(),
-      static_cast<std::uint32_t>(table.templates.size()), device_x.get(), device_y.get(),
-      static_cast<std::uint8_t>(graph.distance_type), device_costs.get());
+      table.k, cache.device_tasks.get(), tasks.size(),
+      cache.templates[static_cast<std::size_t>(table.k - 3U)].device_templates.get(),
+      static_cast<std::uint32_t>(table.templates.size()), cache.device_x.get(),
+      cache.device_y.get(), static_cast<std::uint8_t>(graph.distance_type),
+      cache.device_costs.get());
   CheckCuda(cudaGetLastError(), "KOptTemplateCostsKernel launch");
   CheckCuda(cudaDeviceSynchronize(), "KOptTemplateCostsKernel synchronize");
 
   std::vector<std::int64_t> costs(cell_count);
-  device_costs.CopyToHost(costs.data());
+  cache.device_costs.CopyToHost(costs.data(), costs.size());
+  if (cache_usage != nullptr) {
+    cache_usage->snapshot_hit = snapshot_hit;
+    cache_usage->template_hit = template_hit;
+    cache_usage->workspace_hit = workspace_hit;
+    cache_usage->resident_bytes = ResidentBytes(cache);
+  }
   return costs;
 }
+
+void ClearKOptCostCudaCache() { g_kopt_device_caches.clear(); }
 
 } // namespace cudaee::detail

@@ -404,6 +404,11 @@ bool HtProveCommand(const Arguments& arguments) {
   std::uint64_t leaf_cost_tasks = 0;
   std::uint64_t leaf_cost_cells = 0;
   std::uint64_t leaf_scalar_searches = 0;
+  std::uint64_t leaf_cuda_cost_batches = 0;
+  std::uint64_t leaf_snapshot_cache_hits = 0;
+  std::uint64_t leaf_template_cache_hits = 0;
+  std::uint64_t leaf_workspace_cache_hits = 0;
+  std::uint64_t peak_leaf_device_cache_bytes = 0;
   std::uint64_t hamilton_reply_batches = 0;
   std::uint64_t hamilton_reply_centers = 0;
   std::uint64_t hamilton_replies_generated = 0;
@@ -461,6 +466,11 @@ bool HtProveCommand(const Arguments& arguments) {
     leaf_cost_tasks = result.leaf_cost_tasks;
     leaf_cost_cells = result.leaf_cost_cells;
     leaf_scalar_searches = result.leaf_scalar_searches;
+    leaf_cuda_cost_batches = result.leaf_cuda_cost_batches;
+    leaf_snapshot_cache_hits = result.leaf_snapshot_cache_hits;
+    leaf_template_cache_hits = result.leaf_template_cache_hits;
+    leaf_workspace_cache_hits = result.leaf_workspace_cache_hits;
+    peak_leaf_device_cache_bytes = result.peak_leaf_device_cache_bytes;
     hamilton_reply_batches = result.hamilton_reply_batches;
     hamilton_reply_centers = result.hamilton_reply_centers;
     hamilton_replies_generated = result.hamilton_replies_generated;
@@ -509,6 +519,11 @@ bool HtProveCommand(const Arguments& arguments) {
               << " leaf_cost_batches=" << leaf_cost_batches
               << " leaf_cost_tasks=" << leaf_cost_tasks << " leaf_cost_cells=" << leaf_cost_cells
               << " leaf_scalar_searches=" << leaf_scalar_searches
+              << " leaf_cuda_cost_batches=" << leaf_cuda_cost_batches
+              << " leaf_snapshot_cache_hits=" << leaf_snapshot_cache_hits
+              << " leaf_template_cache_hits=" << leaf_template_cache_hits
+              << " leaf_workspace_cache_hits=" << leaf_workspace_cache_hits
+              << " peak_leaf_device_cache_bytes=" << peak_leaf_device_cache_bytes
               << " reply_backend=" << hamilton_reply_backend
               << " reply_device=" << hamilton_reply_selected_device
               << " reply_batches=" << hamilton_reply_batches

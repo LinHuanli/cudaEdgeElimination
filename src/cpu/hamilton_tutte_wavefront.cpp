@@ -868,6 +868,13 @@ void RecordLeafBatch(WaveBuildContext* const context, const PathSystemKOptBatchR
   AddLeafMetric(&result.leaf_cost_tasks, batch.cost_tasks, "cost tasks");
   AddLeafMetric(&result.leaf_cost_cells, batch.cost_cells, "cost cells");
   AddLeafMetric(&result.leaf_scalar_searches, batch.scalar_searches, "scalar searches");
+  AddLeafMetric(&result.leaf_cuda_cost_batches, batch.cuda_cost_batches, "CUDA cost batches");
+  AddLeafMetric(&result.leaf_snapshot_cache_hits, batch.snapshot_cache_hits, "snapshot cache hits");
+  AddLeafMetric(&result.leaf_template_cache_hits, batch.template_cache_hits, "template cache hits");
+  AddLeafMetric(&result.leaf_workspace_cache_hits, batch.workspace_cache_hits,
+                "workspace cache hits");
+  result.peak_leaf_device_cache_bytes =
+      std::max(result.peak_leaf_device_cache_bytes, batch.peak_device_cache_bytes);
   if (batch.cost_backend != "none") {
     if (result.leaf_cost_backend == "none") {
       result.leaf_cost_backend = batch.cost_backend;

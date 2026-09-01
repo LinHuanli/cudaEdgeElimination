@@ -136,6 +136,15 @@ void TestKOptCostMatrixCpuCuda() {
   }
   const cudaee::GraphSnapshot graph = MakeGraph(points);
   constexpr std::array<std::size_t, 3> kExpectedTemplateCounts = {4, 25, 208};
+#ifdef CUDAEE_HAS_CUDA
+  std::string unavailable_reason;
+  const bool cuda_available = cudaee::detail::KOptCostCudaAvailable(&unavailable_reason);
+  if (cuda_available) {
+    cudaee::detail::ClearKOptCostCudaCache();
+  } else {
+    std::cout << "CUDA k-opt cost skipped: " << unavailable_reason << '\n';
+  }
+#endif
   for (std::uint32_t k = 3; k <= 5; ++k) {
     std::vector<cudaee::KOptCostTask> tasks(3);
     for (std::uint32_t port = 0; port < 2U * k; ++port) {
@@ -161,15 +170,23 @@ void TestKOptCostMatrixCpuCuda() {
           "CPU k-opt cost matrix shape");
 
 #ifdef CUDAEE_HAS_CUDA
-    std::string unavailable_reason;
-    if (cudaee::detail::KOptCostCudaAvailable(&unavailable_reason)) {
+    if (cuda_available) {
       const cudaee::KOptCostBatchResult gpu = cudaee::EvaluateKOptTemplateCosts(
           graph, k, tasks, cudaee::PathCompatibilityBackend::kCuda);
       Check(gpu.backend == "cuda", "CUDA k-opt cost backend");
       Check(gpu.selected_device >= 0, "CUDA k-opt cost selected device");
       Check(gpu.added_costs == cpu.added_costs, "CPU/CUDA k-opt cost matrices are exact");
-    } else {
-      std::cout << "CUDA k-opt cost skipped: " << unavailable_reason << '\n';
+      Check(gpu.cuda_cache.snapshot_hit == (k != 3U) && !gpu.cuda_cache.template_hit &&
+                !gpu.cuda_cache.workspace_hit && gpu.cuda_cache.resident_bytes > 0U,
+            "CUDA k-opt cache records first snapshot/template/workspace uploads");
+      if (k == 3U) {
+        const cudaee::KOptCostBatchResult cached = cudaee::EvaluateKOptTemplateCosts(
+            graph, k, tasks, cudaee::PathCompatibilityBackend::kCuda);
+        Check(cached.added_costs == cpu.added_costs && cached.cuda_cache.snapshot_hit &&
+                  cached.cuda_cache.template_hit && cached.cuda_cache.workspace_hit &&
+                  cached.cuda_cache.resident_bytes == gpu.cuda_cache.resident_bytes,
+              "repeated CUDA k-opt batch reuses the exact resident snapshot and workspace");
+      }
     }
 #endif
   }
@@ -184,12 +201,15 @@ void TestKOptCostMatrixCpuCuda() {
   const cudaee::KOptCostBatchResult ceil_cpu = cudaee::EvaluateKOptTemplateCosts(
       ceil_graph, 5, ceil_tasks, cudaee::PathCompatibilityBackend::kCpu);
 #ifdef CUDAEE_HAS_CUDA
-  std::string ceil_unavailable_reason;
-  if (cudaee::detail::KOptCostCudaAvailable(&ceil_unavailable_reason)) {
+  if (cuda_available) {
     const cudaee::KOptCostBatchResult ceil_gpu = cudaee::EvaluateKOptTemplateCosts(
         ceil_graph, 5, ceil_tasks, cudaee::PathCompatibilityBackend::kCuda);
     Check(ceil_gpu.added_costs == ceil_cpu.added_costs,
           "CPU/CUDA CEIL_2D k-opt cost matrices are exact");
+    Check(!ceil_gpu.cuda_cache.snapshot_hit && ceil_gpu.cuda_cache.template_hit &&
+              ceil_gpu.cuda_cache.workspace_hit,
+          "distance-type change refreshes only the CUDA graph snapshot");
+    cudaee::detail::ClearKOptCostCudaCache();
   }
 #endif
 }
@@ -447,6 +467,13 @@ void TestNoImprovementAndBudget() {
       .max_k = 5, .cost_backend = cudaee::PathCompatibilityBackend::kAuto, .cost_batch_size = 2};
   const cudaee::PathSystemKOptProof scalar_cursor = cudaee::ProvePathSystemByKOpt(
       seven_node_graph, seven_node_paths, cudaee::NodeEdge{0, 1}, cursor_options);
+#ifdef CUDAEE_HAS_CUDA
+  std::string cursor_cuda_reason;
+  const bool cursor_cuda_available = cudaee::detail::KOptCostCudaAvailable(&cursor_cuda_reason);
+  if (cursor_cuda_available) {
+    cudaee::detail::ClearKOptCostCudaCache();
+  }
+#endif
   const cudaee::PathSystemKOptBatchResult cursor_batch =
       cudaee::ProvePathSystemsByKOpt(seven_node_graph, {seven_node_paths, seven_node_paths},
                                      cudaee::NodeEdge{0, 1}, cursor_options);
@@ -459,6 +486,16 @@ void TestNoImprovementAndBudget() {
             cudaee::SerializePathSystemKOptProof(cursor_batch.proofs[1]) ==
                 cudaee::SerializePathSystemKOptProof(scalar_cursor),
         "incremental leaf cursors fuse all 3/4/5 deletion blocks without changing proof bytes");
+#ifdef CUDAEE_HAS_CUDA
+  if (cursor_cuda_available) {
+    Check(cursor_batch.cuda_cost_batches == cursor_batch.cost_batches &&
+              cursor_batch.snapshot_cache_hits + 1U == cursor_batch.cuda_cost_batches &&
+              cursor_batch.template_cache_hits + 3U == cursor_batch.cuda_cost_batches &&
+              cursor_batch.workspace_cache_hits + 3U == cursor_batch.cuda_cost_batches &&
+              cursor_batch.peak_device_cache_bytes > 0U,
+          "incremental leaf batches expose one snapshot and three template/workspace uploads");
+  }
+#endif
 
   cudaee::KOptSearchOptions budget_cursor_options = cursor_options;
   budget_cursor_options.max_deletion_sets = 3;

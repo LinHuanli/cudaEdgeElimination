@@ -23,5 +23,6 @@
 19. [Hamilton–Tutte GPU 规范 child edge SoA](research/15_Hamilton_Tutte_GPU_Child_Edge_SoA.md)：设备端 count/write、规范边 CSR 与 CPU 全数组认证。
 20. [Hamilton–Tutte frontier leaf batching](research/16_Hamilton_Tutte_Frontier_Leaf_Batching.md)：确定性复杂度桶、跨状态 k-opt cost row 融合与 scalar long-tail。
 21. [Hamilton–Tutte 增量 leaf cost 游标](research/17_Hamilton_Tutte_Incremental_Leaf_Cursors.md)：一般 deletion 预算、分段组合游标与无投机跨 leaf 融合。
+22. [Hamilton–Tutte GPU leaf 驻留缓存](research/18_Hamilton_Tutte_GPU_Leaf_Cache.md)：精确快照/模板键、增长型工作区与可观测命中指标。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

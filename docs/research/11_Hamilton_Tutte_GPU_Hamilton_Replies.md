@@ -56,4 +56,4 @@ point 候选先按目标边中点距离形成候选中心列表，再批量枚�
 
 ## 未完成项
 
-M4.3b3b2a2 已把 end move 的 CSR 提取迁到同一 CUDA 模块，见 [GPU end replies](12_Hamilton_Tutte_GPU_End_Replies.md)；M4.3b3b2b1/b2a 已把 reply 与 path-append 任务跨同层 chunk 合并。M4.3b3b2b2b1 又完成设备端规范 child edge SoA，M4.3b3b2b2b2a/b1 已按桶融合一般预算的增量 leaf cost blocks；`NormalizedPathSystem` 和工作图所有权仍在主机。下一阶段加入设备缓存、多 block continuation 和 CPU long-tail。所有设备输出继续先通过 CPU 全量差分，直至独立证书重放与 epoch commit 链路完成。
+M4.3b3b2a2 已把 end move 的 CSR 提取迁到同一 CUDA 模块，见 [GPU end replies](12_Hamilton_Tutte_GPU_End_Replies.md)；M4.3b3b2b1/b2a 已把 reply 与 path-append 任务跨同层 chunk 合并。M4.3b3b2b2b1 又完成设备端规范 child edge SoA，M4.3b3b2b2b2a/b1 已按桶融合一般预算的增量 leaf cost blocks，b2a 已加入 leaf 驻留缓存；`NormalizedPathSystem` 和工作图所有权仍在主机。下一阶段加入多 block continuation 和 CPU long-tail。所有设备输出继续先通过 CPU 全量差分，直至独立证书重放与 epoch commit 链路完成。

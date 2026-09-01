@@ -770,8 +770,8 @@ KOptCostBatchResult EvaluateKOptTemplateCosts(const GraphSnapshot& graph, const 
     if (!detail::KOptCostCudaAvailable(&reason)) {
       throw std::runtime_error("CUDA k-opt cost 后端不可用: " + reason);
     }
-    result.added_costs =
-        detail::EvaluateKOptTemplateCostsCuda(graph, table, tasks, &result.selected_device);
+    result.added_costs = detail::EvaluateKOptTemplateCostsCuda(
+        graph, table, tasks, &result.selected_device, &result.cuda_cache);
     result.backend = "cuda";
   } else {
     result.added_costs.reserve(tasks.size() * table.templates.size());
@@ -1721,6 +1721,21 @@ void RecordKOptBatchBackend(PathSystemKOptBatchResult* const result, const std::
   }
 }
 
+void RecordKOptCudaCache(PathSystemKOptBatchResult* const result,
+                         const KOptCostBatchResult& costs) {
+  if (costs.backend != "cuda") {
+    return;
+  }
+  if (!AddWithoutOverflow(&result->cuda_cost_batches, 1U) ||
+      (costs.cuda_cache.snapshot_hit && !AddWithoutOverflow(&result->snapshot_cache_hits, 1U)) ||
+      (costs.cuda_cache.template_hit && !AddWithoutOverflow(&result->template_cache_hits, 1U)) ||
+      (costs.cuda_cache.workspace_hit && !AddWithoutOverflow(&result->workspace_cache_hits, 1U))) {
+    throw std::overflow_error("path-system k-opt CUDA cache 统计溢出");
+  }
+  result->peak_device_cache_bytes =
+      std::max(result->peak_device_cache_bytes, costs.cuda_cache.resident_bytes);
+}
+
 } // namespace
 
 PathSystemKOptBatchResult ProvePathSystemsByKOpt(
@@ -1831,6 +1846,7 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
           throw std::overflow_error("path-system k-opt batch cost cell 统计溢出");
         }
         RecordKOptBatchBackend(&result, costs.backend, costs.selected_device);
+        RecordKOptCudaCache(&result, costs);
         if (costs.template_count == 0U ||
             costs.added_costs.size() != cost_tasks.size() * costs.template_count) {
           throw std::logic_error("path-system k-opt batch cost 矩阵规模错误");

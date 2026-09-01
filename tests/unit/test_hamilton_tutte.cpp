@@ -756,6 +756,7 @@ void TestRecursivePointProof() {
     cudaee::HtRecursiveOptions cuda_wavefront_options = options;
     cuda_wavefront_options.root_options.leaf_options.cost_backend =
         cudaee::PathCompatibilityBackend::kCuda;
+    cudaee::detail::ClearKOptCostCudaCache();
     const cudaee::HtWavefrontResult cuda_wavefront = cudaee::ProveEdgeByWavefrontHt(
         graph, {2, 4},
         {.search_options = cuda_wavefront_options,
@@ -777,6 +778,13 @@ void TestRecursivePointProof() {
               cuda_wavefront.leaf_cost_batches > 0U && cuda_wavefront.leaf_cost_tasks > 0U &&
               cuda_wavefront.leaf_cost_cells == 4U * cuda_wavefront.leaf_cost_tasks,
           "CUDA wavefront fuses CPU-verified 3-opt leaf cost rows");
+    Check(
+        cuda_wavefront.leaf_cuda_cost_batches == cuda_wavefront.leaf_cost_batches &&
+            cuda_wavefront.leaf_snapshot_cache_hits + 1U == cuda_wavefront.leaf_cuda_cost_batches &&
+            cuda_wavefront.leaf_template_cache_hits + 1U == cuda_wavefront.leaf_cuda_cost_batches &&
+            cuda_wavefront.leaf_workspace_cache_hits <= cuda_wavefront.leaf_cuda_cost_batches &&
+            cuda_wavefront.peak_leaf_device_cache_bytes > 0U,
+        "CUDA wavefront uploads one snapshot/template and reports bounded workspace reuse");
     const cudaee::HtWavefrontResult cuda_single_leaf = cudaee::ProveEdgeByWavefrontHt(
         graph, {2, 4},
         {.search_options = cuda_wavefront_options,
@@ -791,6 +799,11 @@ void TestRecursivePointProof() {
               cuda_single_leaf.leaf_cost_tasks == cuda_wavefront.leaf_cost_tasks &&
               cuda_single_leaf.leaf_cost_cells == cuda_wavefront.leaf_cost_cells,
           "CUDA leaf fusion preserves proof bytes and complete cost work");
+    Check(cuda_single_leaf.leaf_snapshot_cache_hits == cuda_single_leaf.leaf_cuda_cost_batches &&
+              cuda_single_leaf.leaf_template_cache_hits ==
+                  cuda_single_leaf.leaf_cuda_cost_batches &&
+              cuda_single_leaf.leaf_workspace_cache_hits == cuda_single_leaf.leaf_cuda_cost_batches,
+          "subsequent CUDA leaf run fully reuses snapshot, template and workspace caches");
     Check(cuda_wavefront.hamilton_reply_backend == "cuda" &&
               cuda_wavefront.hamilton_reply_selected_device >= 0 &&
               cuda_wavefront.hamilton_reply_cpu_verified &&

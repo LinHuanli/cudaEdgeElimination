@@ -54,12 +54,20 @@ struct KOptCostTask {
   std::int64_t deleted_cost{};
 };
 
+struct KOptCudaCacheUsage {
+  bool snapshot_hit{false};
+  bool template_hit{false};
+  bool workspace_hit{false};
+  std::uint64_t resident_bytes{};
+};
+
 struct KOptCostBatchResult {
   std::uint32_t k{};
   std::uint32_t template_count{};
   std::vector<std::int64_t> added_costs;
   std::string backend;
   int selected_device{-1};
+  KOptCudaCacheUsage cuda_cache;
 };
 
 // 返回 [task][template] 精确成本矩阵。它只是候选 oracle，不能用“无命中”授权证明。
@@ -136,6 +144,11 @@ struct PathSystemKOptBatchResult {
   std::uint64_t cost_tasks{};
   std::uint64_t cost_cells{};
   std::uint64_t scalar_searches{};
+  std::uint64_t cuda_cost_batches{};
+  std::uint64_t snapshot_cache_hits{};
+  std::uint64_t template_cache_hits{};
+  std::uint64_t workspace_cache_hits{};
+  std::uint64_t peak_device_cache_bytes{};
 };
 
 // 逐个解决未覆盖 outside matching，并用 inside coverage 合并重复叶证明。
@@ -166,7 +179,11 @@ namespace detail {
 [[nodiscard]] bool KOptCostCudaAvailable(std::string* reason);
 [[nodiscard]] std::vector<std::int64_t>
 EvaluateKOptTemplateCostsCuda(const GraphSnapshot& graph, const KOptReconnectTable& table,
-                              const std::vector<KOptCostTask>& tasks, int* selected_device);
+                              const std::vector<KOptCostTask>& tasks, int* selected_device,
+                              KOptCudaCacheUsage* cache_usage);
+
+// 释放当前主机线程在所有可见设备上的 k-opt 驻留缓存；主要用于 epoch 切换与测试隔离。
+void ClearKOptCostCudaCache();
 
 } // namespace detail
 

@@ -63,4 +63,4 @@ CUDA cost matrix 仍不是删除授权。任何低于 deleted cost 的 cell 都�
 
 M4.3b3b2b2b2b1 已解除单 deletion-set 限制；`leaf_scalar_searches` 现在主要记录显式 CPU backend 或不能建立 cost cursor 的输入。exact Held–Karp 始终在 CPU。
 
-每个 cost batch 仍重复复制图坐标和 reconnect templates；路径规范对象、outside/inside 枚举及 witness 构造也仍在主机。后续加入设备快照缓存、明确的 GPU/CPU long-tail 阈值和多 block continuation。HT epoch commit 继续保持待实现。
+后续已加入[设备快照/模板与 workspace 驻留缓存](18_Hamilton_Tutte_GPU_Leaf_Cache.md)；路径规范对象、outside/inside 枚举及 witness 构造仍在主机。接下来加入明确的 GPU/CPU long-tail 阈值和多 block continuation。HT epoch commit 继续保持待实现。

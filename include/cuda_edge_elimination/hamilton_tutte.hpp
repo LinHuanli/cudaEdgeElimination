@@ -214,6 +214,11 @@ struct HtWavefrontResult {
   std::uint64_t leaf_cost_tasks{};
   std::uint64_t leaf_cost_cells{};
   std::uint64_t leaf_scalar_searches{};
+  std::uint64_t leaf_cuda_cost_batches{};
+  std::uint64_t leaf_snapshot_cache_hits{};
+  std::uint64_t leaf_template_cache_hits{};
+  std::uint64_t leaf_workspace_cache_hits{};
+  std::uint64_t peak_leaf_device_cache_bytes{};
   std::string hamilton_reply_backend{"none"};
   int hamilton_reply_selected_device{-1};
   bool hamilton_reply_cpu_verified{false};

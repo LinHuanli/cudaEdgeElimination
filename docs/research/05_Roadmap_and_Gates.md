@@ -57,7 +57,9 @@ M4.3b3b2b2b2a frontier leaf batching 已完成：状态按 `(depth,path_count,no
 
 M4.3b3b2b2b2b1 一般 leaf 游标已完成：每个 path/outside 只生成当前 `cost_batch_size` block，同轮同 k 跨状态融合；CPU 消费后才推进下一组合。无界预算不预展开，3/4/5-opt、预算中断和随机路径的 batch/scalar proof 字节一致。
 
-M4.3b3b2b2b2b2 继续加入设备快照/模板缓存、明确的 GPU/CPU long-tail 阈值和多 block 队列。CPU/GPU 对完整小实例真值及证书必须一致；之后才把验证成功的 HT 候选接入 epoch commit。
+M4.3b3b2b2b2b2a GPU leaf 驻留缓存已完成：每主机线程/设备保留精确坐标快照、独立 3/4/5-opt 模板与增长型 task/cost workspace；完整键比较防止错误复用，命中和驻留字节均进入 wavefront 指标。
+
+M4.3b3b2b2b2b2b 继续加入明确的 GPU/CPU long-tail 阈值和多 block 队列。CPU/GPU 对完整小实例真值及证书必须一致；之后才把验证成功的 HT 候选接入 epoch commit。
 
 ## M5：中大型评测与优化
 
@@ -65,4 +67,4 @@ M4.3b3b2b2b2b2 继续加入设备快照/模板缓存、明确的 GPU/CPU long-ta
 
 ## 当前完成定义
 
-当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append batching、M4.3b3b2b2b1 规范 child edge SoA、M4.3b3b2b2b2a frontier leaf batching，以及 M4.3b3b2b2b2b1 一般 leaf 游标。M3.1 与 M4.3b3b2b2b2b2 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或部分 GPU 化原型替代删除强度与完整 GPU/提交链路。
+当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append batching、M4.3b3b2b2b1 规范 child edge SoA、M4.3b3b2b2b2a frontier leaf batching、M4.3b3b2b2b2b1 一般 leaf 游标，以及 M4.3b3b2b2b2b2a GPU leaf 驻留缓存。M3.1 与 M4.3b3b2b2b2b2b 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或部分 GPU 化原型替代删除强度与完整 GPU/提交链路。

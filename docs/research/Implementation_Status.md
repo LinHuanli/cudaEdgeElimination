@@ -23,7 +23,8 @@
 | M4.3b3b2b2b1 规范 child edge SoA | 完成（候选器） | CUDA count/write；不可行空 slice；CPU offsets/edges 全数组认证 |
 | M4.3b3b2b2b2a frontier leaf batching | 完成（规则首行） | 确定性复杂度桶；跨 leaf cost rows；CPU witness/proof 复核 |
 | M4.3b3b2b2b2b1 一般 leaf 游标 | 完成（增量融合） | 分段组合 cursor；3/4/5-opt；预算边界与随机 proof 字节差分 |
-| M4.3b3b2b2b2b2 leaf wavefront 与提交 | 待实现 | 快照/模板缓存、多 block/CPU long-tail、epoch commit |
+| M4.3b3b2b2b2b2a GPU leaf 驻留缓存 | 完成（线程/设备本地） | 精确坐标/模板键；增长型 workspace；命中与字节指标 |
+| M4.3b3b2b2b2b2b leaf wavefront 与提交 | 待实现 | 多 block/CPU long-tail、epoch commit |
 | M5 中大型调优 | 待开始 | 首期不设最低加速比；pcb3038 尚未形成认证运行记录 |
 
 ## 当前基准结果
@@ -66,6 +67,8 @@ Frontier leaf batching：当前 reply chunk 先按 `(depth,path_count,node_count
 
 一般 leaf 游标：每个 path/outside 保留当前 k、组合索引、统计计数和至多一个 pending block；主机只在 CPU 消费当前 block 后推进。固定双 7 点完整 3/4/5-opt 穷举把 50 tasks/2660 cells 合为 13 batches，预算 3 的 `2+1` block 停止点也与 scalar 一致；12 组随机图、三种路径布局和多种 k/预算/batch size 的 CPU/CUDA V1 proof 全部逐字节差分。
 
+GPU leaf 驻留缓存：每个主机线程在首选设备上复用整数坐标、独立 3/4/5-opt 模板和增长型 task/cost buffers。距离快照逐坐标比较完整 kernel 依赖，模板同时比较生成器哈希与完整数组；owner-device buffer 可在 epoch 边界显式释放。固定 recursive-point 的 6 个 CUDA leaf batches 只有首批上传快照/模板，记录 5/5 次命中、4 次 workspace 命中和 1468-byte 驻留峰值，proof 保持不变。
+
 ## 安全边界
 
-`gpu-eliminate` 目前只实现 JV quick candidate search；path-system leaf 和递归 HT proof 尚未连接全设备 wavefront/epoch commit，因此也不授权删边；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。M4.3b3b2b2b2b2 与 M3.1 必须标为 pending；仍严禁从未完整验证的局部结果或 cuOpt 浮点 reduced cost 直接构造删除记录。
+`gpu-eliminate` 目前只实现 JV quick candidate search；path-system leaf 和递归 HT proof 尚未连接全设备 wavefront/epoch commit，因此也不授权删边；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。M4.3b3b2b2b2b2b 与 M3.1 必须标为 pending；仍严禁从未完整验证的局部结果或 cuOpt 浮点 reduced cost 直接构造删除记录。

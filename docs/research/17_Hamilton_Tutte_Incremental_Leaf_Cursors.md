@@ -54,4 +54,4 @@ CPU cost backend 继续使用原 scalar 搜索，避免改变其直接全模板�
 
 ## 后续
 
-当前每个 fused batch 仍重新复制图坐标和 reconnect templates。路径上下文、组合游标与 CPU witness 构造都位于主机，尚未设置“小桶走 CPU、大桶走 GPU”的显式阈值。下一步是设备快照/模板缓存与可测试的 long-tail policy；随后才评估多 block continuation 和 HT epoch commit。
+后续 M4.3b3b2b2b2b2a 已完成[设备快照/模板与 workspace 驻留缓存](18_Hamilton_Tutte_GPU_Leaf_Cache.md)。路径上下文、组合游标与 CPU witness 构造仍位于主机，尚未设置“小桶走 CPU、大桶走 GPU”的显式阈值。下一步是可测试的 long-tail policy；随后才评估多 block continuation 和 HT epoch commit。
