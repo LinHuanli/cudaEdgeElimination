@@ -27,7 +27,8 @@
 | M4.3b3b2b2b2b2b1 CPU long-tail | 完成（128-cell 基线） | 缓存后交叉点；融合矩阵分流；CPU/CUDA proof 规范计数 |
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
-| M5 中大型调优 | 进行中（JV 三轮完成） | 三实例 clean-commit 五次门禁；进程内 11.194×/30.517×/41.695×；proof 全重放；CSR edge-id/驻留优化 |
+| M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；CPU/CUDA 工作签名；V2 原子提交；最优 tour 门禁 |
+| M5 中大型调优 | 进行中（JV 三轮 + HT pilot） | JV 三实例门禁；pcb3038 8-target HT 提交 2 边；proof 全重放；跨目标融合待做 |
 
 ## 当前基准结果
 
@@ -38,6 +39,8 @@ M5 JV 正式基准绑定 `cac180f`：pcb3038、rl5915、d15112 分别从 `6883/2
 M5 JV 驻留优化绑定 `25590af`：精确比较坐标、边端点和边权后复用静态 device arrays，每轮仍完整上传 active/CSR/witness。三实例 CUDA 算法中位数降为 `1.741/6.639/70.097 ms`，相对 CPU 为 `11.117×/29.788×/40.119×`；所有 timed epochs 均命中静态键和增长 workspace，峰值驻留为 `391148/1517168/8294196 bytes`。最终图哈希和输出 SHA-256 均未改变。
 
 M5 JV 动态 edge-id 优化绑定 `41feceb`：CUDA CSR 不再重复上传 64 位权重，而用 32 位稳定 edge id 读取驻留权重；三实例算法中位数降为 `1.728/6.503/67.651 ms`，相对 CPU 为 `11.194×/30.517×/41.695×`，峰值驻留降为 `336084/1284024/6962204 bytes`。d15112 的同步 H2D/kernel/D2H 中位数为 `2.965/6.628/0.513 ms`；proof、最终图哈希与输出 SHA-256 均未改变。
+
+M5 HT scan pilot 绑定 `cd5ec3e`：pcb3038 的 CPU JV 固定点有 6,704 条边和 6,476 个度数安全目标；最高权重 8-target 切片的 CPU/CUDA 工作签名均为 12,383 states、14,285 replies、9,120 leaf calls 和 5,085 moves，证明并提交相同 2 条边。CUDA/CPU search 为 `33.646/34.103 s`，仅 `1.014×`；最终 6,702 条边、哈希 `fe11f98414b04c0e`，两份 V2 均独立重放且 pcb3038 最优 tour 为 0 缺边。这是功能与资源 pilot，不是显著性能结论。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
@@ -85,4 +88,4 @@ HT epoch commit：`ht-commit` 可重复接收同一不可变快照上的 recursi
 
 ## 安全边界
 
-`gpu-eliminate` 的自动候选器目前仍只实现 JV；HT 使用显式 `ht-prove -> ht-commit` sidecar 链，尚不自动扫描全图目标。M5 数据也只证明 JV 路径的性能，不能外推为完整 Local Elimination 加速。`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集；M3.1 仍为 pending。仍严禁从未完整验证的局部结果、过期 HT sidecar 或 cuOpt 浮点 reduced cost 直接构造删除记录。
+`gpu-eliminate` 的自动候选器目前仍只实现 JV；HT 可使用显式 `ht-prove -> ht-commit`，或由 `ht-scan` 在一个不可变快照上扫描有界目标切片并原子提交。后者尚未接入 JV/LP 多 epoch orchestrator，也没有跨目标 GPU 工作图；pcb3038 pilot 不能外推为完整 Local Elimination 加速。`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集；M3.1 仍为 pending。仍严禁从未完整验证的局部结果、过期 HT sidecar 或 cuOpt 浮点 reduced cost 直接构造删除记录。

@@ -71,8 +71,10 @@ M4.3b3b2b2b2c HT epoch commit 已完成：同一不可变 snapshot 上的多个�
 
 JV 基线与第三轮优化已完成：三实例各预热一次、计时五次，CPU/CUDA 输出逐字节一致且每次 proof 均由独立 CPU 进程重放。规范边 CSR 免排序、跨 epoch CUDA 驻留后，动态 CSR 再以 32 位 edge id 引用静态边权；进程内算法中位数加速达到 `11.194× / 30.517× / 41.695×`，驻留降为 `0.321/1.225/6.640 MiB`。分段计时确认 d15112 的 H2D/kernel/D2H 为 `2.965/6.628/0.513 ms`。独立 CLI 仍受 context/I/O 和共享节点抖动支配。`pcb3038` 另通过成本 137,694 的受保护最优 tour 门禁。
 
-M5 仍未完成：`rl5915/d15112` 的最优 tour witness、全图 HT 自动目标调度、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
+有界全图 HT 调度 baseline 已完成：`ht-scan` 在同一不可变图上按稳定权重/端点顺序选择显式切片，逐目标 wavefront 搜索，成功 sidecar 即时 CPU 重放后再整批复核和原子提交。pcb3038/JV 固定点的 8-target pilot 中，CPU/CUDA 工作签名一致，均证明并提交 2 条边；CUDA/CPU 搜索为 `33.646/34.103 s`，只有 `1.014×`。这说明下一瓶颈是跨目标融合与主机建图/认证，不是继续宣传单 kernel 加速。
+
+M5 仍未完成：`rl5915/d15112` 的最优 tour witness、跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
 
-当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append、M4.3b3b2b2b1 规范 child edge SoA、M4.3b3b2b2b2a frontier leaf batching、M4.3b3b2b2b2b1 一般 leaf 游标、M4.3b3b2b2b2b2a GPU leaf 驻留缓存、M4.3b3b2b2b2b2b1 CPU long-tail、M4.3b3b2b2b2b2b2 cooperative multi-block continuation、M4.3b3b2b2b2c HT epoch commit，以及 M5 JV 中大型基线、CSR 快路径、驻留与动态 edge-id 优化。M3.1 未完成时必须在状态清单中标为 pending；中大型全图 HT 调度属于 M5，不能用 JV 或小实例闭环冒充性能结论。
+当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append、M4.3b3b2b2b1 规范 child edge SoA、M4.3b3b2b2b2a frontier leaf batching、M4.3b3b2b2b2b1 一般 leaf 游标、M4.3b3b2b2b2b2a GPU leaf 驻留缓存、M4.3b3b2b2b2b2b1 CPU long-tail、M4.3b3b2b2b2b2b2 cooperative multi-block continuation、M4.3b3b2b2b2c HT epoch commit，以及 M5 JV 三轮优化和有界全图 HT pilot。M3.1 未完成时必须在状态清单中标为 pending；不得把单切片 pilot 冒充完整多 epoch Local Elimination 性能结论。

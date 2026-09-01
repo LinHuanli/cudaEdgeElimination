@@ -18,10 +18,11 @@
 - CPU 递归 Hamilton–Tutte point/end moves、continuation arena 与全局 `recursive-ht-proof-v1`；
 - 主机 BFS 工作图、cooperative multi-block CUDA continuation 传播、跨父状态 Hamilton/end reply count/write、point/end path-append、规范 child edge SoA、增量 k-opt leaf cost block 融合、GPU 驻留缓存与 128-cell CPU long-tail，并由 CPU 完整差分复核；
 - `ht-prove` sidecar 的整批 CPU 重放、不可变快照绑定、规范度数门禁和 `ht-commit` 原子删边；
+- `ht-scan` 的确定性有界目标切片、逐目标 wavefront、CPU 双重复核与 V2 原子提交；
 - TSPLIB 最优 tour 的严格成本、节点置换、活动边完整性与规范哈希门禁；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 
-尚未完成的研究项（全图 HT 自动调度、M5 后续调优与多 GPU、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。精确困难叶有 18 个 block 的硬上限，超限只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
+尚未完成的研究项（跨目标 HT 融合和多 epoch 调度、M5 后续调优与多 GPU、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。精确困难叶有 18 个 block 的硬上限，超限只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
 
 ## 快速开始
 
@@ -38,6 +39,11 @@ cmake --build --preset cuda-release
 
 # M5 JV 中大型基准；可用 CUDAEE_BENCHMARK_TOUR 增加最优 tour 门禁
 CUDAEE_BENCHMARK_GPU=1 tools/run_jv_benchmark.sh pcb3038 5
+
+# M5 有界全图 HT CPU/CUDA pilot；同一切片、预算和独立 proof 重放
+CUDAEE_BENCHMARK_GPU=1 \
+CUDAEE_BENCHMARK_TOUR=artifacts/lkh-tours/pcb3038.tour \
+tools/run_ht_scan_benchmark.sh pcb3038 8
 
 # 构建受限 Concorde overlay，并验证 cuOpt→完整图精确定价握手
 ./tools/bootstrap_concorde.sh
