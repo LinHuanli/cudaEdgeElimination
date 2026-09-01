@@ -99,6 +99,8 @@ point-candidate V12/V15 画像、Top-K 与静态次序缓存已完成：target �
 
 leaf proof 批内快照绑定复用已完成：生成器内部逐成功 proof 的整图哈希改为复用同一同步 batch 的入口哈希，公开 verifier 与全部 HT/epoch 独立重放仍自行绑定图。三实例 leaf verify 加速 `8.882×/17.591×/27.449×`，CPU-fused search 加速 `1.037×/1.355×/1.618×`。下一步把相同只读 snapshot binding 上移到同一 wavefront 的多个 leaf batches。
 
+wavefront leaf 快照绑定复用已完成：只能从实际 graph 对象构造的内部强类型 binding 在一次只读 wavefront 内供全部 leaf batches 使用，对象错配立即拒绝；公开生成器和所有独立 verifier 仍自行哈希。rl5915/d15112 的 proof init 加速 `44.302×/99.936×`，search 加速 `1.063×/1.028×`；pcb3038 端到端处于噪声范围。新画像显示 d15112 的 path child normalize 为 `180.448 ms`，下一切片以 sparse/dense 双 oracle 门禁增量 parent append。
+
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义

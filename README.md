@@ -25,6 +25,7 @@
 - point-candidate 严格全序的有界 Top-K 选择，并保留无界分支的完整排序语义；
 - target 级 point-candidate 静态次序缓存与逐 state generation-mark 过滤；
 - 同步 leaf batch 内复用 snapshot binding，同时保持公开 proof verifier 独立哈希；
+- 同一只读 wavefront 内用强类型 graph binding 复用 leaf batch 快照哈希，并拒绝对象错配；
 - path-append 按实际节点规范化的确定性稀疏 fast path，以及保留的 dense proof 重放认证；
 - path-count matching catalog 与 3/4/5-opt reconnect templates 的线程安全不可变缓存；
 - CPU/CUDA 共用的增量 leaf 精确成本矩阵路径，以及与 CPU scalar 逐字节一致的规范 proof 计数；

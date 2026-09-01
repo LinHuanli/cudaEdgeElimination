@@ -48,5 +48,6 @@
 44. [M5 HT point-candidate 全维选择画像与 Top-K 优化](research/40_M5_HT_Point_Candidate_Profile.md)：V12/V15 定位扫描/排序瓶颈，并以确定性 Top-K 获得 11.565×–29.831× 排序加速。
 45. [M5 HT point-candidate 静态次序缓存](research/41_M5_HT_Point_Candidate_Order_Cache.md)：复用 target 级严格次序并以 generation marks 过滤 state，累计获得 1.135×–1.858× search 加速。
 46. [M5 HT leaf proof 批内快照绑定复用](research/42_M5_HT_Leaf_Proof_Snapshot_Binding.md)：保持公开独立 verifier 不变，消除成功 leaf 的重复整图哈希并获得 8.882×–27.449× verify 加速。
+47. [M5 HT wavefront leaf 快照绑定复用](research/43_M5_HT_Wavefront_Snapshot_Binding.md)：强类型绑定同一只读 graph 对象，消除跨 leaf batch 重复哈希并保持全部独立 verifier 不变。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。
