@@ -149,6 +149,49 @@ set_tests_properties(integration.ht_wavefront_verify PROPERTIES
   DEPENDS integration.ht_wavefront_prove
   LABELS "integration;hamilton-tutte;wavefront")
 
+if(CUDAEE_ENABLE_CUDA)
+  set(HT_WAVEFRONT_HYBRID_PROOF
+    "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.wavefront.hybrid.ht-proof")
+  add_test(
+    NAME integration.ht_wavefront_hybrid_prove
+    COMMAND cudaee ht-prove
+      --tsp "${HT_RECURSIVE_TSP}"
+      --edges "${HT_RECURSIVE_EDGES}"
+      --u 2 --v 4
+      --proof "${HT_WAVEFRONT_HYBRID_PROOF}"
+      --scheduler wavefront
+      --backend cpu
+      --leaf-backend cuda
+      --reply-backend cpu
+      --path-append-backend cpu
+      --propagation-backend cpu
+      --max-neighborhood 0
+      --max-cd-candidates 8
+      --max-candidate-degree 0
+      --max-root-replies 1000
+      --max-k 3
+      --max-deletion-sets 1
+      --max-depth 1
+      --max-states 20000
+      --max-total-replies 200000
+      --max-replies-per-move 1000
+      --max-point-candidates 5
+      --max-end-candidates 5)
+  set_tests_properties(integration.ht_wavefront_hybrid_prove PROPERTIES
+    PASS_REGULAR_EXPRESSION "leaf_cost_backend=cuda"
+    LABELS "integration;hamilton-tutte;wavefront;gpu")
+
+  add_test(
+    NAME integration.ht_wavefront_hybrid_verify
+    COMMAND cudaee ht-verify
+      --tsp "${HT_RECURSIVE_TSP}"
+      --edges "${HT_RECURSIVE_EDGES}"
+      --proof "${HT_WAVEFRONT_HYBRID_PROOF}")
+  set_tests_properties(integration.ht_wavefront_hybrid_verify PROPERTIES
+    DEPENDS integration.ht_wavefront_hybrid_prove
+    LABELS "integration;hamilton-tutte;wavefront;gpu")
+endif()
+
 set(HT_EPOCH_EDGES "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.epoch.edg")
 set(HT_EPOCH_PROOF "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.epoch.proof")
 add_test(

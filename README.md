@@ -79,6 +79,7 @@ build/cuda-release/cudaee ht-prove \
   --tsp tests/data/recursive-point.tsp \
   --edges tests/data/recursive-point.edg --u 2 --v 4 \
   --proof artifacts/recursive-point.ht-proof --backend auto \
+  --leaf-backend auto \
   --scheduler wavefront --reply-backend auto --reply-frontier-batch-states 256 \
   --leaf-frontier-batch-states 256 \
   --cuda-min-cost-cells 128 \

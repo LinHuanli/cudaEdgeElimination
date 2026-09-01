@@ -21,6 +21,8 @@ CUDAEE_BENCHMARK_TOUR=artifacts/lkh-tours/pcb3038.tour \
 tools/run_ht_scan_benchmark.sh pcb3038 8
 ```
 
-脚本固定记录搜索深度、state/reply/deletion-set 预算；资源耗尽是 `UNRESOLVED`，不是失败或删除授权。V2 报告将工作图总时间进一步拆成 leaf、path-append、Hamilton reply 与 end reply，并单列传播、proof 抽取、三层 CPU 重放和最终 commit；`work_graph_ms` 是包含式总量，不能再与其四个子阶段相加。summary 中的 `host_build_residual_ms` 已按包含关系扣除四个子阶段。
+脚本固定记录搜索深度、state/reply/deletion-set 预算；资源耗尽是 `UNRESOLVED`，不是失败或删除授权。三路对照分别是纯 CPU、所有候选器均显式 CUDA，以及 CPU c,d/reply/path/propagation + CUDA leaf cost 的混合路径；三者必须拥有相同工作签名、最终边集和可独立重放的 proof。
+
+V2 报告将工作图总时间进一步拆成 leaf、path-append、Hamilton reply 与 end reply，并单列传播、proof 抽取、三层 CPU 重放和最终 commit；`work_graph_ms` 是包含式总量，不能再与其四个子阶段相加。summary 中的 `host_build_residual_ms` 已按包含关系扣除四个子阶段。
 
 `CUDAEE_HT_TARGET_OFFSET` 只选择当前不可变输入上的目标切片；若使用一个已提交的新图开始下一 epoch，必须重新从 offset 0 排序。

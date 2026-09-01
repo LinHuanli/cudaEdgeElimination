@@ -43,6 +43,7 @@ void PrintHelp() {
       << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
       << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
       << "                [--scheduler dfs|wavefront] [--backend auto|cpu|cuda]\n"
+      << "                [--leaf-backend auto|cpu|cuda]\n"
       << "                [--reply-backend auto|cpu|cuda]\n"
       << "                [--reply-frontier-batch-states N]\n"
       << "                [--leaf-frontier-batch-states N]\n"
@@ -414,7 +415,8 @@ cudaee::HtRecursiveOptions ParseHtRecursiveOptions(const Arguments& arguments) {
   root.max_reply_combinations =
       OptionalInteger<std::uint64_t>(arguments, "max-root-replies", root.max_reply_combinations);
   root.cd_mode = ParseHtCdMode(Optional(arguments, "cd-mode", "active-incompatible"));
-  root.candidate_backend = ParsePathCompatibilityBackend(Optional(arguments, "backend", "auto"));
+  const std::string candidate_backend = Optional(arguments, "backend", "auto");
+  root.candidate_backend = ParsePathCompatibilityBackend(candidate_backend);
   root.leaf_options.max_k =
       OptionalInteger<std::uint32_t>(arguments, "max-k", root.leaf_options.max_k);
   if (root.leaf_options.max_k < 3U || root.leaf_options.max_k > 5U) {
@@ -422,7 +424,9 @@ cudaee::HtRecursiveOptions ParseHtRecursiveOptions(const Arguments& arguments) {
   }
   root.leaf_options.max_deletion_sets =
       OptionalInteger<std::uint64_t>(arguments, "max-deletion-sets", 100000U);
-  root.leaf_options.cost_backend = root.candidate_backend;
+  // 默认继承旧的 --backend 语义；显式 leaf 后端允许只把高算术强度 cost matrix 放到 GPU。
+  root.leaf_options.cost_backend =
+      ParsePathCompatibilityBackend(Optional(arguments, "leaf-backend", candidate_backend));
   root.leaf_options.cost_batch_size = OptionalInteger<std::uint32_t>(
       arguments, "cost-batch-size", root.leaf_options.cost_batch_size);
   if (root.leaf_options.cost_batch_size == 0U) {
