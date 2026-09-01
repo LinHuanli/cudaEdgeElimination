@@ -72,3 +72,5 @@ CPU scalar search 比混合 cursor consume 多 1,779.280 ms，但混合还要支
 4. 只有重复运行确认收益后才保留优化。
 
 完成不可变表缓存后，再把 `cursor_consume` 拆成模板准备、GPU 候选复核与 CPU completeness fallback。若要实验“GPU 漏报只导致 UNRESOLVED”的候选模式，必须作为显式非默认策略，并证明任何 GPU 错误都不能把未知状态变为 PROVEN；当前默认完整 CPU 兜底不变。
+
+不可变表缓存的实现与 clean-commit 收益见 [M5 HT leaf 不可变组合表缓存](29_M5_HT_Immutable_Leaf_Tables.md)。
