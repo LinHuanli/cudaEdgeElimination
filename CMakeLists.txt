@@ -20,6 +20,7 @@ set(CUDAEE_SOURCES
     src/cpu/hamilton_tutte.cpp
     src/cpu/hamilton_tutte_proof.cpp
     src/cpu/hamilton_tutte_recursive.cpp
+    src/cpu/hamilton_tutte_wavefront.cpp
     src/cpu/jv_elimination.cpp
     src/cpu/kopt_search.cpp
     src/cpu/path_system.cpp

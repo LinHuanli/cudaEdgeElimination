@@ -209,6 +209,51 @@ void TestCdCandidatesCpuCuda() {
 #endif
 }
 
+void TestDfsWavefrontRandomDifferential() {
+  std::mt19937 random(0x48545746U); // NOLINT: 固定 HT wavefront 差分种子。
+  std::uniform_int_distribution<std::int64_t> coordinate(-100, 100);
+  for (std::uint32_t trial = 0; trial < 8U; ++trial) {
+    std::vector<cudaee::Point> points;
+    for (std::uint32_t node = 0; node < 7U; ++node) {
+      const std::int64_t x = coordinate(random);
+      const std::int64_t y = coordinate(random);
+      points.push_back({static_cast<double>(x), static_cast<double>(y), x, y});
+    }
+    const cudaee::GraphSnapshot graph = MakeCompleteGraph(points);
+    const std::int32_t first = static_cast<std::int32_t>(trial % 7U);
+    std::int32_t second = static_cast<std::int32_t>((3U * trial + 1U) % 7U);
+    if (second == first) {
+      second = (second + 1) % 7;
+    }
+    const cudaee::NodeEdge target = CanonicalEdge(first, second);
+    const cudaee::HtRecursiveOptions options = {
+        .root_options = {.max_neighborhood = 0,
+                         .max_cd_candidates = 0,
+                         .max_candidate_degree = 0,
+                         .max_reply_combinations = 0,
+                         .cd_mode = cudaee::HtCdMode::kActiveIncompatible,
+                         .candidate_backend = cudaee::PathCompatibilityBackend::kCpu,
+                         .leaf_options = {.max_k = 3, .max_deletion_sets = 2}},
+        .max_depth = 1,
+        .max_states = 0,
+        .max_total_replies = 0,
+        .max_replies_per_move = 0,
+        .max_point_candidates = 2,
+        .max_end_candidates = 2};
+    const cudaee::HtRecursiveResult dfs = cudaee::ProveEdgeByRecursiveHt(graph, target, options);
+    const cudaee::HtWavefrontResult wavefront = cudaee::ProveEdgeByWavefrontHt(
+        graph, target,
+        {.search_options = options, .propagation_backend = cudaee::PathCompatibilityBackend::kCpu});
+    Check(dfs.status == wavefront.status, "random DFS/wavefront truth mismatch");
+    if (dfs.status == cudaee::HtSearchStatus::kProven) {
+      std::string reason;
+      Check(cudaee::VerifyHtRecursiveProof(graph, dfs.proof, &reason), reason);
+      Check(cudaee::VerifyHtRecursiveProof(graph, wavefront.proof, &reason), reason);
+      CheckTargetIsNotOptimal(graph, target);
+    }
+  }
+}
+
 void TestVacuousAndProofAndTamperRejection() {
   const std::vector<cudaee::Point> points = {
       {0.0, 0.0, 0, 0},       {100.0, 0.0, 100, 0},   {50.0, -20.0, 50, -20}, {50.0, 20.0, 50, 20},
@@ -294,6 +339,24 @@ void TestNonemptyAndProof() {
         "recursive arena starts with c,d root");
   Check(cudaee::VerifyHtRecursiveProof(graph, recursive.proof, &reason), reason);
 
+  const cudaee::HtWavefrontResult wavefront = cudaee::ProveEdgeByWavefrontHt(
+      graph, {0, 5},
+      {.search_options = recursive_options,
+       .propagation_backend = cudaee::PathCompatibilityBackend::kCpu});
+  Check(wavefront.status == cudaee::HtSearchStatus::kProven, wavefront.proof.reason);
+  Check(wavefront.propagation_backend == "cpu" && wavefront.cpu_verified,
+        "CPU wavefront propagation is recorded");
+  Check(cudaee::VerifyHtRecursiveProof(graph, wavefront.proof, &reason), reason);
+
+  cudaee::HtWavefrontOptions invalid_wavefront_options = {
+      .search_options = recursive_options,
+      .propagation_backend = static_cast<cudaee::PathCompatibilityBackend>(255)};
+  Check(cudaee::ProveEdgeByWavefrontHt(graph, {0, 5}, invalid_wavefront_options).status ==
+            cudaee::HtSearchStatus::kInvalid,
+        "unknown wavefront propagation backend is rejected");
+  Check(wavefront.proof.nodes.size() == recursive.proof.nodes.size(),
+        "DFS and wavefront shallow arenas have the same size");
+
   const cudaee::HtRecursiveProof parsed_recursive =
       cudaee::ParseHtRecursiveProof(cudaee::SerializeHtRecursiveProof(recursive.proof));
   Check(cudaee::VerifyHtRecursiveProof(graph, parsed_recursive, &reason), reason);
@@ -321,6 +384,12 @@ void TestNonemptyAndProof() {
       cudaee::ProveEdgeByRecursiveHt(graph, {0, 5}, state_budget_options);
   Check(state_budget.status == cudaee::HtSearchStatus::kUnresolved,
         "recursive state budget remains unresolved");
+  const cudaee::HtWavefrontResult wavefront_state_budget = cudaee::ProveEdgeByWavefrontHt(
+      graph, {0, 5},
+      {.search_options = state_budget_options,
+       .propagation_backend = cudaee::PathCompatibilityBackend::kCpu});
+  Check(wavefront_state_budget.status == cudaee::HtSearchStatus::kUnresolved,
+        "wavefront state budget remains unresolved");
 
   const cudaee::HtShallowResult budget =
       cudaee::ProveEdgeByShallowHt(graph, {0, 5},
@@ -394,6 +463,35 @@ void TestRecursivePointProof() {
   std::string reason;
   Check(cudaee::VerifyHtRecursiveProof(graph, result.proof, &reason), reason);
 
+  const cudaee::HtWavefrontResult wavefront = cudaee::ProveEdgeByWavefrontHt(
+      graph, {2, 4},
+      {.search_options = options, .propagation_backend = cudaee::PathCompatibilityBackend::kCpu});
+  Check(wavefront.status == cudaee::HtSearchStatus::kProven, wavefront.proof.reason);
+  Check(wavefront.moves_generated > 0U && wavefront.peak_frontier > 0U,
+        "wavefront records generated moves and frontier width");
+  Check(wavefront.proof.nodes.size() == result.proof.nodes.size(),
+        "DFS and wavefront point arenas have the same size");
+  Check(std::all_of(wavefront.proof.nodes.begin() + 1, wavefront.proof.nodes.end(),
+                    [](const cudaee::HtTreeNode& node) {
+                      return node.move_type == cudaee::HtMoveType::kPoint;
+                    }),
+        "wavefront proof genuinely uses point moves");
+  Check(cudaee::VerifyHtRecursiveProof(graph, wavefront.proof, &reason), reason);
+
+#ifndef CUDAEE_HAS_CUDA
+  const cudaee::HtWavefrontResult auto_fallback = cudaee::ProveEdgeByWavefrontHt(
+      graph, {2, 4},
+      {.search_options = options, .propagation_backend = cudaee::PathCompatibilityBackend::kAuto});
+  Check(auto_fallback.status == cudaee::HtSearchStatus::kProven &&
+            auto_fallback.propagation_backend == "cpu" && auto_fallback.cpu_verified,
+        "auto wavefront safely falls back to CPU without a CUDA build");
+  const cudaee::HtWavefrontResult unavailable_cuda = cudaee::ProveEdgeByWavefrontHt(
+      graph, {2, 4},
+      {.search_options = options, .propagation_backend = cudaee::PathCompatibilityBackend::kCuda});
+  Check(unavailable_cuda.status == cudaee::HtSearchStatus::kUnresolved,
+        "explicit unavailable CUDA wavefront remains unresolved");
+#endif
+
   const std::string serialized = cudaee::SerializeHtRecursiveProof(result.proof);
   const cudaee::HtRecursiveProof parsed = cudaee::ParseHtRecursiveProof(serialized);
   Check(cudaee::VerifyHtRecursiveProof(graph, parsed, &reason), reason);
@@ -438,6 +536,16 @@ void TestRecursivePointProof() {
         cudaee::ProveEdgeByRecursiveHt(graph, {2, 4}, cuda_options);
     Check(cuda_result.status == cudaee::HtSearchStatus::kProven, cuda_result.proof.reason);
     Check(cudaee::VerifyHtRecursiveProof(graph, cuda_result.proof, &reason), reason);
+
+    const cudaee::HtWavefrontResult cuda_wavefront = cudaee::ProveEdgeByWavefrontHt(
+        graph, {2, 4},
+        {.search_options = options,
+         .propagation_backend = cudaee::PathCompatibilityBackend::kCuda});
+    Check(cuda_wavefront.status == cudaee::HtSearchStatus::kProven, cuda_wavefront.proof.reason);
+    Check(cuda_wavefront.propagation_backend == "cuda" && cuda_wavefront.selected_device >= 0 &&
+              cuda_wavefront.cpu_verified,
+          "CUDA wavefront propagation is fully CPU verified");
+    Check(cudaee::VerifyHtRecursiveProof(graph, cuda_wavefront.proof, &reason), reason);
   }
 #endif
 }
@@ -485,6 +593,16 @@ void TestRecursiveEndProof() {
   std::string reason;
   Check(cudaee::VerifyHtRecursiveProof(graph, result.proof, &reason), reason);
 
+  const cudaee::HtWavefrontResult wavefront = cudaee::ProveEdgeByWavefrontHt(
+      graph, {1, 2},
+      {.search_options = options, .propagation_backend = cudaee::PathCompatibilityBackend::kCpu});
+  Check(wavefront.status == cudaee::HtSearchStatus::kProven, wavefront.proof.reason);
+  Check(wavefront.proof.nodes.size() == result.proof.nodes.size(),
+        "DFS and wavefront end arenas have the same size");
+  Check(wavefront.proof.nodes[1].move_type == cudaee::HtMoveType::kEnd,
+        "wavefront proof genuinely uses an end move");
+  Check(cudaee::VerifyHtRecursiveProof(graph, wavefront.proof, &reason), reason);
+
   cudaee::HtRecursiveOptions no_depth = options;
   no_depth.max_depth = 0;
   Check(cudaee::ProveEdgeByRecursiveHt(graph, {1, 2}, no_depth).status ==
@@ -501,16 +619,49 @@ void TestRecursiveEndProof() {
         "wrong end internal neighbor is rejected");
 }
 
+#ifdef CUDAEE_HAS_CUDA
+void TestCudaWavefrontTruthTable() {
+  std::string reason;
+  if (!cudaee::detail::HtWavefrontCudaAvailable(&reason)) {
+    return;
+  }
+  // 根的第一个 move 是 success AND failure，第二个 move 单独成功，覆盖 AND/OR 两级真值。
+  const std::vector<cudaee::HtWavefrontStateTask> states = {
+      {0, 2, 0}, {2, 0, 1}, {2, 0, 0}, {2, 0, 1}};
+  const std::vector<cudaee::HtWavefrontMoveTask> moves = {{0, 2}, {2, 1}};
+  const std::vector<cudaee::HtWavefrontReplyTask> replies = {{1, 0}, {2, 0}, {3, 0}};
+  int selected_device = -1;
+  const std::vector<std::uint8_t> status =
+      cudaee::detail::EvaluateHtWavefrontCuda(states, moves, replies, {0, 1, 4}, &selected_device);
+  Check(status == std::vector<std::uint8_t>({1, 1, 0, 1}) && selected_device >= 0,
+        "CUDA wavefront evaluates the pinned AND/OR truth table");
+
+  std::vector<cudaee::HtWavefrontReplyTask> invalid = replies;
+  invalid.front().child_index = 0;
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::detail::EvaluateHtWavefrontCuda(states, moves, invalid,
+                                                                     {0, 1, 4}, &selected_device);
+        static_cast<void>(ignored);
+      },
+      "CUDA wavefront rejects a non-forward continuation");
+}
+#endif
+
 } // namespace
 
 int main() {
   try {
     TestHamiltonRepliesAgainstReferenceFormula();
     TestCdCandidatesCpuCuda();
+    TestDfsWavefrontRandomDifferential();
     TestVacuousAndProofAndTamperRejection();
     TestNonemptyAndProof();
     TestRecursivePointProof();
     TestRecursiveEndProof();
+#ifdef CUDAEE_HAS_CUDA
+    TestCudaWavefrontTruthTable();
+#endif
     std::cout << "Hamilton-Tutte tests passed\n";
     return 0;
   } catch (const std::exception& error) {

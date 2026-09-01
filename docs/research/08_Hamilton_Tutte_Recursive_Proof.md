@@ -16,7 +16,7 @@ M4.3b2 先在 CPU 上固定递归真值和证书语义，再把执行顺序改�
 
 CPU DFS 和未来 GPU wavefront 必须计算同一表达式；只有调度顺序可以不同。当前实现是单目标研究 API，不修改图，也不向 `gpu-eliminate` 提交删除。
 
-研究 CLI `ht-prove` 从 TSPLIB/Concorde 边快照生成 V1 文件，`ht-verify` 从原快照独立重放。`ht-prove` 的成功、未解决和非法退出码分别为 0、3 和 2；即使未解决也覆盖写入一个 `proven=0` 文件，避免误用同路径下的旧成功证书。
+研究 CLI `ht-prove` 从 TSPLIB/Concorde 边快照生成 V1 文件，`ht-verify` 从原快照独立重放。`--scheduler dfs|wavefront` 选择求值顺序，二者输出同一证书类型。`ht-prove` 的成功、未解决和非法退出码分别为 0、3 和 2；即使未解决也覆盖写入一个 `proven=0` 文件，避免误用同路径下的旧成功证书。
 
 ## Move 与完整 replies
 
@@ -70,6 +70,6 @@ V1 是确定性文本格式，固定记录：
 - 内存 proof、字符串 V1 和文件 V1 往返后均重新验证，规范序列化字节一致；尾随字段被解析器拒绝；
 - CUDA 构建下可用 GPU 只筛选根 `c,d` flags，随后仍由 CPU 构造和验证完整递归 proof。
 
-## M4.3b3 待办
+## M4.3b3 衔接
 
-下一阶段保持上述 verifier 和文件格式不变，增加 GPU 状态 SoA、按深度/路径数/reply 数分桶的 wavefront、candidate continuation counters、批量叶调用和 CPU long-tail 队列。GPU 版本必须在无资源截断的小图上与 CPU DFS 的最终真值和验证后证书一致，完成后才能把 HT 删除接入不可变 epoch 的确定性 commit。
+M4.3b3a 已在不改变 verifier 和文件格式的前提下加入主机 BFS 工作图与 CUDA 反向层次真值传播，详见 [GPU wavefront](09_Hamilton_Tutte_GPU_Wavefront.md)。M4.3b3b 仍需 GPU 状态 SoA 生成、按深度/路径数/reply 数分桶、persistent candidate counters、批量叶调用和 CPU long-tail 队列；完成后才能把 HT 删除接入不可变 epoch 的确定性 commit。

@@ -155,6 +155,40 @@ __global__ void ScreenHtCdKernel(const NodeEdge target, const HtCdScreenTask* co
   }
 }
 
+__global__ void EvaluateHtWavefrontLevelKernel(const HtWavefrontStateTask* const states,
+                                               const HtWavefrontMoveTask* const moves,
+                                               const HtWavefrontReplyTask* const replies,
+                                               const std::uint32_t state_begin,
+                                               const std::uint32_t state_end,
+                                               std::uint8_t* const status) {
+  const std::size_t state_index = static_cast<std::size_t>(state_begin) +
+                                  static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (state_index >= state_end) {
+    return;
+  }
+  const HtWavefrontStateTask state = states[state_index];
+  if (state.leaf_proven != 0U) {
+    status[state_index] = 1U;
+    return;
+  }
+  for (std::uint32_t move_offset = 0; move_offset < state.move_count; ++move_offset) {
+    const HtWavefrontMoveTask move = moves[state.move_begin + move_offset];
+    bool move_proven = true;
+    for (std::uint32_t reply_offset = 0; reply_offset < move.reply_count; ++reply_offset) {
+      const HtWavefrontReplyTask reply = replies[move.reply_begin + reply_offset];
+      if (reply.path_infeasible == 0U && status[reply.child_index] == 0U) {
+        move_proven = false;
+        break;
+      }
+    }
+    if (move_proven) {
+      status[state_index] = 1U;
+      return;
+    }
+  }
+  status[state_index] = 0U;
+}
+
 } // namespace
 
 bool HtCdCudaAvailable(std::string* const reason) { return SelectDevice(reason) >= 0; }
@@ -217,6 +251,97 @@ std::vector<std::uint8_t> ScreenHtCdCandidatesCuda(const GraphSnapshot& graph,
   std::vector<std::uint8_t> flags(tasks.size());
   device_flags.CopyToHost(flags.data());
   return flags;
+}
+
+bool HtWavefrontCudaAvailable(std::string* const reason) { return SelectDevice(reason) >= 0; }
+
+std::vector<std::uint8_t> EvaluateHtWavefrontCuda(const std::vector<HtWavefrontStateTask>& states,
+                                                  const std::vector<HtWavefrontMoveTask>& moves,
+                                                  const std::vector<HtWavefrontReplyTask>& replies,
+                                                  const std::vector<std::uint32_t>& level_offsets,
+                                                  int* const selected_device) {
+  if (states.empty() || states.size() > std::numeric_limits<std::uint32_t>::max() ||
+      moves.size() > std::numeric_limits<std::uint32_t>::max() ||
+      replies.size() > std::numeric_limits<std::uint32_t>::max() || level_offsets.size() < 2U ||
+      level_offsets.front() != 0U || level_offsets.back() != states.size()) {
+    throw std::invalid_argument("CUDA HT wavefront 数组规模或层边界非法");
+  }
+  for (std::size_t level = 1; level < level_offsets.size(); ++level) {
+    if (level_offsets[level - 1U] >= level_offsets[level]) {
+      throw std::invalid_argument("CUDA HT wavefront 层边界不是严格递增序列");
+    }
+  }
+
+  std::size_t expected_move = 0;
+  std::size_t expected_reply = 0;
+  std::size_t current_level = 0;
+  for (std::size_t state_index = 0; state_index < states.size(); ++state_index) {
+    while (state_index >= level_offsets[current_level + 1U]) {
+      ++current_level;
+    }
+    const std::uint32_t next_level_begin = level_offsets[current_level + 1U];
+    const HtWavefrontStateTask& state = states[state_index];
+    if (state.leaf_proven > 1U || state.move_begin != expected_move ||
+        state.move_count > moves.size() - expected_move ||
+        (state.leaf_proven != 0U && state.move_count != 0U)) {
+      throw std::invalid_argument("CUDA HT wavefront state task 非法");
+    }
+    for (std::uint32_t move_offset = 0; move_offset < state.move_count; ++move_offset) {
+      const HtWavefrontMoveTask& move = moves[expected_move++];
+      if (move.reply_begin != expected_reply ||
+          move.reply_count > replies.size() - expected_reply) {
+        throw std::invalid_argument("CUDA HT wavefront move task 非法");
+      }
+      for (std::uint32_t reply_offset = 0; reply_offset < move.reply_count; ++reply_offset) {
+        const HtWavefrontReplyTask& reply = replies[expected_reply++];
+        if (reply.path_infeasible > 1U ||
+            (reply.path_infeasible != 0U && reply.child_index != kNoHtChild) ||
+            (reply.path_infeasible == 0U &&
+             (reply.child_index < next_level_begin || reply.child_index >= states.size()))) {
+          throw std::invalid_argument("CUDA HT wavefront reply task 非法");
+        }
+      }
+    }
+  }
+  if (expected_move != moves.size() || expected_reply != replies.size()) {
+    throw std::invalid_argument("CUDA HT wavefront task 数组含未引用记录");
+  }
+
+  std::string reason;
+  const int device = SelectDevice(&reason);
+  if (device < 0) {
+    throw std::runtime_error("CUDA HT wavefront 后端不可用: " + reason);
+  }
+  if (selected_device != nullptr) {
+    *selected_device = device;
+  }
+
+  DeviceBuffer<HtWavefrontStateTask> device_states(states.size());
+  DeviceBuffer<HtWavefrontMoveTask> device_moves(moves.size());
+  DeviceBuffer<HtWavefrontReplyTask> device_replies(replies.size());
+  DeviceBuffer<std::uint8_t> device_status(states.size());
+  device_states.CopyFromHost(states.data());
+  device_moves.CopyFromHost(moves.data());
+  device_replies.CopyFromHost(replies.data());
+  CheckCuda(cudaMemset(device_status.get(), 0, states.size() * sizeof(std::uint8_t)),
+            "cudaMemset(HT wavefront status)");
+
+  constexpr std::uint32_t kThreads = 256U;
+  for (std::size_t reverse_level = level_offsets.size() - 1U; reverse_level > 0U; --reverse_level) {
+    const std::uint32_t begin = level_offsets[reverse_level - 1U];
+    const std::uint32_t end = level_offsets[reverse_level];
+    const std::uint32_t count = end - begin;
+    const std::uint32_t blocks = (count + kThreads - 1U) / kThreads;
+    EvaluateHtWavefrontLevelKernel<<<blocks, kThreads>>>(device_states.get(), device_moves.get(),
+                                                         device_replies.get(), begin, end,
+                                                         device_status.get());
+    CheckCuda(cudaGetLastError(), "EvaluateHtWavefrontLevelKernel launch");
+  }
+  CheckCuda(cudaDeviceSynchronize(), "EvaluateHtWavefrontLevelKernel synchronize");
+
+  std::vector<std::uint8_t> status(states.size());
+  device_status.CopyToHost(status.data());
+  return status;
 }
 
 } // namespace cudaee::detail

@@ -151,6 +151,39 @@ struct HtRecursiveResult {
   HtRecursiveProof proof;
 };
 
+struct HtWavefrontOptions {
+  HtRecursiveOptions search_options{};
+  // 只控制 continuation 真值传播；leaf/c,d 后端仍由 search_options 分别配置。
+  PathCompatibilityBackend propagation_backend{PathCompatibilityBackend::kAuto};
+};
+
+struct HtWavefrontResult {
+  HtSearchStatus status{HtSearchStatus::kInvalid};
+  HtRecursiveProof proof;
+  std::string propagation_backend{"none"};
+  int selected_device{-1};
+  bool cpu_verified{false};
+  std::uint64_t moves_generated{};
+  std::uint64_t peak_frontier{};
+};
+
+// GPU continuation 层使用的紧凑只读任务；CPU 在接受结果前复算全部状态。
+struct HtWavefrontStateTask {
+  std::uint32_t move_begin{};
+  std::uint32_t move_count{};
+  std::uint8_t leaf_proven{};
+};
+
+struct HtWavefrontMoveTask {
+  std::uint32_t reply_begin{};
+  std::uint32_t reply_count{};
+};
+
+struct HtWavefrontReplyTask {
+  std::uint32_t child_index{kNoHtChild};
+  std::uint8_t path_infeasible{};
+};
+
 // 生成确定性排序的 OR 候选；reply_product 越小越优先。
 [[nodiscard]] std::vector<HtCdCandidate>
 GenerateHtCdCandidates(const GraphSnapshot& graph, NodeEdge target_edge,
@@ -182,6 +215,11 @@ EnumerateHtHamiltonReplies(const GraphSnapshot& graph, NodeEdge target_edge, std
 [[nodiscard]] bool VerifyHtRecursiveProof(const GraphSnapshot& graph, const HtRecursiveProof& proof,
                                           std::string* reason);
 
+// 主机按层生成完整 AND–OR 工作图，CPU/CUDA 反向传播后提取一个可重放成功子树。
+[[nodiscard]] HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph,
+                                                       NodeEdge target_edge,
+                                                       const HtWavefrontOptions& options = {});
+
 // V1 文本证书嵌入每个 leaf 的 path k-opt V1；读取只做结构校验，授权仍须调用 verifier。
 [[nodiscard]] std::string SerializeHtRecursiveProof(const HtRecursiveProof& proof);
 [[nodiscard]] HtRecursiveProof ParseHtRecursiveProof(std::string_view serialized);
@@ -195,6 +233,13 @@ namespace detail {
 ScreenHtCdCandidatesCuda(const GraphSnapshot& graph, NodeEdge target_edge,
                          const std::vector<HtCdScreenTask>& tasks, HtCdMode mode,
                          int* selected_device);
+
+[[nodiscard]] bool HtWavefrontCudaAvailable(std::string* reason);
+[[nodiscard]] std::vector<std::uint8_t>
+EvaluateHtWavefrontCuda(const std::vector<HtWavefrontStateTask>& states,
+                        const std::vector<HtWavefrontMoveTask>& moves,
+                        const std::vector<HtWavefrontReplyTask>& replies,
+                        const std::vector<std::uint32_t>& level_offsets, int* selected_device);
 
 } // namespace detail
 

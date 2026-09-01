@@ -69,6 +69,7 @@ add_test(
     --edges "${HT_RECURSIVE_EDGES}"
     --u 2 --v 4
     --proof "${HT_RECURSIVE_PROOF}"
+    --scheduler dfs
     --backend cpu
     --max-neighborhood 0
     --max-cd-candidates 8
@@ -94,6 +95,42 @@ add_test(
 set_tests_properties(integration.ht_recursive_verify PROPERTIES
   DEPENDS integration.ht_recursive_prove
   LABELS "integration;hamilton-tutte")
+
+set(HT_WAVEFRONT_PROOF "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.wavefront.ht-proof")
+add_test(
+  NAME integration.ht_wavefront_prove
+  COMMAND cudaee ht-prove
+    --tsp "${HT_RECURSIVE_TSP}"
+    --edges "${HT_RECURSIVE_EDGES}"
+    --u 2 --v 4
+    --proof "${HT_WAVEFRONT_PROOF}"
+    --scheduler wavefront
+    --backend cpu
+    --propagation-backend cpu
+    --max-neighborhood 0
+    --max-cd-candidates 8
+    --max-candidate-degree 0
+    --max-root-replies 1000
+    --max-k 3
+    --max-deletion-sets 1
+    --max-depth 1
+    --max-states 20000
+    --max-total-replies 200000
+    --max-replies-per-move 1000
+    --max-point-candidates 5
+    --max-end-candidates 5)
+set_tests_properties(integration.ht_wavefront_prove PROPERTIES
+  LABELS "integration;hamilton-tutte;wavefront")
+
+add_test(
+  NAME integration.ht_wavefront_verify
+  COMMAND cudaee ht-verify
+    --tsp "${HT_RECURSIVE_TSP}"
+    --edges "${HT_RECURSIVE_EDGES}"
+    --proof "${HT_WAVEFRONT_PROOF}")
+set_tests_properties(integration.ht_wavefront_verify PROPERTIES
+  DEPENDS integration.ht_wavefront_prove
+  LABELS "integration;hamilton-tutte;wavefront")
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)

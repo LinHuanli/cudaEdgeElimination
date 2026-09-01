@@ -20,6 +20,7 @@
 #include <string_view>
 #include <system_error>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -27,20 +28,22 @@ namespace {
 using Arguments = std::map<std::string, std::string>;
 
 void PrintHelp() {
-  std::cout << "cudaee：可验证 TSP GPU 边消元研究工具\n\n"
-            << "命令：\n"
-            << "  gpu-eliminate --tsp FILE --edges FILE --output FILE --proof FILE\n"
-            << "                [--backend auto|cpu|cuda] [--max-rounds N] [--manifest FILE]\n"
-            << "  verify        --tsp FILE --edges FILE --proof FILE\n"
-            << "  lp-solve      --input FILE --output FILE [--cuopt-library FILE]\n"
-            << "  lp-example    --output FILE\n"
-            << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
-            << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
-            << "                [--backend auto|cpu|cuda] [--max-depth N] [HT budgets]\n"
-            << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
-            << "  pipeline      与 gpu-eliminate 相同，可附加 --lp-epoch FILE\n"
-            << "                --lp-solution FILE [--cuopt-library FILE]\n\n"
-            << "所有输出必须位于源码仓库内；不支持或验证失败时不会删除边。\n";
+  std::cout
+      << "cudaee：可验证 TSP GPU 边消元研究工具\n\n"
+      << "命令：\n"
+      << "  gpu-eliminate --tsp FILE --edges FILE --output FILE --proof FILE\n"
+      << "                [--backend auto|cpu|cuda] [--max-rounds N] [--manifest FILE]\n"
+      << "  verify        --tsp FILE --edges FILE --proof FILE\n"
+      << "  lp-solve      --input FILE --output FILE [--cuopt-library FILE]\n"
+      << "  lp-example    --output FILE\n"
+      << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
+      << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
+      << "                [--scheduler dfs|wavefront] [--backend auto|cpu|cuda]\n"
+      << "                [--propagation-backend auto|cpu|cuda] [--max-depth N] [HT budgets]\n"
+      << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
+      << "  pipeline      与 gpu-eliminate 相同，可附加 --lp-epoch FILE\n"
+      << "                --lp-solution FILE [--cuopt-library FILE]\n\n"
+      << "所有输出必须位于源码仓库内；不支持或验证失败时不会删除边。\n";
 }
 
 Arguments ParseArguments(const int argc, char** argv, const int first) {
@@ -371,21 +374,51 @@ bool HtProveCommand(const Arguments& arguments) {
   options.enable_point_moves = ParseBooleanOption(arguments, "enable-point", true);
   options.enable_end_moves = ParseBooleanOption(arguments, "enable-end", true);
 
-  const cudaee::HtRecursiveResult result = cudaee::ProveEdgeByRecursiveHt(graph, target, options);
-  cudaee::WriteHtRecursiveProof(proof_path, result.proof);
-  const char* const status = result.status == cudaee::HtSearchStatus::kProven       ? "PROVEN"
-                             : result.status == cudaee::HtSearchStatus::kUnresolved ? "UNRESOLVED"
-                                                                                    : "INVALID";
-  std::cout << "status=" << status << " target=" << result.proof.target_edge.u << '-'
-            << result.proof.target_edge.v << " nodes=" << result.proof.nodes.size()
-            << " states=" << result.proof.states_expanded
-            << " replies=" << result.proof.replies_expanded
-            << " leaf_calls=" << result.proof.leaf_calls
-            << " reason=" << std::quoted(result.proof.reason) << '\n';
-  if (result.status == cudaee::HtSearchStatus::kInvalid) {
-    throw std::runtime_error("递归 HT 输入或内部复核失败: " + result.proof.reason);
+  const std::string scheduler = Optional(arguments, "scheduler", "dfs");
+  cudaee::HtSearchStatus search_status = cudaee::HtSearchStatus::kInvalid;
+  cudaee::HtRecursiveProof proof;
+  std::string propagation_backend = "none";
+  int selected_device = -1;
+  std::uint64_t moves_generated = 0;
+  std::uint64_t peak_frontier = 0;
+  if (scheduler == "dfs") {
+    cudaee::HtRecursiveResult result = cudaee::ProveEdgeByRecursiveHt(graph, target, options);
+    search_status = result.status;
+    proof = std::move(result.proof);
+  } else if (scheduler == "wavefront") {
+    cudaee::HtWavefrontResult result =
+        cudaee::ProveEdgeByWavefrontHt(graph, target,
+                                       {.search_options = options,
+                                        .propagation_backend = ParsePathCompatibilityBackend(
+                                            Optional(arguments, "propagation-backend", "auto"))});
+    search_status = result.status;
+    proof = std::move(result.proof);
+    propagation_backend = std::move(result.propagation_backend);
+    selected_device = result.selected_device;
+    moves_generated = result.moves_generated;
+    peak_frontier = result.peak_frontier;
+  } else {
+    throw std::invalid_argument("--scheduler 必须是 dfs 或 wavefront");
   }
-  return result.status == cudaee::HtSearchStatus::kProven;
+
+  cudaee::WriteHtRecursiveProof(proof_path, proof);
+  const char* const status = search_status == cudaee::HtSearchStatus::kProven       ? "PROVEN"
+                             : search_status == cudaee::HtSearchStatus::kUnresolved ? "UNRESOLVED"
+                                                                                    : "INVALID";
+  std::cout << "status=" << status << " scheduler=" << scheduler
+            << " target=" << proof.target_edge.u << '-' << proof.target_edge.v
+            << " nodes=" << proof.nodes.size() << " states=" << proof.states_expanded
+            << " replies=" << proof.replies_expanded << " leaf_calls=" << proof.leaf_calls;
+  if (scheduler == "wavefront") {
+    std::cout << " propagation_backend=" << propagation_backend
+              << " selected_device=" << selected_device << " moves=" << moves_generated
+              << " peak_frontier=" << peak_frontier;
+  }
+  std::cout << " reason=" << std::quoted(proof.reason) << '\n';
+  if (search_status == cudaee::HtSearchStatus::kInvalid) {
+    throw std::runtime_error("递归 HT 输入或内部复核失败: " + proof.reason);
+  }
+  return search_status == cudaee::HtSearchStatus::kProven;
 }
 
 void HtVerifyCommand(const Arguments& arguments) {
