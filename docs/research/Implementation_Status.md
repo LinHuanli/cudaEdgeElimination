@@ -60,7 +60,7 @@ M5 HT Hamilton reply 主机优化绑定 `f12c181`：批 API 只验证一次图�
 
 M5 HT leaf setup 画像与快照哈希复用绑定 `f71b472/c968b01`：V8 report/V10 summary 将 setup 拆为 proof 初始化、coverage 扫描和 cursor 构造，并要求四路 cursor 数一致。基线的 9,891 个 cursor 中，proof 初始化占 setup `92.57%`，根因是每个 leaf state 都重算同一不可变 graph 哈希。改为每 batch 计算一次后，CPU setup/leaf/search 从 `1.761/4.497/4.915 s` 降至 `0.232/2.981/3.398 s`，分别加速 `7.59×/1.51×/1.45×`。四路 51,309,996 cells、proof、最终图和 tour 均不变；下一瓶颈是占 CPU leaf `78.67%` 的精确 cost matrix。
 
-M5 HT CPU cost row 并行与 leaf 桶融合绑定 `34cf918/63133c7`：8,192 cells 以上按 task row 静态分片，最多 8 线程；无 OpenMP、小 batch 和单线程保持串行。同 commit 的 clean 1/8-thread A/B 中，48,879,635 cells 进入 726 个并行批次，CPU certify/leaf/search 从 `2.340/3.029/3.444 s` 降至 `0.701/1.442/1.867 s`，分别加速 `3.34×/2.10×/1.85×`。V12 再加入 CPU 融合为第五路；frontier batches `500 -> 86`、并行 cell 覆盖 `95.263% -> 99.489%`，leaf/search 降至 `1.236/1.655 s`，相对非融合 CPU 为 `1.149×/1.113×`。CPU 仍快于全 CUDA/hybrid/fused；五路 51,309,996 cells、proof、最终图和受保护 tour 均不变。未完成多实例最优 tour 门禁前，融合仍默认关闭。
+M5 HT CPU cost row 并行与 leaf 桶融合绑定 `34cf918/63133c7/623f167`：8,192 cells 以上按 task row 静态分片，最多 8 线程；无 OpenMP、小 batch 和单线程保持串行。clean 1/8-thread A/B 使 CPU certify/leaf/search 从 `2.340/3.029/3.444 s` 降至 `0.701/1.442/1.867 s`。V12 再加入 CPU 融合为第五路；pcb3038 leaf/search 为 `1.149×/1.113×`，rl5915/d15112 leaf 为 `1.085×/1.180×`、search 均为 `1.016×`。三份锁定公开 tour 及三实例五路 proof、规范工作量和最终图全部通过。CLI 现对 CPU leaf 默认融合，auto/CUDA 默认不变，显式 0/1 可覆盖。大实例下一瓶颈是 path-append。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 

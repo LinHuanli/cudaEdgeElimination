@@ -89,9 +89,9 @@ leaf setup 画像与快照哈希复用已完成：同一 8-target 协议中，9,
 
 CPU 精确 cost row 并行已完成：8,192 cells 以上按 task row 静态分片，最多使用 8 个可用线程；小 batch、无 OpenMP 和显式单线程均走相同串行实现。同 commit 的 1/8-thread A/B 中，CPU certify/leaf/search 从 `2.340/3.029/3.444 s` 降至 `0.701/1.442/1.867 s`。四路规范矩阵、proof、图和 tour 不变；下一步验证 CPU backend 与 leaf bucket fusion 的组合收益。
 
-CPU leaf bucket fusion 组合实验已完成：V12 增加 CPU 融合为第五路，frontier batches `500 -> 86`，并行 cell 覆盖 `95.263% -> 99.489%`，pcb3038 leaf/search 从 `1.421/1.841 s` 降至 `1.236/1.655 s`。五路 proof、规范工作量、最终图和 tour 相同。单实例证据不足以改变全局默认；先补齐 rl5915/d15112 的受保护 tour 并重复五路门禁，再评估 scorer 布局或 OpenMP 团队复用。
+CPU leaf bucket fusion 组合实验与多实例门禁已完成：V12 增加 CPU 融合为第五路，pcb3038 leaf/search 从 `1.421/1.841 s` 降至 `1.236/1.655 s`。锁定公开最优 tour 后，rl5915/d15112 的 CPU 融合 leaf 为 `1.085×/1.180×`，search 均为 `1.016×`。三实例五路 proof、规范工作量、最终图和 tour 相同。CLI 因此对 CPU leaf 默认融合，auto/CUDA 不变；下一步先画像大实例中占 search 45.76%/70.92% 的 path-append。
 
-M5 仍未完成：`rl5915/d15112` 的最优 tour witness、跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
+M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
 

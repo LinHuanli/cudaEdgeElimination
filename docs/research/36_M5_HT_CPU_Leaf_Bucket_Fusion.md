@@ -51,8 +51,10 @@ summary 升级为 `CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V12`，并输出 CPU 融合�
 
 同一 run 的 CPU 融合 search 为 1,654.602 ms，仍快于全 CUDA、非融合 hybrid 和融合 hybrid 的 2,482.606/2,260.692/2,093.695 ms。这些 CUDA 路径仍要求同步 CPU 全矩阵认证，所以不将 kernel 时间单独宣传为端到端收益。
 
-## 4. 决策与下一切片
+## 4. 当时决策与后续
 
-CPU 融合在 pcb3038 的冒烟和正式 8-target 两个规模上均稳定获益，因此保留 V12 的长期对照。但开关仍默认关闭：目前只有一个中型实例具有可用的最优 tour 安全见证，且早期 CUDA 路径曾出现无收益。在 rl5915/d15112 补齐受保护 tour 并通过同样五路门禁前，不把单实例结果改成全局默认策略。
+在提交 `6cb1145` 时，CPU 融合已在 pcb3038 的冒烟和正式 8-target 两个规模上稳定获益，因此保留 V12 的长期对照；但当时开关仍默认关闭：只有一个中型实例具有可用的最优 tour 安全见证，且早期 CUDA 路径曾出现无收益。在 rl5915/d15112 补齐受保护 tour 并通过同样五路门禁前，不把单实例结果改成全局默认策略。
 
 融合后 CPU leaf 仍占 search 的 74.70%，其中 cost evaluate 占 leaf 的 51.00%。下一性能切片应优先用多实例/多次重复确认调度收益，再针对 scorer 的距离数据布局或 batch 间 OpenMP 团队复用做单变量实验。任何后续优化都必须保留 CPU 逐 cell 整数认证与 proof 重放。
+
+后续已在 [多实例融合门禁](37_M5_HT_Multi_Instance_Fusion_Gates.md)中完成：rl5915/d15112 的公开最优 tour 和 8-target 五路门禁均通过，三实例 CPU 融合 search 均获益。因此 CLI 已对显式 CPU leaf 默认开启融合；auto/CUDA 仍默认关闭，显式 0/1 仍可覆盖。多实例画像同时将下一瓶颈从 pcb3038 scorer 转向大实例 path-append。

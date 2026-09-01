@@ -68,4 +68,4 @@ CPU Debug/Release、CUDA Release、GPU 大矩阵差分、无 OpenMP 回退和 co
 
 ## 6. 后续结果
 
-[CPU leaf 复杂度桶融合](36_M5_HT_CPU_Leaf_Bucket_Fusion.md)已在 clean commit 上完成：frontier batches 从 500 降至 86，并行 cells 覆盖从 95.263% 升至 99.489%，CPU leaf/search 分别获得 `1.149×/1.113×` 加速。V12 保留五路长期对照；在 rl5915/d15112 补齐最优 tour 门禁前，融合开关仍默认关闭。
+[CPU leaf 复杂度桶融合](36_M5_HT_CPU_Leaf_Bucket_Fusion.md)已在 clean commit 上完成：frontier batches 从 500 降至 86，并行 cells 覆盖从 95.263% 升至 99.489%，CPU leaf/search 分别获得 `1.149×/1.113×` 加速。[后续多实例门禁](37_M5_HT_Multi_Instance_Fusion_Gates.md)已补齐 rl5915/d15112 最优 tour，三实例都证明 CPU 融合获益；CLI 现对 CPU leaf 默认开启，auto/CUDA 仍默认关闭。

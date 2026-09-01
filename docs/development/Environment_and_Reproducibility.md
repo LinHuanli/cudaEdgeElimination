@@ -30,6 +30,8 @@
 
 `CUDAEE_ENABLE_OPENMP=ON` 时，8,192 个 cost cells 以上的 CPU 精确矩阵按 task row 静态分片；找不到 OpenMP 时安全退回串行。正式 HT benchmark 固定 `OMP_DYNAMIC=FALSE`、`OMP_PROC_BIND=spread`、`OMP_PLACES=cores`，并把 `CUDAEE_CPU_COST_THREADS`（默认 8，范围 1–8）写入 manifest。线程只改变独立 row 的计算时序，不改变矩阵布局和 proof 消费顺序。
 
+M5 三份最优 tour 不入 Git；先运行 `tools/fetch_m5_opt_tours.sh`。来源 URL、SHA-256 和生成文件名锁定于 `configs/m5_opt_tours.tsv`；即使哈希匹配，脚本仍用本项目重算节点置换、精确 tour 成本和稀疏图边完整性。所有下载与临时文件都位于仓库内的 `artifacts/` 和 `.tmp/`。
+
 ## 运行清单
 
 `run-manifest-v1` 至少包含 Git commit/dirty 状态、子模块提交、编译选项、GPU/驱动、cuOpt 版本、输入哈希、命令行、随机种子、开始结束时间和输出哈希。没有这些字段的性能数字只能作为临时观察。

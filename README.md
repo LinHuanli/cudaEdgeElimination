@@ -20,7 +20,7 @@
 - `ht-prove` sidecar 的整批 CPU 重放、不可变快照绑定、规范度数门禁和 `ht-commit` 原子删边；
 - `ht-scan` 的确定性有界目标切片、逐目标 wavefront、CPU 双重复核与 V2 原子提交；
 - HT scan V2 阶段计时，以及用 `--leaf-backend` 将 CUDA leaf cost 与 CPU 候选器解耦的混合路径；
-- 可显式启用、默认关闭的 `--fuse-leaf-buckets` 调度实验及 V3 leaf batch 计数；
+- CPU leaf CLI 默认开启、auto/CUDA 默认关闭且可显式 0/1 覆盖的 `--fuse-leaf-buckets` 调度；
 - HT scan V9 leaf/setup/cost/reply 子阶段计时及 V12 五路 benchmark summary；
 - path-count matching catalog 与 3/4/5-opt reconnect templates 的线程安全不可变缓存；
 - CPU/CUDA 共用的增量 leaf 精确成本矩阵路径，以及与 CPU scalar 逐字节一致的规范 proof 计数；
@@ -28,6 +28,7 @@
 - leaf setup 的 proof/coverage/cursor 画像，以及同一批次只计算一次的不可变快照哈希；
 - 8,192-cell 门槛以上按 task row 静态分片的有界 OpenMP CPU 精确成本矩阵；
 - TSPLIB 最优 tour 的严格成本、节点置换、活动边完整性与规范哈希门禁；
+- 带锁定来源 SHA-256 和本地精确复核的 pcb3038/rl5915/d15112 最优 tour 获取工具；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 
 尚未完成的研究项（跨目标 HT 融合和多 epoch 调度、M5 后续调优与多 GPU、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。精确困难叶有 18 个 block 的硬上限，超限只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
@@ -49,8 +50,9 @@ cmake --build --preset cuda-release
 CUDAEE_BENCHMARK_GPU=1 tools/run_jv_benchmark.sh pcb3038 5
 
 # M5 有界全图 HT CPU/CUDA pilot；同一切片、预算和独立 proof 重放
+./tools/fetch_m5_opt_tours.sh
 CUDAEE_BENCHMARK_GPU=1 \
-CUDAEE_BENCHMARK_TOUR=artifacts/lkh-tours/pcb3038.tour \
+CUDAEE_BENCHMARK_TOUR=artifacts/lkh-tours/pcb3038.opt.tour \
 tools/run_ht_scan_benchmark.sh pcb3038 8
 
 # 构建受限 Concorde overlay，并验证 cuOpt→完整图精确定价握手
