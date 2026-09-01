@@ -1,9 +1,11 @@
 #include "cuda_edge_elimination/elimination.hpp"
 #include "cuda_edge_elimination/graph.hpp"
+#include "cuda_edge_elimination/hamilton_tutte.hpp"
 #include "cuda_edge_elimination/lp_epoch.hpp"
 #include "cuda_edge_elimination/path_system.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -11,9 +13,13 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -29,6 +35,9 @@ void PrintHelp() {
             << "  lp-solve      --input FILE --output FILE [--cuopt-library FILE]\n"
             << "  lp-example    --output FILE\n"
             << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
+            << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
+            << "                [--backend auto|cpu|cuda] [--max-depth N] [HT budgets]\n"
+            << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
             << "  pipeline      与 gpu-eliminate 相同，可附加 --lp-epoch FILE\n"
             << "                --lp-solution FILE [--cuopt-library FILE]\n\n"
             << "所有输出必须位于源码仓库内；不支持或验证失败时不会删除边。\n";
@@ -63,6 +72,30 @@ std::string Optional(const Arguments& arguments, const std::string& name,
                      const std::string& fallback = {}) {
   const auto iterator = arguments.find(name);
   return iterator == arguments.end() ? fallback : iterator->second;
+}
+
+template <typename Integer>
+Integer ParseIntegerValue(const std::string& value, const std::string_view description) {
+  static_assert(std::is_integral_v<Integer>);
+  Integer parsed{};
+  const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed, 10);
+  if (value.empty() || error != std::errc{} || end != value.data() + value.size()) {
+    throw std::invalid_argument(std::string(description) + " 必须是范围内的十进制整数");
+  }
+  return parsed;
+}
+
+template <typename Integer>
+Integer RequiredInteger(const Arguments& arguments, const std::string& name) {
+  return ParseIntegerValue<Integer>(Required(arguments, name), "--" + name);
+}
+
+template <typename Integer>
+Integer OptionalInteger(const Arguments& arguments, const std::string& name,
+                        const Integer fallback) {
+  const auto iterator = arguments.find(name);
+  return iterator == arguments.end() ? fallback
+                                     : ParseIntegerValue<Integer>(iterator->second, "--" + name);
 }
 
 bool IsWithin(const std::filesystem::path& child, const std::filesystem::path& parent) {
@@ -113,6 +146,22 @@ cudaee::PathCompatibilityBackend ParsePathCompatibilityBackend(const std::string
   throw std::invalid_argument("--backend 必须是 auto、cpu 或 cuda");
 }
 
+cudaee::HtCdMode ParseHtCdMode(const std::string& value) {
+  if (value == "active-incompatible")
+    return cudaee::HtCdMode::kActiveIncompatible;
+  if (value == "missing-or-incompatible")
+    return cudaee::HtCdMode::kMissingOrIncompatible;
+  throw std::invalid_argument("--cd-mode 必须是 active-incompatible 或 missing-or-incompatible");
+}
+
+bool ParseBooleanOption(const Arguments& arguments, const std::string& name, const bool fallback) {
+  const std::uint32_t value = OptionalInteger<std::uint32_t>(arguments, name, fallback ? 1U : 0U);
+  if (value > 1U) {
+    throw std::invalid_argument("--" + name + " 必须是 0 或 1");
+  }
+  return value == 1U;
+}
+
 void WriteManifest(const std::filesystem::path& path, const cudaee::GraphSnapshot& graph,
                    const cudaee::EliminationResult& result, const Arguments& arguments) {
   std::ofstream output(path);
@@ -156,8 +205,7 @@ cudaee::EliminationResult RunEliminationCommand(const Arguments& arguments) {
   const std::filesystem::path proof_path = CheckedOutputPath(Required(arguments, "proof"));
   cudaee::GraphSnapshot graph =
       cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
-  const auto max_rounds =
-      static_cast<std::uint32_t>(std::stoul(Optional(arguments, "max-rounds", "100")));
+  const auto max_rounds = OptionalInteger<std::uint32_t>(arguments, "max-rounds", 100U);
   cudaee::EliminationResult result = cudaee::RunJvElimination(
       &graph, ParseBackend(Optional(arguments, "backend", "auto")), max_rounds);
   graph.WriteActiveEdges(output_path);
@@ -222,11 +270,11 @@ void LpExampleCommand(const Arguments& arguments) {
 }
 
 void PathTableCommand(const Arguments& arguments) {
-  const unsigned long parsed_path_count = std::stoul(Required(arguments, "paths"));
+  const std::uint32_t parsed_path_count = RequiredInteger<std::uint32_t>(arguments, "paths");
   if (parsed_path_count == 0 || parsed_path_count > cudaee::kMaxGpuPathCount) {
     throw std::invalid_argument("path-table 的 --paths 必须位于 [1,5]");
   }
-  const auto path_count = static_cast<std::uint32_t>(parsed_path_count);
+  const auto path_count = parsed_path_count;
   const cudaee::PathCompatibilityTable table = cudaee::BuildPathCompatibilityTable(path_count);
 
   std::vector<cudaee::PathCompatibilityQuery> queries;
@@ -272,6 +320,86 @@ void PathTableCommand(const Arguments& arguments) {
             << " cpu_verified=1\n";
 }
 
+bool HtProveCommand(const Arguments& arguments) {
+  const std::filesystem::path proof_path = CheckedOutputPath(Required(arguments, "proof"));
+  const cudaee::GraphSnapshot graph =
+      cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
+  const cudaee::NodeEdge target{RequiredInteger<std::int32_t>(arguments, "u"),
+                                RequiredInteger<std::int32_t>(arguments, "v")};
+
+  cudaee::HtRecursiveOptions options;
+  cudaee::HtShallowOptions& root = options.root_options;
+  root.max_neighborhood =
+      OptionalInteger<std::uint32_t>(arguments, "max-neighborhood", root.max_neighborhood);
+  root.max_cd_candidates =
+      OptionalInteger<std::uint32_t>(arguments, "max-cd-candidates", root.max_cd_candidates);
+  root.max_candidate_degree =
+      OptionalInteger<std::uint32_t>(arguments, "max-candidate-degree", root.max_candidate_degree);
+  root.max_reply_combinations =
+      OptionalInteger<std::uint64_t>(arguments, "max-root-replies", root.max_reply_combinations);
+  root.cd_mode = ParseHtCdMode(Optional(arguments, "cd-mode", "active-incompatible"));
+  root.candidate_backend = ParsePathCompatibilityBackend(Optional(arguments, "backend", "auto"));
+  root.leaf_options.max_k =
+      OptionalInteger<std::uint32_t>(arguments, "max-k", root.leaf_options.max_k);
+  if (root.leaf_options.max_k < 3U || root.leaf_options.max_k > 5U) {
+    throw std::invalid_argument("--max-k 必须位于 [3,5]");
+  }
+  root.leaf_options.max_deletion_sets =
+      OptionalInteger<std::uint64_t>(arguments, "max-deletion-sets", 100000U);
+  root.leaf_options.cost_backend = root.candidate_backend;
+  root.leaf_options.cost_batch_size = OptionalInteger<std::uint32_t>(
+      arguments, "cost-batch-size", root.leaf_options.cost_batch_size);
+  if (root.leaf_options.cost_batch_size == 0U) {
+    throw std::invalid_argument("--cost-batch-size 必须大于 0");
+  }
+  root.leaf_options.exact_fallback_max_blocks =
+      OptionalInteger<std::uint32_t>(arguments, "exact-blocks", 0U);
+  if (root.leaf_options.exact_fallback_max_blocks > 18U) {
+    throw std::invalid_argument("--exact-blocks 不得超过 18");
+  }
+
+  options.max_depth = OptionalInteger<std::uint32_t>(arguments, "max-depth", options.max_depth);
+  options.max_states = OptionalInteger<std::uint64_t>(arguments, "max-states", options.max_states);
+  options.max_total_replies =
+      OptionalInteger<std::uint64_t>(arguments, "max-total-replies", options.max_total_replies);
+  options.max_replies_per_move = OptionalInteger<std::uint64_t>(arguments, "max-replies-per-move",
+                                                                options.max_replies_per_move);
+  options.max_point_candidates = OptionalInteger<std::uint32_t>(arguments, "max-point-candidates",
+                                                                options.max_point_candidates);
+  options.max_end_candidates =
+      OptionalInteger<std::uint32_t>(arguments, "max-end-candidates", options.max_end_candidates);
+  options.enable_point_moves = ParseBooleanOption(arguments, "enable-point", true);
+  options.enable_end_moves = ParseBooleanOption(arguments, "enable-end", true);
+
+  const cudaee::HtRecursiveResult result = cudaee::ProveEdgeByRecursiveHt(graph, target, options);
+  cudaee::WriteHtRecursiveProof(proof_path, result.proof);
+  const char* const status = result.status == cudaee::HtSearchStatus::kProven       ? "PROVEN"
+                             : result.status == cudaee::HtSearchStatus::kUnresolved ? "UNRESOLVED"
+                                                                                    : "INVALID";
+  std::cout << "status=" << status << " target=" << result.proof.target_edge.u << '-'
+            << result.proof.target_edge.v << " nodes=" << result.proof.nodes.size()
+            << " states=" << result.proof.states_expanded
+            << " replies=" << result.proof.replies_expanded
+            << " leaf_calls=" << result.proof.leaf_calls
+            << " reason=" << std::quoted(result.proof.reason) << '\n';
+  if (result.status == cudaee::HtSearchStatus::kInvalid) {
+    throw std::runtime_error("递归 HT 输入或内部复核失败: " + result.proof.reason);
+  }
+  return result.status == cudaee::HtSearchStatus::kProven;
+}
+
+void HtVerifyCommand(const Arguments& arguments) {
+  const cudaee::GraphSnapshot graph =
+      cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
+  const cudaee::HtRecursiveProof proof = cudaee::ReadHtRecursiveProof(Required(arguments, "proof"));
+  std::string reason;
+  if (!cudaee::VerifyHtRecursiveProof(graph, proof, &reason)) {
+    throw std::runtime_error("递归 HT proof 复核失败: " + reason);
+  }
+  std::cout << "status=VERIFIED target=" << proof.target_edge.u << '-' << proof.target_edge.v
+            << " nodes=" << proof.nodes.size() << " replies=" << proof.replies_expanded << '\n';
+}
+
 } // namespace
 
 int main(const int argc, char** argv) {
@@ -292,6 +420,12 @@ int main(const int argc, char** argv) {
       LpExampleCommand(arguments);
     } else if (command == "path-table") {
       PathTableCommand(arguments);
+    } else if (command == "ht-prove") {
+      if (!HtProveCommand(arguments)) {
+        return 3;
+      }
+    } else if (command == "ht-verify") {
+      HtVerifyCommand(arguments);
     } else if (command == "pipeline") {
       const std::string lp_epoch = Optional(arguments, "lp-epoch");
       const std::string lp_solution = Optional(arguments, "lp-solution");

@@ -16,6 +16,8 @@ M4.3b2 先在 CPU 上固定递归真值和证书语义，再把执行顺序改�
 
 CPU DFS 和未来 GPU wavefront 必须计算同一表达式；只有调度顺序可以不同。当前实现是单目标研究 API，不修改图，也不向 `gpu-eliminate` 提交删除。
 
+研究 CLI `ht-prove` 从 TSPLIB/Concorde 边快照生成 V1 文件，`ht-verify` 从原快照独立重放。`ht-prove` 的成功、未解决和非法退出码分别为 0、3 和 2；即使未解决也覆盖写入一个 `proven=0` 文件，避免误用同路径下的旧成功证书。
+
 ## Move 与完整 replies
 
 根节点只允许浅层阶段已经验证的 `c,d` move。它选择一对与目标边严格 2-opt 不兼容的活动边端点（或按配置允许缺失边），Hamilton replies 是两个中心 surviving 邻边对的完整笛卡尔积。

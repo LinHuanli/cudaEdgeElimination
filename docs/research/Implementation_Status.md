@@ -13,7 +13,7 @@
 | M4.2b CUDA k-opt cost | 完成（候选器） | 批量精确成本矩阵；CPU/CUDA 单元一致；坏/漏候选 CPU 全模板兜底；memcheck 0 error |
 | M4.3a 精确困难叶 | 完成（有界 CPU fallback） | 收缩 forced outside matching；Held–Karp 子集 DP；通用交换 witness 独立重放；block 超限为 unresolved |
 | M4.3b1 浅层 HS AND–OR | 完成（研究 API） | `c,d` OR；完整邻边对 AND；嵌套 leaf 重放；CUDA flags 经 CPU 全量差分 |
-| M4.3b2 递归 HT 语义与证书 | 完成（CPU 研究 API） | extra point/end；扁平 continuation arena；嵌套 leaf V1；全局 proof V1 严格重放 |
+| M4.3b2 递归 HT 语义与证书 | 完成（CPU 研究 API/CLI） | extra point/end；continuation arena；全局 proof V1；`ht-prove`/`ht-verify` 严格重放 |
 | M4.3b3 GPU wavefront 与提交 | 待实现 | GPU 状态队列/continuation counters、批量叶调度、epoch commit 接线尚未完成 |
 | M5 中大型调优 | 待开始 | 首期不设最低加速比；pcb3038 尚未形成认证运行记录 |
 
@@ -37,7 +37,7 @@ CPU 精确困难叶：将每条 forced outside edge 收缩为可双向访问的 
 
 浅层 HT：固定 `c,d` move 后，重新枚举两个中心所有通过严格 2/3-opt 快速筛选的邻边对，并要求其笛卡尔积中的每个 reply 都有 path-infeasibility 或完整 path-system leaf proof。固定 8 点实例覆盖 30 个非空 replies；删除 reply、篡改 move/snapshot/leaf 均被 verifier 拒绝。CUDA 在稀疏 32 点 EUC/CEIL 批次上输出与 CPU 完全一致的 `c,d` flags，memcheck 为 0 error。
 
-递归 HT：CPU DFS 实现与后续 wavefront 相同的 `Leaf(F) OR ∨move ∧reply HT(F∪reply)` 真值。未解决状态可选择未出现在路径系统中的 point，或选择当前路径 endpoint；每个 move 必须记录其完整活动图 replies。成功子树保存为只向后引用的扁平 continuation arena，独立 verifier 从目标边重新规范化每个子状态并拒绝环、共享 child、遗漏 reply 和未引用节点。`CUDAEE_HT_RECURSIVE_PROOF_V1` 嵌入现有 path-k-opt V1 叶证明并严格拒绝非法计数、枚举值和尾随字段。固定 point/end 递归实例均由 8 点完整巡回穷举额外确认目标边不属于任何最优巡回；depth/budget fail-closed 与 proof 篡改已有回归。GPU 当前只参与根 `c,d` 候选筛选，递归调度仍在 CPU。
+递归 HT：CPU DFS 实现与后续 wavefront 相同的 `Leaf(F) OR ∨move ∧reply HT(F∪reply)` 真值。未解决状态可选择未出现在路径系统中的 point，或选择当前路径 endpoint；每个 move 必须记录其完整活动图 replies。成功子树保存为只向后引用的扁平 continuation arena，独立 verifier 从目标边重新规范化每个子状态并拒绝环、共享 child、遗漏 reply 和未引用节点。`CUDAEE_HT_RECURSIVE_PROOF_V1` 嵌入现有 path-k-opt V1 叶证明并严格拒绝非法计数、枚举值和尾随字段。固定 point/end 递归实例均由 8 点完整巡回穷举额外确认目标边不属于任何最优巡回；depth/budget fail-closed 与 proof 篡改已有回归。`ht-prove`/`ht-verify` 已覆盖固定实例的文件级端到端 CTest；未解决写入 `proven=0` 并返回退出码 3。GPU 当前只参与根 `c,d` 候选筛选，递归调度仍在 CPU。
 
 ## 安全边界
 

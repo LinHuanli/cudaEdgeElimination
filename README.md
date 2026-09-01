@@ -55,6 +55,17 @@ build/cuda-release/cudaee verify \
 build/cuda-release/cudaee path-table \
   --paths 5 --backend auto \
   --output artifacts/path-table-m5.manifest
+
+# 生成递归 HT 全局证书（只证明，不修改边集），随后独立重放
+build/cuda-release/cudaee ht-prove \
+  --tsp tests/data/recursive-point.tsp \
+  --edges tests/data/recursive-point.edg --u 2 --v 4 \
+  --proof artifacts/recursive-point.ht-proof --backend auto \
+  --max-depth 1 --max-k 3 --max-deletion-sets 1
+build/cuda-release/cudaee ht-verify \
+  --tsp tests/data/recursive-point.tsp \
+  --edges tests/data/recursive-point.edg \
+  --proof artifacts/recursive-point.ht-proof
 ```
 
 所有命令会拒绝把输出写到仓库之外。
