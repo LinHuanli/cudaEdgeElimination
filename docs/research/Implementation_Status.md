@@ -28,7 +28,7 @@
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
-| M5 中大型调优 | 进行中（JV 三轮 + HT profiling） | JV 三实例门禁；HT leaf 约占 80%；桶融合降 79% launches 但无稳定 wall 收益；leaf 内部画像待做 |
+| M5 中大型调优 | 进行中（JV 三轮 + HT profiling） | JV 三实例门禁；HT leaf 约占 80%；leaf 内 GPU cost 仅 2.2%，CPU consume/setup 合计约 96.5%；不可变表缓存待实现 |
 
 ## 当前基准结果
 
@@ -45,6 +45,8 @@ M5 HT scan pilot 绑定 `cd5ec3e`：pcb3038 的 CPU JV 固定点有 6,704 条边
 M5 HT profiling 绑定 `65f9488`：V2 报告把 work graph 拆成 leaf/path/reply 与 host residual，并用 `--leaf-backend` 建立第三条混合路径。相同 8-target clean run 中，CPU/全 CUDA/混合 search 为 `33.987/33.599/33.401 s`；混合仅 `1.018×`。CPU leaf 为 27.160 s（search 的 `79.914%`），Hamilton reply 为 6.245 s（`18.375%`），host residual 只有 0.228 s。三路 proof 均独立重放、边文件 SHA-256 一致且最优 tour 零缺边。
 
 M5 HT bucket fusion 绑定 `b5fde24`：V3 报告加入 leaf frontier/bucket/cost batch 计数，显式融合将 8-target 的 frontier batches 从 500 降到 86、CUDA cost batches 从 1,835 降到 382，cost cells 与 proof 不变；但 clean run 的混合/fused search 为 `32.672/32.905 s`，交错重复也仅约 `1.002×`。因此默认保持关闭，并把下一门禁改为 leaf 内部 cost/cursor/certification 计时。
+
+M5 HT leaf 子阶段画像绑定 `fe99f38`：V4 报告和 V5 summary 把 leaf 拆成 setup、cursor prepare、cost、scatter、consume、apply 与 verifier。相同 8-target clean run 中，混合 leaf 为 `26.489 s`，其中 setup `5.864 s`（`22.139%`）、GPU cost `0.584 s`（`2.204%`）、CPU cursor consume `19.695 s`（`74.352%`）；四路工作签名、最终边集、proof 重放与最优 tour 门禁均一致。下一步先缓存只由 path count/k 决定的不可变组合表，再细分 CPU completeness。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 

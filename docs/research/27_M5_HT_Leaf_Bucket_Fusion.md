@@ -88,3 +88,5 @@ clean run 与交错诊断对 wall time 的方向并不一致，但都确认 batc
 5. proof finalize 与 `VerifyPathSystemKOptProof`。
 
 若 cost matrix 占主导，才继续跨目标/跨 frontier 融合或 kernel 优化；若 cursor consume 与 CPU completeness 主导，则应先优化可验证的主机算法。无论哪条路径，都继续以 proof 字节、完整 CPU 重放、最终图和受保护 tour 为硬门禁。
+
+该门禁的正式结果见 [M5 HT leaf 子阶段画像](28_M5_HT_Leaf_Subphase_Profiling.md)：GPU cost 仅占混合 leaf 的 `2.204%`，CPU cursor consume 与 setup 才是主导项。

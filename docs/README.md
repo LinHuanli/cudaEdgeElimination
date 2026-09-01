@@ -33,5 +33,6 @@
 29. [M5 有界全图 HT 目标扫描](research/25_M5_HT_Target_Scan.md)：确定性目标切片、预算失败关闭、V2 原子提交与 pcb3038 CPU/CUDA pilot。
 30. [M5 HT 阶段画像与混合后端](research/26_M5_HT_Phase_Profiling_and_Hybrid.md)：V2 包含式计时、CPU/全 CUDA/混合三路门禁与跨目标 leaf 合批接口。
 31. [M5 HT leaf 复杂度桶融合](research/27_M5_HT_Leaf_Bucket_Fusion.md)：参数排除、V3 批计数、四路等价门禁与 launch 非主瓶颈结论。
+32. [M5 HT leaf 子阶段画像](research/28_M5_HT_Leaf_Subphase_Profiling.md)：V4/V5 细粒度计时、CPU consume/setup 主瓶颈与不可变表缓存门禁。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

@@ -77,6 +77,8 @@ JV 基线与第三轮优化已完成：三实例各预热一次、计时五次�
 
 同 target 跨复杂度桶融合已完成受控实验：frontier batches `500 -> 86`、CUDA cost batches `1835 -> 382`，但 clean run 的 search 反而由 32.672 s 增至 32.905 s，交错重复也只有约 `1.002×`。开关默认关闭；在跨目标重构前先拆分 leaf 内部 cost/cursor/CPU certification 时间。
 
+leaf 子阶段画像已完成：8-target 混合 leaf 的 GPU cost 仅占 `2.204%`，CPU cursor consume 占 `74.352%`，path proof/cursor setup 占 `22.139%`。因此跨目标 kernel 合批暂缓；先复用只依赖 path count/k 的不可变 matching/reconnect 表，再在不削弱 CPU completeness 契约的前提下细分并优化 consume。
+
 M5 仍未完成：`rl5915/d15112` 的最优 tour witness、跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
