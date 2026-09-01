@@ -9,9 +9,10 @@
 - epoch 快照、CPU 复核、最小度保护、确定性提交和 `proof-v1` 证明日志；
 - `lp-epoch-v1` CSR 模型、cuOpt C API 动态 sidecar、残差与精确定点下界；
 - Concorde 受限 overlay、列—边映射、`CCbigguy` 对偶注入与完整图精确定价证书；
+- 路径系统规范化、`m<=5` CPU 生成/CUDA 查询兼容表与 `m=6,7` CPU 回退；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 
-尚未完成的研究项（HS path-system GPU 化、cuOpt 退化对偶稳定化与精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。`lp-solve` 本身永不删除边；只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
+尚未完成的研究项（HS 叶 witness/AND–OR 搜索、cuOpt 退化对偶稳定化与精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。兼容表自身不授权删边；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
 
 ## 快速开始
 
@@ -45,6 +46,10 @@ build/cuda-release/cudaee verify \
   --tsp third_party/ElimTSP/data/pr299.tsp \
   --edges third_party/ElimTSP/data/pr299.edg \
   --proof artifacts/pr299.proof
+
+build/cuda-release/cudaee path-table \
+  --paths 5 --backend auto \
+  --output artifacts/path-table-m5.manifest
 ```
 
 所有命令会拒绝把输出写到仓库之外。

@@ -11,5 +11,6 @@
 7. [环境与复现](development/Environment_and_Reproducibility.md)：固定依赖、GPU 选择和磁盘约束。
 8. [仓库与 Git 工作流](development/Repository_and_Git_Workflow.md)：目录职责、分支、CI 与产物策略。
 9. [实现状态](research/Implementation_Status.md)：已完成证据、当前结果和明确未完成项。
+10. [路径系统与兼容表](research/06_Path_System_Compatibility.md)：规范化、穷举表、CUDA 查询与 CPU 回退契约。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

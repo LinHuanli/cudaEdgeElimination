@@ -18,6 +18,7 @@ set(CUDAEE_SOURCES
     src/common/distance.cpp
     src/common/graph.cpp
     src/cpu/jv_elimination.cpp
+    src/cpu/path_system.cpp
     src/lp/lp_epoch.cpp
     src/lp/cuopt_sidecar.cpp)
 
@@ -28,9 +29,13 @@ if(CUDAEE_ENABLE_CUDA)
     message(FATAL_ERROR "CUDAEE_ENABLE_CUDA=ON，但没有找到 CUDA 编译器")
   endif()
   enable_language(CUDA)
-  list(APPEND CUDAEE_SOURCES src/cuda/jv_cuda.cu)
+  list(APPEND CUDAEE_SOURCES
+      src/cuda/jv_cuda.cu
+      src/cuda/path_compatibility.cu)
 else()
-  list(APPEND CUDAEE_SOURCES src/cuda/jv_cuda_stub.cpp)
+  list(APPEND CUDAEE_SOURCES
+      src/cuda/jv_cuda_stub.cpp
+      src/cuda/path_compatibility_stub.cpp)
 endif()
 
 add_library(cudaee_core STATIC ${CUDAEE_SOURCES})

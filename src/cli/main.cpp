@@ -1,7 +1,9 @@
 #include "cuda_edge_elimination/elimination.hpp"
 #include "cuda_edge_elimination/graph.hpp"
 #include "cuda_edge_elimination/lp_epoch.hpp"
+#include "cuda_edge_elimination/path_system.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -26,6 +28,7 @@ void PrintHelp() {
             << "  verify        --tsp FILE --edges FILE --proof FILE\n"
             << "  lp-solve      --input FILE --output FILE [--cuopt-library FILE]\n"
             << "  lp-example    --output FILE\n"
+            << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
             << "  pipeline      与 gpu-eliminate 相同，可附加 --lp-epoch FILE\n"
             << "                --lp-solution FILE [--cuopt-library FILE]\n\n"
             << "所有输出必须位于源码仓库内；不支持或验证失败时不会删除边。\n";
@@ -97,6 +100,16 @@ cudaee::Backend ParseBackend(const std::string& value) {
     return cudaee::Backend::kCpu;
   if (value == "cuda")
     return cudaee::Backend::kCuda;
+  throw std::invalid_argument("--backend 必须是 auto、cpu 或 cuda");
+}
+
+cudaee::PathCompatibilityBackend ParsePathCompatibilityBackend(const std::string& value) {
+  if (value == "auto")
+    return cudaee::PathCompatibilityBackend::kAuto;
+  if (value == "cpu")
+    return cudaee::PathCompatibilityBackend::kCpu;
+  if (value == "cuda")
+    return cudaee::PathCompatibilityBackend::kCuda;
   throw std::invalid_argument("--backend 必须是 auto、cpu 或 cuda");
 }
 
@@ -208,6 +221,57 @@ void LpExampleCommand(const Arguments& arguments) {
   std::cout << "status=OK objective=min(x+2y) constraint=x+y>=1 expected_objective=1\n";
 }
 
+void PathTableCommand(const Arguments& arguments) {
+  const unsigned long parsed_path_count = std::stoul(Required(arguments, "paths"));
+  if (parsed_path_count == 0 || parsed_path_count > cudaee::kMaxGpuPathCount) {
+    throw std::invalid_argument("path-table 的 --paths 必须位于 [1,5]");
+  }
+  const auto path_count = static_cast<std::uint32_t>(parsed_path_count);
+  const cudaee::PathCompatibilityTable table = cudaee::BuildPathCompatibilityTable(path_count);
+
+  std::vector<cudaee::PathCompatibilityQuery> queries;
+  queries.reserve(static_cast<std::size_t>(table.outside_count) * table.inside_count);
+  for (std::uint32_t inside_index = 0; inside_index < table.inside_count; ++inside_index) {
+    for (std::uint32_t outside_index = 0; outside_index < table.outside_count; ++outside_index) {
+      queries.push_back({outside_index, inside_index});
+    }
+  }
+  const cudaee::PathCompatibilityBatchResult result = cudaee::EvaluatePathCompatibility(
+      path_count, queries, ParsePathCompatibilityBackend(Optional(arguments, "backend", "auto")));
+  if (!result.cpu_verified || result.generator_hash != table.generator_hash) {
+    throw std::runtime_error("路径兼容表未通过生成器哈希与 CPU 复核门禁");
+  }
+  const std::size_t compatible_pairs =
+      static_cast<std::size_t>(std::count_if(result.compatible.begin(), result.compatible.end(),
+                                             [](const std::uint8_t value) { return value != 0; }));
+
+  const std::filesystem::path output_path = CheckedOutputPath(Required(arguments, "output"));
+  std::ofstream output(output_path);
+  if (!output) {
+    throw std::runtime_error("无法创建路径兼容表清单: " + output_path.string());
+  }
+  output << "CUDAEE_PATH_COMPATIBILITY_MANIFEST_V1\n";
+  output << "path_count " << table.path_count << '\n';
+  output << "outside_count " << table.outside_count << '\n';
+  output << "inside_count " << table.inside_count << '\n';
+  output << "words_per_inside " << table.words_per_inside << '\n';
+  output << "packed_bytes " << table.coverage.size() * sizeof(std::uint64_t) << '\n';
+  output << "generator_hash " << cudaee::HexHash(table.generator_hash) << '\n';
+  output << "backend " << result.backend << '\n';
+  output << "selected_device " << result.selected_device << '\n';
+  output << "queries " << queries.size() << '\n';
+  output << "compatible_pairs " << compatible_pairs << '\n';
+  output << "cpu_verified 1\nEND\n";
+  if (!output) {
+    throw std::runtime_error("写入路径兼容表清单失败: " + output_path.string());
+  }
+  std::cout << "status=OK paths=" << path_count << " backend=" << result.backend
+            << " table_hash=" << cudaee::HexHash(table.generator_hash)
+            << " packed_bytes=" << table.coverage.size() * sizeof(std::uint64_t)
+            << " queries=" << queries.size() << " compatible_pairs=" << compatible_pairs
+            << " cpu_verified=1\n";
+}
+
 } // namespace
 
 int main(const int argc, char** argv) {
@@ -226,6 +290,8 @@ int main(const int argc, char** argv) {
       LpSolveCommand(arguments);
     } else if (command == "lp-example") {
       LpExampleCommand(arguments);
+    } else if (command == "path-table") {
+      PathTableCommand(arguments);
     } else if (command == "pipeline") {
       const std::string lp_epoch = Optional(arguments, "lp-epoch");
       const std::string lp_solution = Optional(arguments, "lp-solution");

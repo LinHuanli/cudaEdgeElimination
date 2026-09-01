@@ -8,7 +8,8 @@
 | M3 Concorde 导出 | 完成 | 内容寻址受限 overlay；Concorde graph 目标映射复核；随机 20 点和 pr299 CSR 往返 |
 | M3 完整图 exact pricing | 完成（安全下界桥接） | `CCbigguy` 注入；完整图负 reduced-cost penalty；三方哈希；错配拒绝 |
 | M3.1 对偶稳定化与边集导出 | 待实现 | pr299 PDLP 完整图界偏弱；尚未导出每边 exact RC/Concorde 消元后边集 |
-| M4 HS path-system GPU | 待实现 | `m<=5` 表与 `m=6,7` CPU fallback 尚未接入 CLI |
+| M4.1 path-system 组合层 | 完成 | 路径规范化；固定哈希表；368,047 单元 CPU/CUDA 全量差分；`m=6,7` CPU fallback |
+| M4.2 HS 叶证明与搜索 | 待实现 | 3/4/5-opt witness、困难叶 fallback、HS AND–OR 与 proof 重放尚未接线 |
 | M5 中大型调优 | 待开始 | 首期不设最低加速比；pcb3038 尚未形成认证运行记录 |
 
 ## 当前基准结果
@@ -21,6 +22,8 @@ Concorde 随机 20 点 epoch：25 行、43 列；QSopt 与 cuOpt 模型目标均
 
 pr299 Concorde epoch：454 行、888 列、8561 个非零元；cuOpt 状态 `OPTIMAL`，模型目标 `48187.777777780764`，primal violation `8.37e-11`，reduced-cost residual `4.87e-10`。完整图 exact lower bound 为 `43977.2693797`，合法但较弱；这说明后续需要对偶稳定化/迭代补列，而不是跳过负 reduced-cost penalty。
 
+路径兼容表：`m=5` 为 45,360 字节，生成器哈希 `f6bccacc5c1fa84f`；362,880 个 `m=5` 单元和全部较小表均通过 CPU/CUDA 差分，CUDA memcheck 为 0 error。`m=6,7` 不建立完整表，按契约使用 CPU 直接判定。
+
 ## 安全边界
 
-`gpu-eliminate` 目前只实现 JV quick candidate search；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。HS 与 M3.1 必须标为 pending；仍严禁从 cuOpt 浮点 reduced cost 直接构造删除记录。
+`gpu-eliminate` 目前只实现 JV quick candidate search；path-system 兼容表只是尚未授权删边的组合基础；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。HS 叶证明与 M3.1 必须标为 pending；仍严禁从布尔兼容表或 cuOpt 浮点 reduced cost 直接构造删除记录。

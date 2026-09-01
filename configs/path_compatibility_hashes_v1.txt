@@ -1,0 +1,8 @@
+CUDAEE_PATH_COMPATIBILITY_HASHES_V1
+# m outside_count inside_count words_per_inside packed_bytes generator_hash
+record 1 1 1 1 8 4104b5c5658e8f3a
+record 2 2 3 1 24 5fcd7fdac93b4fe9
+record 3 8 15 1 120 9642d8a1cb6bf1ee
+record 4 48 105 1 840 1853eb4cc99dd217
+record 5 384 945 6 45360 f6bccacc5c1fa84f
+END

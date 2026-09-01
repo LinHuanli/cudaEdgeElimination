@@ -5,6 +5,26 @@ target_compile_options(cudaee_unit PRIVATE -Wall -Wextra -Wconversion -Wshadow -
 
 add_test(NAME unit.core COMMAND cudaee_unit)
 
+add_executable(cudaee_path_system_unit unit/test_path_system.cpp)
+target_link_libraries(cudaee_path_system_unit PRIVATE cudaee_core)
+target_compile_options(cudaee_path_system_unit PRIVATE
+  -Wall -Wextra -Wconversion -Wshadow -Wformat=2)
+add_test(NAME unit.path_system COMMAND cudaee_path_system_unit)
+if(CUDAEE_ENABLE_CUDA)
+  set_tests_properties(unit.path_system PROPERTIES LABELS "correctness;path-system;gpu")
+else()
+  set_tests_properties(unit.path_system PROPERTIES LABELS "correctness;path-system")
+endif()
+
+add_test(
+  NAME integration.path_table_manifest
+  COMMAND cudaee path-table
+    --paths 5
+    --backend cpu
+    --output "${CMAKE_CURRENT_BINARY_DIR}/tmp/path-table-m5.cpu.manifest")
+set_tests_properties(integration.path_table_manifest PROPERTIES
+  LABELS "integration;path-system")
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
   add_test(
