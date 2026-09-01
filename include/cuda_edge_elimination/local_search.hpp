@@ -154,6 +154,15 @@ struct PathSystemKOptBatchResult {
   std::uint64_t cpu_long_tail_batches{};
   std::uint64_t cpu_long_tail_tasks{};
   std::uint64_t cpu_long_tail_cells{};
+  // 同步 wall time 只用于诊断，不进入 leaf proof。
+  double setup_ms{};
+  double cursor_prepare_ms{};
+  double cost_evaluate_ms{};
+  double cost_scatter_ms{};
+  double cursor_consume_ms{};
+  double scalar_search_ms{};
+  double apply_ms{};
+  double proof_verify_ms{};
 };
 
 // 逐个解决未覆盖 outside matching，并用 inside coverage 合并重复叶证明。

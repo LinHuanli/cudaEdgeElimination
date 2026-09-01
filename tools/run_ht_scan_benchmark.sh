@@ -223,6 +223,34 @@ if [[ "${hybrid_leaf_cells}" != "${fused_leaf_cells}" ]]; then
   echo "leaf bucket 融合改变了 cost cell 工作量" >&2
   exit 1
 fi
+cpu_leaf_setup_ms="$(read_field "${run_dir}/cpu.report" leaf_setup_ms)"
+cpu_leaf_scalar_search_ms="$(read_field "${run_dir}/cpu.report" leaf_scalar_search_ms)"
+cpu_leaf_apply_ms="$(read_field "${run_dir}/cpu.report" leaf_apply_ms)"
+cpu_leaf_proof_verify_ms="$(read_field "${run_dir}/cpu.report" leaf_proof_verify_ms)"
+cuda_leaf_setup_ms="$(read_field "${run_dir}/cuda.report" leaf_setup_ms)"
+cuda_leaf_cursor_prepare_ms="$(read_field "${run_dir}/cuda.report" leaf_cursor_prepare_ms)"
+cuda_leaf_cost_evaluate_ms="$(read_field "${run_dir}/cuda.report" leaf_cost_evaluate_ms)"
+cuda_leaf_cost_scatter_ms="$(read_field "${run_dir}/cuda.report" leaf_cost_scatter_ms)"
+cuda_leaf_cursor_consume_ms="$(read_field "${run_dir}/cuda.report" leaf_cursor_consume_ms)"
+cuda_leaf_scalar_search_ms="$(read_field "${run_dir}/cuda.report" leaf_scalar_search_ms)"
+cuda_leaf_apply_ms="$(read_field "${run_dir}/cuda.report" leaf_apply_ms)"
+cuda_leaf_proof_verify_ms="$(read_field "${run_dir}/cuda.report" leaf_proof_verify_ms)"
+hybrid_leaf_setup_ms="$(read_field "${run_dir}/hybrid.report" leaf_setup_ms)"
+hybrid_leaf_cursor_prepare_ms="$(read_field "${run_dir}/hybrid.report" leaf_cursor_prepare_ms)"
+hybrid_leaf_cost_evaluate_ms="$(read_field "${run_dir}/hybrid.report" leaf_cost_evaluate_ms)"
+hybrid_leaf_cost_scatter_ms="$(read_field "${run_dir}/hybrid.report" leaf_cost_scatter_ms)"
+hybrid_leaf_cursor_consume_ms="$(read_field "${run_dir}/hybrid.report" leaf_cursor_consume_ms)"
+hybrid_leaf_scalar_search_ms="$(read_field "${run_dir}/hybrid.report" leaf_scalar_search_ms)"
+hybrid_leaf_apply_ms="$(read_field "${run_dir}/hybrid.report" leaf_apply_ms)"
+hybrid_leaf_proof_verify_ms="$(read_field "${run_dir}/hybrid.report" leaf_proof_verify_ms)"
+fused_leaf_setup_ms="$(read_field "${run_dir}/fused.report" leaf_setup_ms)"
+fused_leaf_cursor_prepare_ms="$(read_field "${run_dir}/fused.report" leaf_cursor_prepare_ms)"
+fused_leaf_cost_evaluate_ms="$(read_field "${run_dir}/fused.report" leaf_cost_evaluate_ms)"
+fused_leaf_cost_scatter_ms="$(read_field "${run_dir}/fused.report" leaf_cost_scatter_ms)"
+fused_leaf_cursor_consume_ms="$(read_field "${run_dir}/fused.report" leaf_cursor_consume_ms)"
+fused_leaf_scalar_search_ms="$(read_field "${run_dir}/fused.report" leaf_scalar_search_ms)"
+fused_leaf_apply_ms="$(read_field "${run_dir}/fused.report" leaf_apply_ms)"
+fused_leaf_proof_verify_ms="$(read_field "${run_dir}/fused.report" leaf_proof_verify_ms)"
 cpu_path_append_ms="$(read_field "${run_dir}/cpu.report" path_append_ms)"
 cuda_path_append_ms="$(read_field "${run_dir}/cuda.report" path_append_ms)"
 hybrid_path_append_ms="$(read_field "${run_dir}/hybrid.report" path_append_ms)"
@@ -275,6 +303,28 @@ hybrid_leaf_speedup="$(awk -v cpu="${cpu_leaf_ms}" -v hybrid="${hybrid_leaf_ms}"
 fused_search_speedup="$(awk -v cpu="${cpu_search_ms}" -v fused="${fused_search_ms}" 'BEGIN { printf "%.3f", cpu/fused }')"
 fused_wall_speedup="$(awk -v cpu="${cpu_wall_ms}" -v fused="${fused_wall_ms}" 'BEGIN { printf "%.3f", cpu/fused }')"
 fused_leaf_speedup="$(awk -v hybrid="${hybrid_leaf_ms}" -v fused="${fused_leaf_ms}" 'BEGIN { printf "%.3f", hybrid/fused }')"
+cpu_leaf_residual_ms="$(awk -v total="${cpu_leaf_ms}" -v setup="${cpu_leaf_setup_ms}" \
+  -v scalar="${cpu_leaf_scalar_search_ms}" -v apply="${cpu_leaf_apply_ms}" \
+  -v verify="${cpu_leaf_proof_verify_ms}" \
+  'BEGIN { printf "%.6f", total-setup-scalar-apply-verify }')"
+cuda_leaf_residual_ms="$(awk -v total="${cuda_leaf_ms}" -v setup="${cuda_leaf_setup_ms}" \
+  -v prepare="${cuda_leaf_cursor_prepare_ms}" -v cost="${cuda_leaf_cost_evaluate_ms}" \
+  -v scatter="${cuda_leaf_cost_scatter_ms}" -v consume="${cuda_leaf_cursor_consume_ms}" \
+  -v scalar="${cuda_leaf_scalar_search_ms}" -v apply="${cuda_leaf_apply_ms}" \
+  -v verify="${cuda_leaf_proof_verify_ms}" \
+  'BEGIN { printf "%.6f", total-setup-prepare-cost-scatter-consume-scalar-apply-verify }')"
+hybrid_leaf_residual_ms="$(awk -v total="${hybrid_leaf_ms}" -v setup="${hybrid_leaf_setup_ms}" \
+  -v prepare="${hybrid_leaf_cursor_prepare_ms}" -v cost="${hybrid_leaf_cost_evaluate_ms}" \
+  -v scatter="${hybrid_leaf_cost_scatter_ms}" -v consume="${hybrid_leaf_cursor_consume_ms}" \
+  -v scalar="${hybrid_leaf_scalar_search_ms}" -v apply="${hybrid_leaf_apply_ms}" \
+  -v verify="${hybrid_leaf_proof_verify_ms}" \
+  'BEGIN { printf "%.6f", total-setup-prepare-cost-scatter-consume-scalar-apply-verify }')"
+fused_leaf_residual_ms="$(awk -v total="${fused_leaf_ms}" -v setup="${fused_leaf_setup_ms}" \
+  -v prepare="${fused_leaf_cursor_prepare_ms}" -v cost="${fused_leaf_cost_evaluate_ms}" \
+  -v scatter="${fused_leaf_cost_scatter_ms}" -v consume="${fused_leaf_cursor_consume_ms}" \
+  -v scalar="${fused_leaf_scalar_search_ms}" -v apply="${fused_leaf_apply_ms}" \
+  -v verify="${fused_leaf_proof_verify_ms}" \
+  'BEGIN { printf "%.6f", total-setup-prepare-cost-scatter-consume-scalar-apply-verify }')"
 cpu_host_build_ms="$(awk -v work="${cpu_work_graph_ms}" -v leaf="${cpu_leaf_ms}" \
   -v path="${cpu_path_append_ms}" -v hamilton="${cpu_hamilton_reply_ms}" \
   -v end="${cpu_end_reply_ms}" 'BEGIN { printf "%.6f", work-leaf-path-hamilton-end }')"
@@ -333,7 +383,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V4"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V5"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -363,6 +413,38 @@ summary="${run_dir}/summary.txt"
   echo "fused_leaf_frontier_batches ${fused_leaf_frontier_batches}"
   echo "hybrid_leaf_bucket_count ${hybrid_leaf_bucket_count}"
   echo "fused_leaf_bucket_count ${fused_leaf_bucket_count}"
+  echo "cpu_leaf_setup_ms ${cpu_leaf_setup_ms}"
+  echo "cpu_leaf_scalar_search_ms ${cpu_leaf_scalar_search_ms}"
+  echo "cpu_leaf_apply_ms ${cpu_leaf_apply_ms}"
+  echo "cpu_leaf_proof_verify_ms ${cpu_leaf_proof_verify_ms}"
+  echo "cpu_leaf_residual_ms ${cpu_leaf_residual_ms}"
+  echo "cuda_leaf_setup_ms ${cuda_leaf_setup_ms}"
+  echo "cuda_leaf_cursor_prepare_ms ${cuda_leaf_cursor_prepare_ms}"
+  echo "cuda_leaf_cost_evaluate_ms ${cuda_leaf_cost_evaluate_ms}"
+  echo "cuda_leaf_cost_scatter_ms ${cuda_leaf_cost_scatter_ms}"
+  echo "cuda_leaf_cursor_consume_ms ${cuda_leaf_cursor_consume_ms}"
+  echo "cuda_leaf_scalar_search_ms ${cuda_leaf_scalar_search_ms}"
+  echo "cuda_leaf_apply_ms ${cuda_leaf_apply_ms}"
+  echo "cuda_leaf_proof_verify_ms ${cuda_leaf_proof_verify_ms}"
+  echo "cuda_leaf_residual_ms ${cuda_leaf_residual_ms}"
+  echo "hybrid_leaf_setup_ms ${hybrid_leaf_setup_ms}"
+  echo "hybrid_leaf_cursor_prepare_ms ${hybrid_leaf_cursor_prepare_ms}"
+  echo "hybrid_leaf_cost_evaluate_ms ${hybrid_leaf_cost_evaluate_ms}"
+  echo "hybrid_leaf_cost_scatter_ms ${hybrid_leaf_cost_scatter_ms}"
+  echo "hybrid_leaf_cursor_consume_ms ${hybrid_leaf_cursor_consume_ms}"
+  echo "hybrid_leaf_scalar_search_ms ${hybrid_leaf_scalar_search_ms}"
+  echo "hybrid_leaf_apply_ms ${hybrid_leaf_apply_ms}"
+  echo "hybrid_leaf_proof_verify_ms ${hybrid_leaf_proof_verify_ms}"
+  echo "hybrid_leaf_residual_ms ${hybrid_leaf_residual_ms}"
+  echo "fused_leaf_setup_ms ${fused_leaf_setup_ms}"
+  echo "fused_leaf_cursor_prepare_ms ${fused_leaf_cursor_prepare_ms}"
+  echo "fused_leaf_cost_evaluate_ms ${fused_leaf_cost_evaluate_ms}"
+  echo "fused_leaf_cost_scatter_ms ${fused_leaf_cost_scatter_ms}"
+  echo "fused_leaf_cursor_consume_ms ${fused_leaf_cursor_consume_ms}"
+  echo "fused_leaf_scalar_search_ms ${fused_leaf_scalar_search_ms}"
+  echo "fused_leaf_apply_ms ${fused_leaf_apply_ms}"
+  echo "fused_leaf_proof_verify_ms ${fused_leaf_proof_verify_ms}"
+  echo "fused_leaf_residual_ms ${fused_leaf_residual_ms}"
   echo "leaf_speedup ${leaf_speedup}"
   echo "hybrid_leaf_speedup ${hybrid_leaf_speedup}"
   echo "fused_leaf_speedup_vs_hybrid ${fused_leaf_speedup}"

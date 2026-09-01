@@ -905,6 +905,14 @@ void RecordLeafBatch(WaveBuildContext* const context, const PathSystemKOptBatchR
                 "CPU long-tail batches");
   AddLeafMetric(&result.leaf_cpu_long_tail_tasks, batch.cpu_long_tail_tasks, "CPU long-tail tasks");
   AddLeafMetric(&result.leaf_cpu_long_tail_cells, batch.cpu_long_tail_cells, "CPU long-tail cells");
+  result.leaf_setup_ms += batch.setup_ms;
+  result.leaf_cursor_prepare_ms += batch.cursor_prepare_ms;
+  result.leaf_cost_evaluate_ms += batch.cost_evaluate_ms;
+  result.leaf_cost_scatter_ms += batch.cost_scatter_ms;
+  result.leaf_cursor_consume_ms += batch.cursor_consume_ms;
+  result.leaf_scalar_search_ms += batch.scalar_search_ms;
+  result.leaf_apply_ms += batch.apply_ms;
+  result.leaf_proof_verify_ms += batch.proof_verify_ms;
   if (batch.cost_backend != "none") {
     if (result.leaf_cost_backend == "none") {
       result.leaf_cost_backend = batch.cost_backend;

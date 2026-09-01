@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -26,6 +27,26 @@ namespace {
 
 using EdgeSet = std::set<NodeEdge>;
 constexpr std::array<std::size_t, 3U> kKOptTemplateCounts = {4U, 25U, 208U};
+
+using SteadyClock = std::chrono::steady_clock;
+
+double ElapsedMilliseconds(const SteadyClock::time_point begin) {
+  return std::chrono::duration<double, std::milli>(SteadyClock::now() - begin).count();
+}
+
+class ScopedPhaseTimer {
+public:
+  explicit ScopedPhaseTimer(double* const target) : target_(target), begin_(SteadyClock::now()) {}
+
+  ScopedPhaseTimer(const ScopedPhaseTimer&) = delete;
+  ScopedPhaseTimer& operator=(const ScopedPhaseTimer&) = delete;
+
+  ~ScopedPhaseTimer() { *target_ += ElapsedMilliseconds(begin_); }
+
+private:
+  double* target_;
+  SteadyClock::time_point begin_;
+};
 
 NodeEdge CanonicalEdge(const std::int32_t first, const std::int32_t second) {
   return first < second ? NodeEdge{first, second} : NodeEdge{second, first};
@@ -1779,9 +1800,12 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
   }
 
   std::vector<BatchedPathProofWork> works;
-  works.reserve(path_systems.size());
-  for (const NormalizedPathSystem& paths : path_systems) {
-    works.push_back(InitializeBatchedPathProof(graph, paths));
+  {
+    ScopedPhaseTimer timer(&result.setup_ms);
+    works.reserve(path_systems.size());
+    for (const NormalizedPathSystem& paths : path_systems) {
+      works.push_back(InitializeBatchedPathProof(graph, paths));
+    }
   }
   const bool can_batch_costs = options.max_k >= 3U && options.max_k <= 5U &&
                                options.cost_batch_size != 0U &&
@@ -1795,22 +1819,25 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
   };
   while (true) {
     std::vector<ActiveSearch> active;
-    for (std::size_t path_index = 0U; path_index < works.size(); ++path_index) {
-      BatchedPathProofWork& work = works[path_index];
-      if (work.finished) {
-        continue;
+    {
+      ScopedPhaseTimer timer(&result.setup_ms);
+      for (std::size_t path_index = 0U; path_index < works.size(); ++path_index) {
+        BatchedPathProofWork& work = works[path_index];
+        if (work.finished) {
+          continue;
+        }
+        FinishBatchedPathProofIfCovered(&work);
+        if (work.finished) {
+          continue;
+        }
+        const std::uint32_t source = *FirstUncoveredOutside(work);
+        ActiveSearch search{.path_index = path_index, .source = source, .cursor = std::nullopt};
+        if (can_batch_costs) {
+          search.cursor.emplace(graph, path_systems[path_index], work.outside[source],
+                                required_edge, options);
+        }
+        active.push_back(std::move(search));
       }
-      FinishBatchedPathProofIfCovered(&work);
-      if (work.finished) {
-        continue;
-      }
-      const std::uint32_t source = *FirstUncoveredOutside(work);
-      ActiveSearch search{.path_index = path_index, .source = source, .cursor = std::nullopt};
-      if (can_batch_costs) {
-        search.cursor.emplace(graph, path_systems[path_index], work.outside[source], required_edge,
-                              options);
-      }
-      active.push_back(std::move(search));
     }
     if (active.empty()) {
       break;
@@ -1829,7 +1856,11 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
         if (!active[active_index].cursor.has_value()) {
           continue;
         }
-        const KOptCursorBlock* const block = active[active_index].cursor->PrepareNextBlock();
+        const KOptCursorBlock* block = nullptr;
+        {
+          ScopedPhaseTimer timer(&result.cursor_prepare_ms);
+          block = active[active_index].cursor->PrepareNextBlock();
+        }
         if (block == nullptr) {
           continue;
         }
@@ -1865,21 +1896,24 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
         const PathCompatibilityBackend selected_cost_backend =
             SelectKOptCostBackend(options, requested_cells);
         KOptCostBatchResult costs;
-        try {
-          costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, selected_cost_backend);
-        } catch (const std::exception& error) {
-          if (selected_cost_backend != PathCompatibilityBackend::kAuto) {
-            for (const CursorSlice& slice : slices_by_k[bucket]) {
-              active[slice.active_index].cursor->FailCost(error.what());
+        {
+          ScopedPhaseTimer timer(&result.cost_evaluate_ms);
+          try {
+            costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, selected_cost_backend);
+          } catch (const std::exception& error) {
+            if (selected_cost_backend != PathCompatibilityBackend::kAuto) {
+              for (const CursorSlice& slice : slices_by_k[bucket]) {
+                active[slice.active_index].cursor->FailCost(error.what());
+              }
+              RecordKOptBatchBackend(&result,
+                                     selected_cost_backend == PathCompatibilityBackend::kCuda
+                                         ? "cuda-error"
+                                         : "cpu-error",
+                                     -1);
+              continue;
             }
-            RecordKOptBatchBackend(&result,
-                                   selected_cost_backend == PathCompatibilityBackend::kCuda
-                                       ? "cuda-error"
-                                       : "cpu-error",
-                                   -1);
-            continue;
+            costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, PathCompatibilityBackend::kCpu);
           }
-          costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, PathCompatibilityBackend::kCpu);
         }
         if (!AddWithoutOverflow(&result.cost_cells, costs.added_costs.size())) {
           throw std::overflow_error("path-system k-opt batch cost cell 统计溢出");
@@ -1897,14 +1931,20 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
           const std::size_t cell_begin = slice.row_begin * costs.template_count;
           const std::size_t cell_count = slice.row_count * costs.template_count;
           KOptCostBatchResult cursor_costs;
-          cursor_costs.k = k;
-          cursor_costs.template_count = costs.template_count;
-          cursor_costs.added_costs.assign(
-              costs.added_costs.begin() + static_cast<std::ptrdiff_t>(cell_begin),
-              costs.added_costs.begin() + static_cast<std::ptrdiff_t>(cell_begin + cell_count));
-          cursor_costs.backend = costs.backend;
-          cursor_costs.selected_device = costs.selected_device;
-          active[slice.active_index].cursor->ConsumeBlock(cursor_costs);
+          {
+            ScopedPhaseTimer timer(&result.cost_scatter_ms);
+            cursor_costs.k = k;
+            cursor_costs.template_count = costs.template_count;
+            cursor_costs.added_costs.assign(
+                costs.added_costs.begin() + static_cast<std::ptrdiff_t>(cell_begin),
+                costs.added_costs.begin() + static_cast<std::ptrdiff_t>(cell_begin + cell_count));
+            cursor_costs.backend = costs.backend;
+            cursor_costs.selected_device = costs.selected_device;
+          }
+          {
+            ScopedPhaseTimer timer(&result.cursor_consume_ms);
+            active[slice.active_index].cursor->ConsumeBlock(cursor_costs);
+          }
         }
       }
     }
@@ -1917,12 +1957,18 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
         if (!AddWithoutOverflow(&result.scalar_searches, 1U)) {
           throw std::overflow_error("path-system k-opt scalar 统计溢出");
         }
-        search_result = FindKOptWitness(graph, path_systems[search.path_index],
-                                        works[search.path_index].outside[search.source],
-                                        required_edge, options);
+        {
+          ScopedPhaseTimer timer(&result.scalar_search_ms);
+          search_result = FindKOptWitness(graph, path_systems[search.path_index],
+                                          works[search.path_index].outside[search.source],
+                                          required_edge, options);
+        }
       }
-      ApplyBatchedKOptSearch(graph, path_systems[search.path_index], required_edge, options,
-                             search.source, std::move(search_result), &works[search.path_index]);
+      {
+        ScopedPhaseTimer timer(&result.apply_ms);
+        ApplyBatchedKOptSearch(graph, path_systems[search.path_index], required_edge, options,
+                               search.source, std::move(search_result), &works[search.path_index]);
+      }
     }
   }
 
@@ -1931,8 +1977,13 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
   for (std::size_t index = 0U; index < works.size(); ++index) {
     if (works[index].proof.proven) {
       std::string reason;
-      if (!VerifyPathSystemKOptProof(graph, path_systems[index], required_edge, works[index].proof,
-                                     &reason)) {
+      bool verified = false;
+      {
+        ScopedPhaseTimer timer(&result.proof_verify_ms);
+        verified = VerifyPathSystemKOptProof(graph, path_systems[index], required_edge,
+                                             works[index].proof, &reason);
+      }
+      if (!verified) {
         throw std::logic_error("批量 path-system proof CPU 复核失败: " + reason);
       }
     }

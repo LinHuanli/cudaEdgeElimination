@@ -561,6 +561,14 @@ bool HtProveCommand(const Arguments& arguments) {
   double candidate_ms = 0.0;
   double work_graph_ms = 0.0;
   double leaf_ms = 0.0;
+  double leaf_setup_ms = 0.0;
+  double leaf_cursor_prepare_ms = 0.0;
+  double leaf_cost_evaluate_ms = 0.0;
+  double leaf_cost_scatter_ms = 0.0;
+  double leaf_cursor_consume_ms = 0.0;
+  double leaf_scalar_search_ms = 0.0;
+  double leaf_apply_ms = 0.0;
+  double leaf_proof_verify_ms = 0.0;
   double path_append_ms = 0.0;
   double hamilton_reply_ms = 0.0;
   double end_reply_ms = 0.0;
@@ -626,6 +634,14 @@ bool HtProveCommand(const Arguments& arguments) {
     candidate_ms = result.candidate_ms;
     work_graph_ms = result.work_graph_ms;
     leaf_ms = result.leaf_ms;
+    leaf_setup_ms = result.leaf_setup_ms;
+    leaf_cursor_prepare_ms = result.leaf_cursor_prepare_ms;
+    leaf_cost_evaluate_ms = result.leaf_cost_evaluate_ms;
+    leaf_cost_scatter_ms = result.leaf_cost_scatter_ms;
+    leaf_cursor_consume_ms = result.leaf_cursor_consume_ms;
+    leaf_scalar_search_ms = result.leaf_scalar_search_ms;
+    leaf_apply_ms = result.leaf_apply_ms;
+    leaf_proof_verify_ms = result.leaf_proof_verify_ms;
     path_append_ms = result.path_append_ms;
     hamilton_reply_ms = result.hamilton_reply_ms;
     end_reply_ms = result.end_reply_ms;
@@ -689,10 +705,17 @@ bool HtProveCommand(const Arguments& arguments) {
               << " reply_frontier_states=" << reply_frontier_states
               << " peak_reply_frontier_batch=" << peak_reply_frontier_batch
               << " candidate_ms=" << candidate_ms << " work_graph_ms=" << work_graph_ms
-              << " leaf_ms=" << leaf_ms << " path_append_ms=" << path_append_ms
-              << " hamilton_reply_ms=" << hamilton_reply_ms << " end_reply_ms=" << end_reply_ms
-              << " propagation_ms=" << propagation_ms << " proof_extract_ms=" << proof_extract_ms
-              << " proof_verify_ms=" << proof_verify_ms;
+              << " leaf_ms=" << leaf_ms << " leaf_setup_ms=" << leaf_setup_ms
+              << " leaf_cursor_prepare_ms=" << leaf_cursor_prepare_ms
+              << " leaf_cost_evaluate_ms=" << leaf_cost_evaluate_ms
+              << " leaf_cost_scatter_ms=" << leaf_cost_scatter_ms
+              << " leaf_cursor_consume_ms=" << leaf_cursor_consume_ms
+              << " leaf_scalar_search_ms=" << leaf_scalar_search_ms
+              << " leaf_apply_ms=" << leaf_apply_ms
+              << " leaf_proof_verify_ms=" << leaf_proof_verify_ms
+              << " path_append_ms=" << path_append_ms << " hamilton_reply_ms=" << hamilton_reply_ms
+              << " end_reply_ms=" << end_reply_ms << " propagation_ms=" << propagation_ms
+              << " proof_extract_ms=" << proof_extract_ms << " proof_verify_ms=" << proof_verify_ms;
   }
   std::cout << " reason=" << std::quoted(proof.reason) << '\n';
   if (search_status == cudaee::HtSearchStatus::kInvalid) {
@@ -718,7 +741,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V3\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V4\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
@@ -754,6 +777,14 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "candidate_ms " << scan.candidate_ms << '\n';
   output << "work_graph_ms " << scan.work_graph_ms << '\n';
   output << "leaf_ms " << scan.leaf_ms << '\n';
+  output << "leaf_setup_ms " << scan.leaf_setup_ms << '\n';
+  output << "leaf_cursor_prepare_ms " << scan.leaf_cursor_prepare_ms << '\n';
+  output << "leaf_cost_evaluate_ms " << scan.leaf_cost_evaluate_ms << '\n';
+  output << "leaf_cost_scatter_ms " << scan.leaf_cost_scatter_ms << '\n';
+  output << "leaf_cursor_consume_ms " << scan.leaf_cursor_consume_ms << '\n';
+  output << "leaf_scalar_search_ms " << scan.leaf_scalar_search_ms << '\n';
+  output << "leaf_apply_ms " << scan.leaf_apply_ms << '\n';
+  output << "leaf_proof_verify_ms " << scan.leaf_proof_verify_ms << '\n';
   output << "path_append_ms " << scan.path_append_ms << '\n';
   output << "hamilton_reply_ms " << scan.hamilton_reply_ms << '\n';
   output << "end_reply_ms " << scan.end_reply_ms << '\n';
@@ -769,7 +800,10 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
             "leaf_backend leaf_device leaf_verified leaf_frontier_batches leaf_frontier_states "
             "leaf_buckets peak_leaf_frontier_batch leaf_cost_batches leaf_cells leaf_cuda_batches "
             "leaf_cpu_long_tail_cells peak_leaf_cache_bytes path_append_tasks hamilton_replies "
-            "end_replies candidate_ms work_graph_ms leaf_ms path_append_ms hamilton_reply_ms "
+            "end_replies candidate_ms work_graph_ms leaf_ms leaf_setup_ms "
+            "leaf_cursor_prepare_ms leaf_cost_evaluate_ms leaf_cost_scatter_ms "
+            "leaf_cursor_consume_ms leaf_scalar_search_ms leaf_apply_ms leaf_proof_verify_ms "
+            "path_append_ms hamilton_reply_ms "
             "end_reply_ms propagation_ms proof_extract_ms proof_verify_ms immediate_verify_ms "
             "search_ms reason\n";
   for (std::size_t index = 0U; index < scan.attempts.size(); ++index) {
@@ -789,6 +823,10 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << attempt.peak_leaf_device_cache_bytes << ' ' << attempt.path_append_tasks << ' '
            << attempt.hamilton_replies_generated << ' ' << attempt.end_replies_generated << ' '
            << attempt.candidate_ms << ' ' << attempt.work_graph_ms << ' ' << attempt.leaf_ms << ' '
+           << attempt.leaf_setup_ms << ' ' << attempt.leaf_cursor_prepare_ms << ' '
+           << attempt.leaf_cost_evaluate_ms << ' ' << attempt.leaf_cost_scatter_ms << ' '
+           << attempt.leaf_cursor_consume_ms << ' ' << attempt.leaf_scalar_search_ms << ' '
+           << attempt.leaf_apply_ms << ' ' << attempt.leaf_proof_verify_ms << ' '
            << attempt.path_append_ms << ' ' << attempt.hamilton_reply_ms << ' '
            << attempt.end_reply_ms << ' ' << attempt.propagation_ms << ' '
            << attempt.proof_extract_ms << ' ' << attempt.proof_verify_ms << ' '
@@ -873,6 +911,8 @@ void HtScanCommand(const Arguments& arguments) {
               << " leaf_cost_batches=" << attempt.leaf_cost_batches
               << " leaf_cost_cells=" << attempt.leaf_cost_cells << " work_graph_ms=" << std::fixed
               << std::setprecision(3) << attempt.work_graph_ms << " leaf_ms=" << attempt.leaf_ms
+              << " leaf_cost_evaluate_ms=" << attempt.leaf_cost_evaluate_ms
+              << " leaf_cursor_consume_ms=" << attempt.leaf_cursor_consume_ms
               << " propagation_ms=" << attempt.propagation_ms
               << " proof_verify_ms=" << attempt.proof_verify_ms
               << " immediate_verify_ms=" << attempt.immediate_verify_ms
