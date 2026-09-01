@@ -42,6 +42,7 @@ void PrintHelp() {
       << "                [--reply-backend auto|cpu|cuda]\n"
       << "                [--reply-frontier-batch-states N]\n"
       << "                [--leaf-frontier-batch-states N]\n"
+      << "                [--cost-batch-size N] [--cuda-min-cost-cells N]\n"
       << "                [--path-append-backend auto|cpu|cuda]\n"
       << "                [--propagation-backend auto|cpu|cuda] [--max-depth N] [HT budgets]\n"
       << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
@@ -359,6 +360,8 @@ bool HtProveCommand(const Arguments& arguments) {
   if (root.leaf_options.cost_batch_size == 0U) {
     throw std::invalid_argument("--cost-batch-size 必须大于 0");
   }
+  root.leaf_options.cuda_min_cost_cells = OptionalInteger<std::uint64_t>(
+      arguments, "cuda-min-cost-cells", root.leaf_options.cuda_min_cost_cells);
   root.leaf_options.exact_fallback_max_blocks =
       OptionalInteger<std::uint32_t>(arguments, "exact-blocks", 0U);
   if (root.leaf_options.exact_fallback_max_blocks > 18U) {
@@ -409,6 +412,9 @@ bool HtProveCommand(const Arguments& arguments) {
   std::uint64_t leaf_template_cache_hits = 0;
   std::uint64_t leaf_workspace_cache_hits = 0;
   std::uint64_t peak_leaf_device_cache_bytes = 0;
+  std::uint64_t leaf_cpu_long_tail_batches = 0;
+  std::uint64_t leaf_cpu_long_tail_tasks = 0;
+  std::uint64_t leaf_cpu_long_tail_cells = 0;
   std::uint64_t hamilton_reply_batches = 0;
   std::uint64_t hamilton_reply_centers = 0;
   std::uint64_t hamilton_replies_generated = 0;
@@ -471,6 +477,9 @@ bool HtProveCommand(const Arguments& arguments) {
     leaf_template_cache_hits = result.leaf_template_cache_hits;
     leaf_workspace_cache_hits = result.leaf_workspace_cache_hits;
     peak_leaf_device_cache_bytes = result.peak_leaf_device_cache_bytes;
+    leaf_cpu_long_tail_batches = result.leaf_cpu_long_tail_batches;
+    leaf_cpu_long_tail_tasks = result.leaf_cpu_long_tail_tasks;
+    leaf_cpu_long_tail_cells = result.leaf_cpu_long_tail_cells;
     hamilton_reply_batches = result.hamilton_reply_batches;
     hamilton_reply_centers = result.hamilton_reply_centers;
     hamilton_replies_generated = result.hamilton_replies_generated;
@@ -524,6 +533,9 @@ bool HtProveCommand(const Arguments& arguments) {
               << " leaf_template_cache_hits=" << leaf_template_cache_hits
               << " leaf_workspace_cache_hits=" << leaf_workspace_cache_hits
               << " peak_leaf_device_cache_bytes=" << peak_leaf_device_cache_bytes
+              << " leaf_cpu_long_tail_batches=" << leaf_cpu_long_tail_batches
+              << " leaf_cpu_long_tail_tasks=" << leaf_cpu_long_tail_tasks
+              << " leaf_cpu_long_tail_cells=" << leaf_cpu_long_tail_cells
               << " reply_backend=" << hamilton_reply_backend
               << " reply_device=" << hamilton_reply_selected_device
               << " reply_batches=" << hamilton_reply_batches

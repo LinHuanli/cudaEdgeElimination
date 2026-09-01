@@ -41,4 +41,4 @@ CPU 始终独立扫描排序 CSR 并比较全部 offsets、边和值顺序。wav
 
 ## 后续
 
-M4.3b3b2b2a 已先跨 chunk 批量得到 point path-append flags，再只为确实需要 end moves 的父状态生成端点任务；上一阶段投机预取的 18 tasks/108 edges 因而恢复为实际需要的 8 tasks/48 edges，同时 end launches 从单状态 chunk 的 2 降为 1。M4.3b3b2b2b1 已完成经 CPU 全数组认证的规范 child edge SoA，M4.3b3b2b2b2a 已完成规则 leaf 分桶；图 CSR 复用和一般 CPU long-tail 仍待实现。
+M4.3b3b2b2a 已先跨 chunk 批量得到 point path-append flags，再只为确实需要 end moves 的父状态生成端点任务；上一阶段投机预取的 18 tasks/108 edges 因而恢复为实际需要的 8 tasks/48 edges，同时 end launches 从单状态 chunk 的 2 降为 1。M4.3b3b2b2b1 已完成经 CPU 全数组认证的规范 child edge SoA，后续也已完成 leaf 分桶、驻留 cost 数据和 CPU long-tail；Hamilton/end reply 自身的图 CSR 跨调用复用仍待实现。

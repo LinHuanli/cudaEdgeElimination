@@ -13,6 +13,7 @@
 #include <new>
 #include <optional>
 #include <set>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -24,6 +25,7 @@ namespace cudaee {
 namespace {
 
 using EdgeSet = std::set<NodeEdge>;
+constexpr std::array<std::size_t, 3U> kKOptTemplateCounts = {4U, 25U, 208U};
 
 NodeEdge CanonicalEdge(const std::int32_t first, const std::int32_t second) {
   return first < second ? NodeEdge{first, second} : NodeEdge{second, first};
@@ -571,6 +573,45 @@ ReconnectAttempt TryReconnect(const GraphSnapshot& graph, const TourContext& con
   return attempt;
 }
 
+ReconnectAttempt TryReconnectFromCostRow(const GraphSnapshot& graph, const TourContext& context,
+                                         const EndpointMatching& outside,
+                                         const std::vector<std::size_t>& deleted_positions,
+                                         const KOptCostTask& task,
+                                         const std::vector<EndpointMatching>& reconnect_templates,
+                                         const std::span<const std::int64_t> added_costs,
+                                         const std::string_view cost_backend) {
+  if (added_costs.size() != reconnect_templates.size() ||
+      (cost_backend != "cpu" && cost_backend != "cuda")) {
+    ReconnectAttempt invalid;
+    invalid.fatal = true;
+    invalid.reason = "k-opt cost row 或后端非法";
+    return invalid;
+  }
+  for (std::size_t template_index = 0U; template_index < reconnect_templates.size();
+       ++template_index) {
+    if (added_costs[template_index] >= task.deleted_cost) {
+      continue;
+    }
+    const std::vector<EndpointMatching> preferred = {reconnect_templates[template_index]};
+    ReconnectAttempt attempt = TryReconnect(graph, context, outside, deleted_positions, preferred);
+    if (attempt.fatal) {
+      return attempt;
+    }
+    if (attempt.witness.has_value()) {
+      // 指标记录规范 CPU 枚举到该模板的位置，而不是 GPU 预筛选的额外工作量。
+      attempt.matchings_tested = static_cast<std::uint64_t>(template_index + 1U);
+      return attempt;
+    }
+  }
+  if (cost_backend == "cuda") {
+    // CUDA 仍只是候选器；没有 CPU 接受的候选时完整枚举，保证 completeness。
+    return TryReconnect(graph, context, outside, deleted_positions, reconnect_templates);
+  }
+  ReconnectAttempt exhausted;
+  exhausted.matchings_tested = static_cast<std::uint64_t>(reconnect_templates.size());
+  return exhausted;
+}
+
 bool AdvanceCombination(std::vector<std::size_t>* const combination, const std::size_t item_count) {
   if (combination->size() <= 1) {
     return false;
@@ -596,6 +637,27 @@ bool AddWithoutOverflow(std::uint64_t* const total, const std::uint64_t value) {
   }
   *total += value;
   return true;
+}
+
+std::size_t KOptCostCellCount(const std::uint32_t k, const std::size_t task_count) {
+  if (k < 3U || k > 5U) {
+    throw std::invalid_argument("k-opt cost cell 计数的 k 非法");
+  }
+  const std::size_t template_count = kKOptTemplateCounts[static_cast<std::size_t>(k - 3U)];
+  if (task_count > std::numeric_limits<std::size_t>::max() / template_count) {
+    throw std::overflow_error("k-opt cost cell 计数溢出");
+  }
+  return task_count * template_count;
+}
+
+bool IsCpuLongTail(const KOptSearchOptions& options, const std::size_t cell_count) {
+  return options.cost_backend == PathCompatibilityBackend::kAuto &&
+         options.cuda_min_cost_cells != 0U && cell_count < options.cuda_min_cost_cells;
+}
+
+PathCompatibilityBackend SelectKOptCostBackend(const KOptSearchOptions& options,
+                                               const std::size_t cell_count) {
+  return IsCpuLongTail(options, cell_count) ? PathCompatibilityBackend::kCpu : options.cost_backend;
 }
 
 void ValidateKOptCostTask(const GraphSnapshot& graph, const std::uint32_t k,
@@ -713,8 +775,7 @@ KOptReconnectTable BuildKOptReconnectTable(const std::uint32_t k) {
       table.templates.push_back(candidate);
     }
   }
-  constexpr std::array<std::size_t, 3> kExpectedCounts = {4, 25, 208};
-  if (table.templates.size() != kExpectedCounts[static_cast<std::size_t>(k - 3U)]) {
+  if (table.templates.size() != kKOptTemplateCounts[static_cast<std::size_t>(k - 3U)]) {
     throw std::logic_error("proper k-opt reconnect template 数量错误");
   }
 
@@ -916,13 +977,15 @@ KOptSearchResult FindKOptWitnessImpl(const GraphSnapshot& graph, const Normalize
         for (const CostWork& work : works) {
           tasks.push_back(work.task);
         }
+        const PathCompatibilityBackend selected_cost_backend =
+            SelectKOptCostBackend(options, KOptCostCellCount(k, tasks.size()));
         KOptCostBatchResult costs;
         try {
-          costs = EvaluateKOptTemplateCosts(graph, k, tasks, options.cost_backend);
+          costs = EvaluateKOptTemplateCosts(graph, k, tasks, selected_cost_backend);
         } catch (const std::exception& error) {
-          if (options.cost_backend != PathCompatibilityBackend::kAuto) {
+          if (selected_cost_backend != PathCompatibilityBackend::kAuto) {
             result.status = KOptSearchStatus::kUnresolved;
-            result.reason = std::string("CUDA k-opt cost 失败: ") + error.what();
+            result.reason = std::string("k-opt cost 失败: ") + error.what();
             return result;
           }
           costs = EvaluateKOptTemplateCosts(graph, k, tasks, PathCompatibilityBackend::kCpu);
@@ -932,33 +995,14 @@ KOptSearchResult FindKOptWitnessImpl(const GraphSnapshot& graph, const Normalize
           result.reason = "k-opt cost 缓存矩阵规模错误";
           return result;
         }
-        if (!AddWithoutOverflow(&result.reconnect_matchings_tested,
-                                static_cast<std::uint64_t>(costs.added_costs.size()))) {
-          result.status = KOptSearchStatus::kUnresolved;
-          result.reason = "k-opt cost 单元计数溢出";
-          return result;
-        }
 
         for (std::size_t work_index = 0; work_index < works.size(); ++work_index) {
           const std::size_t row_offset = work_index * reconnect_table.templates.size();
-          for (std::size_t template_index = 0; template_index < reconnect_table.templates.size();
-               ++template_index) {
-            if (costs.added_costs[row_offset + template_index] >=
-                works[work_index].task.deleted_cost) {
-              continue;
-            }
-            const std::vector<EndpointMatching> preferred = {
-                reconnect_table.templates[template_index]};
-            if (consume_attempt(TryReconnect(graph, context, outside,
-                                             works[work_index].deleted_positions, preferred))) {
-              return result;
-            }
-          }
-          // GPU 是候选器：任何未命中或坏候选都必须由 CPU 全模板穷举兜底。
-          if (costs.backend == "cuda" &&
-              consume_attempt(TryReconnect(graph, context, outside,
-                                           works[work_index].deleted_positions,
-                                           reconnect_table.templates))) {
+          const std::span<const std::int64_t> row(costs.added_costs.data() + row_offset,
+                                                  reconnect_table.templates.size());
+          if (consume_attempt(TryReconnectFromCostRow(
+                  graph, context, outside, works[work_index].deleted_positions,
+                  works[work_index].task, reconnect_table.templates, row, costs.backend))) {
             return result;
           }
         }
@@ -1470,35 +1514,13 @@ public:
       finished_ = true;
       return;
     }
-    if (!AddWithoutOverflow(&result_.reconnect_matchings_tested,
-                            static_cast<std::uint64_t>(costs.added_costs.size()))) {
-      result_.status = KOptSearchStatus::kUnresolved;
-      result_.reason = "k-opt cost 单元计数溢出";
-      pending_.reset();
-      finished_ = true;
-      return;
-    }
-
     for (std::size_t work_index = 0U; work_index < block.works.size(); ++work_index) {
       const std::size_t row_offset = work_index * reconnect_table.templates.size();
-      for (std::size_t template_index = 0U; template_index < reconnect_table.templates.size();
-           ++template_index) {
-        if (costs.added_costs[row_offset + template_index] >=
-            block.works[work_index].task.deleted_cost) {
-          continue;
-        }
-        const std::vector<EndpointMatching> preferred = {reconnect_table.templates[template_index]};
-        if (ConsumeAttempt(TryReconnect(*graph_, context_, outside_,
-                                        block.works[work_index].deleted_positions, preferred))) {
-          pending_.reset();
-          return;
-        }
-      }
-      // CUDA 仍只是候选器；逐 work 的 CPU 全模板调用保证 completeness。
-      if (costs.backend == "cuda" &&
-          ConsumeAttempt(TryReconnect(*graph_, context_, outside_,
-                                      block.works[work_index].deleted_positions,
-                                      reconnect_table.templates))) {
+      const std::span<const std::int64_t> row(costs.added_costs.data() + row_offset,
+                                              reconnect_table.templates.size());
+      if (ConsumeAttempt(TryReconnectFromCostRow(
+              *graph_, context_, outside_, block.works[work_index].deleted_positions,
+              block.works[work_index].task, reconnect_table.templates, row, costs.backend))) {
         pending_.reset();
         return;
       }
@@ -1522,7 +1544,7 @@ public:
     }
     pending_.reset();
     result_.status = KOptSearchStatus::kUnresolved;
-    result_.reason = "CUDA k-opt cost 失败: " + std::move(reason);
+    result_.reason = "k-opt cost 失败: " + std::move(reason);
     finished_ = true;
   }
 
@@ -1736,6 +1758,15 @@ void RecordKOptCudaCache(PathSystemKOptBatchResult* const result,
       std::max(result->peak_device_cache_bytes, costs.cuda_cache.resident_bytes);
 }
 
+void RecordKOptCpuLongTail(PathSystemKOptBatchResult* const result, const std::size_t task_count,
+                           const std::size_t cell_count) {
+  if (!AddWithoutOverflow(&result->cpu_long_tail_batches, 1U) ||
+      !AddWithoutOverflow(&result->cpu_long_tail_tasks, task_count) ||
+      !AddWithoutOverflow(&result->cpu_long_tail_cells, cell_count)) {
+    throw std::overflow_error("path-system k-opt CPU long-tail 统计溢出");
+  }
+}
+
 } // namespace
 
 PathSystemKOptBatchResult ProvePathSystemsByKOpt(
@@ -1829,15 +1860,23 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
             !AddWithoutOverflow(&result.cost_tasks, cost_tasks.size())) {
           throw std::overflow_error("path-system k-opt batch 统计溢出");
         }
+        const std::size_t requested_cells = KOptCostCellCount(k, cost_tasks.size());
+        const bool cpu_long_tail = IsCpuLongTail(options, requested_cells);
+        const PathCompatibilityBackend selected_cost_backend =
+            SelectKOptCostBackend(options, requested_cells);
         KOptCostBatchResult costs;
         try {
-          costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, options.cost_backend);
+          costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, selected_cost_backend);
         } catch (const std::exception& error) {
-          if (options.cost_backend == PathCompatibilityBackend::kCuda) {
+          if (selected_cost_backend != PathCompatibilityBackend::kAuto) {
             for (const CursorSlice& slice : slices_by_k[bucket]) {
               active[slice.active_index].cursor->FailCost(error.what());
             }
-            RecordKOptBatchBackend(&result, "cuda-error", -1);
+            RecordKOptBatchBackend(&result,
+                                   selected_cost_backend == PathCompatibilityBackend::kCuda
+                                       ? "cuda-error"
+                                       : "cpu-error",
+                                   -1);
             continue;
           }
           costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, PathCompatibilityBackend::kCpu);
@@ -1847,6 +1886,9 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
         }
         RecordKOptBatchBackend(&result, costs.backend, costs.selected_device);
         RecordKOptCudaCache(&result, costs);
+        if (cpu_long_tail) {
+          RecordKOptCpuLongTail(&result, cost_tasks.size(), costs.added_costs.size());
+        }
         if (costs.template_count == 0U ||
             costs.added_costs.size() != cost_tasks.size() * costs.template_count) {
           throw std::logic_error("path-system k-opt batch cost 矩阵规模错误");

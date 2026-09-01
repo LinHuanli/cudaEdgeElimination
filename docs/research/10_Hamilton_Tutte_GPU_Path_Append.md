@@ -57,4 +57,4 @@ wavefront 在每个未解决父状态上：
 
 ## 后续
 
-M4.3b3b2b2a 已用同一 chunk spans 把 path-append 跨父状态合并：point flags 先返回，再只为没有 vacuous-success point move 的状态建立 end batch，详见 [frontier path append](14_Hamilton_Tutte_Frontier_Path_Append.md)。M4.3b3b2b2b1 又加入经 CPU 全数组认证的设备端 [规范 child edge SoA](15_Hamilton_Tutte_GPU_Child_Edge_SoA.md)，M4.3b3b2b2b2a/b1 已完成 [frontier leaf batching](16_Hamilton_Tutte_Frontier_Leaf_Batching.md)与一般增量游标，b2a 已缓存 leaf 设备数据。规范 `NormalizedPathSystem` 对象仍由 CPU 构造并用于工作图；下一步让小桶、超大 reply、深层状态与精确 DP 进入 GPU/CPU long-tail。只有完整小实例差分、显存峰值和端到端收益均过门禁后，HT 证明才会接入不可变 epoch commit。
+M4.3b3b2b2a 已用同一 chunk spans 把 path-append 跨父状态合并：point flags 先返回，再只为没有 vacuous-success point move 的状态建立 end batch，详见 [frontier path append](14_Hamilton_Tutte_Frontier_Path_Append.md)。M4.3b3b2b2b1 又加入经 CPU 全数组认证的设备端 [规范 child edge SoA](15_Hamilton_Tutte_GPU_Child_Edge_SoA.md)，M4.3b3b2b2b2a/b1 已完成 [frontier leaf batching](16_Hamilton_Tutte_Frontier_Leaf_Batching.md)与一般增量游标，b2a/b1 已缓存 leaf 设备数据并加入 cost long-tail。规范 `NormalizedPathSystem` 对象仍由 CPU 构造并用于工作图；下一步处理多 block continuation、超大 reply 与深层资源策略。只有完整小实例差分、显存峰值和端到端收益均过门禁后，HT 证明才会接入不可变 epoch commit。

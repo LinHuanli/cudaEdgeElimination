@@ -875,6 +875,10 @@ void RecordLeafBatch(WaveBuildContext* const context, const PathSystemKOptBatchR
                 "workspace cache hits");
   result.peak_leaf_device_cache_bytes =
       std::max(result.peak_leaf_device_cache_bytes, batch.peak_device_cache_bytes);
+  AddLeafMetric(&result.leaf_cpu_long_tail_batches, batch.cpu_long_tail_batches,
+                "CPU long-tail batches");
+  AddLeafMetric(&result.leaf_cpu_long_tail_tasks, batch.cpu_long_tail_tasks, "CPU long-tail tasks");
+  AddLeafMetric(&result.leaf_cpu_long_tail_cells, batch.cpu_long_tail_cells, "CPU long-tail cells");
   if (batch.cost_backend != "none") {
     if (result.leaf_cost_backend == "none") {
       result.leaf_cost_backend = batch.cost_backend;

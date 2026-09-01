@@ -34,6 +34,8 @@ struct KOptSearchOptions {
   std::uint64_t max_deletion_sets{};
   PathCompatibilityBackend cost_backend{PathCompatibilityBackend::kCpu};
   std::uint32_t cost_batch_size{4096};
+  // auto 后端中，小于该 cost-cell 数的融合矩阵走 CPU；0 表示始终尝试 CUDA。
+  std::uint64_t cuda_min_cost_cells{128};
   // 0 禁用；非零时在 k-opt 未解决后运行收缩 outside matching 的精确 DP（硬上限 18）。
   std::uint32_t exact_fallback_max_blocks{};
 };
@@ -149,6 +151,9 @@ struct PathSystemKOptBatchResult {
   std::uint64_t template_cache_hits{};
   std::uint64_t workspace_cache_hits{};
   std::uint64_t peak_device_cache_bytes{};
+  std::uint64_t cpu_long_tail_batches{};
+  std::uint64_t cpu_long_tail_tasks{};
+  std::uint64_t cpu_long_tail_cells{};
 };
 
 // 逐个解决未覆盖 outside matching，并用 inside coverage 合并重复叶证明。

@@ -24,7 +24,8 @@
 | M4.3b3b2b2b2a frontier leaf batching | 完成（规则首行） | 确定性复杂度桶；跨 leaf cost rows；CPU witness/proof 复核 |
 | M4.3b3b2b2b2b1 一般 leaf 游标 | 完成（增量融合） | 分段组合 cursor；3/4/5-opt；预算边界与随机 proof 字节差分 |
 | M4.3b3b2b2b2b2a GPU leaf 驻留缓存 | 完成（线程/设备本地） | 精确坐标/模板键；增长型 workspace；命中与字节指标 |
-| M4.3b3b2b2b2b2b leaf wavefront 与提交 | 待实现 | 多 block/CPU long-tail、epoch commit |
+| M4.3b3b2b2b2b2b1 CPU long-tail | 完成（128-cell 基线） | 缓存后交叉点；融合矩阵分流；CPU/CUDA proof 规范计数 |
+| M4.3b3b2b2b2b2b2 leaf wavefront 与提交 | 待实现 | 多 block continuation、深层资源策略、epoch commit |
 | M5 中大型调优 | 待开始 | 首期不设最低加速比；pcb3038 尚未形成认证运行记录 |
 
 ## 当前基准结果
@@ -69,6 +70,8 @@ Frontier leaf batching：当前 reply chunk 先按 `(depth,path_count,node_count
 
 GPU leaf 驻留缓存：每个主机线程在首选设备上复用整数坐标、独立 3/4/5-opt 模板和增长型 task/cost buffers。距离快照逐坐标比较完整 kernel 依赖，模板同时比较生成器哈希与完整数组；owner-device buffer 可在 epoch 边界显式释放。固定 recursive-point 的 6 个 CUDA leaf batches 只有首批上传快照/模板，记录 5/5 次命中、4 次 workspace 命中和 1468-byte 驻留峰值，proof 保持不变。
 
+CPU long-tail：项目内稳态基准在 RTX 4000 Ada 上定位 3-opt 64/256、4-opt 25/100 与 5-opt 208 cells 的 CPU/CUDA 交叉区间，默认用 128 cells 分流融合后的 `auto` 矩阵。31 个 3-opt leaf（124 cells）走 CPU、32 个（128 cells）走 CUDA；规范化的模板枚举计数使显式 CPU/CUDA、阈值两侧和不同 frontier batch size 都保持 V1 proof 字节一致。固定 recursive-point 的 auto leaf 六批全部进入 CPU long-tail，proof 与显式全 CUDA 相同。
+
 ## 安全边界
 
-`gpu-eliminate` 目前只实现 JV quick candidate search；path-system leaf 和递归 HT proof 尚未连接全设备 wavefront/epoch commit，因此也不授权删边；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。M4.3b3b2b2b2b2b 与 M3.1 必须标为 pending；仍严禁从未完整验证的局部结果或 cuOpt 浮点 reduced cost 直接构造删除记录。
+`gpu-eliminate` 目前只实现 JV quick candidate search；path-system leaf 和递归 HT proof 尚未连接全设备 wavefront/epoch commit，因此也不授权删边；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。M4.3b3b2b2b2b2b2 与 M3.1 必须标为 pending；仍严禁从未完整验证的局部结果或 cuOpt 浮点 reduced cost 直接构造删除记录。

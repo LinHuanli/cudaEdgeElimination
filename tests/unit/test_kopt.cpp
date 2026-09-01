@@ -380,6 +380,19 @@ void TestImprovingWitnessAndProof() {
   Check(proof.proven, proof.reason);
   Check(proof.records.size() == 1, "m=1 proof record count");
   Check(cudaee::VerifyPathSystemKOptProof(graph, paths, required, proof, &reason), reason);
+#ifdef CUDAEE_HAS_CUDA
+  std::string proof_cuda_reason;
+  if (cudaee::detail::KOptCostCudaAvailable(&proof_cuda_reason)) {
+    const cudaee::PathSystemKOptProof cuda_proof =
+        cudaee::ProvePathSystemByKOpt(graph, paths, required,
+                                      {.max_k = 3,
+                                       .cost_backend = cudaee::PathCompatibilityBackend::kCuda,
+                                       .cost_batch_size = 2});
+    Check(cudaee::SerializePathSystemKOptProof(cuda_proof) ==
+              cudaee::SerializePathSystemKOptProof(proof),
+          "CPU and CUDA candidate paths emit byte-identical canonical proof counters");
+  }
+#endif
 
   const std::filesystem::path proof_path =
       std::filesystem::path(CUDAEE_KOPT_TEST_TMP_DIR) / "tiny.path-kopt-proof";
@@ -462,9 +475,28 @@ void TestNoImprovementAndBudget() {
   Check(exhaustive.deletion_sets_tested == 25, "all anchored 3/4/5 deletion sets tested");
   Check(exhaustive.reconnect_matchings_tested == 1330,
         "all proper 3/4/5 reconnect templates tested");
+#ifdef CUDAEE_HAS_CUDA
+  std::string exhaustive_cuda_reason;
+  if (cudaee::detail::KOptCostCudaAvailable(&exhaustive_cuda_reason)) {
+    const cudaee::PathSystemKOptProof cpu_exhaustive = cudaee::ProvePathSystemByKOpt(
+        seven_node_graph, seven_node_paths, cudaee::NodeEdge{0, 1},
+        {.max_k = 5, .cost_backend = cudaee::PathCompatibilityBackend::kCpu});
+    const cudaee::PathSystemKOptProof cuda_exhaustive =
+        cudaee::ProvePathSystemByKOpt(seven_node_graph, seven_node_paths, cudaee::NodeEdge{0, 1},
+                                      {.max_k = 5,
+                                       .cost_backend = cudaee::PathCompatibilityBackend::kCuda,
+                                       .cost_batch_size = 2});
+    Check(cudaee::SerializePathSystemKOptProof(cuda_exhaustive) ==
+              cudaee::SerializePathSystemKOptProof(cpu_exhaustive),
+          "exhausted CPU and CUDA searches keep canonical proof counters byte-identical");
+  }
+#endif
 
-  const cudaee::KOptSearchOptions cursor_options = {
-      .max_k = 5, .cost_backend = cudaee::PathCompatibilityBackend::kAuto, .cost_batch_size = 2};
+  const cudaee::KOptSearchOptions cursor_options = {.max_k = 5,
+                                                    .cost_backend =
+                                                        cudaee::PathCompatibilityBackend::kAuto,
+                                                    .cost_batch_size = 2,
+                                                    .cuda_min_cost_cells = 0};
   const cudaee::PathSystemKOptProof scalar_cursor = cudaee::ProvePathSystemByKOpt(
       seven_node_graph, seven_node_paths, cudaee::NodeEdge{0, 1}, cursor_options);
 #ifdef CUDAEE_HAS_CUDA
@@ -532,8 +564,11 @@ void TestPathSystemLeafCostBatch() {
 
   const cudaee::PathSystemKOptBatchResult batch =
       cudaee::ProvePathSystemsByKOpt(graph, {paths, paths, paths}, required, options);
-  Check(batch.cpu_verified && batch.proofs.size() == 3U && batch.cost_batches == 1U &&
-            batch.cost_tasks == 3U && batch.cost_cells == 12U && batch.scalar_searches == 0U,
+  Check(batch.cpu_verified && batch.proofs.size() == 3U && batch.cost_backend == "cpu" &&
+            batch.cost_batches == 1U && batch.cost_tasks == 3U && batch.cost_cells == 12U &&
+            batch.scalar_searches == 0U && batch.cuda_cost_batches == 0U &&
+            batch.cpu_long_tail_batches == 1U && batch.cpu_long_tail_tasks == 3U &&
+            batch.cpu_long_tail_cells == 12U,
         "leaf cost batch fuses three first deletion-set rows");
   const std::string expected = cudaee::SerializePathSystemKOptProof(scalar);
   for (const cudaee::PathSystemKOptProof& proof : batch.proofs) {
@@ -554,6 +589,56 @@ void TestPathSystemLeafCostBatch() {
             cudaee::SerializePathSystemKOptProof(cpu_batch.proofs[1]) ==
                 cudaee::SerializePathSystemKOptProof(cpu_scalar),
         "CPU leaf bucket keeps the scalar proof semantics");
+}
+
+void TestLeafCpuLongTailThreshold() {
+  const cudaee::GraphSnapshot graph = MakeGraph(
+      {{0.0, 0.0, 0, 0}, {1.0, 0.0, 1, 0}, {2.0, 0.0, 2, 0}, {3.0, 0.0, 3, 0}, {4.0, 0.0, 4, 0}});
+  const cudaee::NormalizedPathSystem paths =
+      cudaee::NormalizePathSystem({{0, 1, 2, 3, 4}}, graph.dimension);
+  Check(paths.valid, paths.reason);
+  const cudaee::KOptSearchOptions options = {.max_k = 3,
+                                             .max_deletion_sets = 1,
+                                             .cost_backend =
+                                                 cudaee::PathCompatibilityBackend::kAuto,
+                                             .cost_batch_size = 8,
+                                             .cuda_min_cost_cells = 128};
+  const cudaee::PathSystemKOptProof canonical = cudaee::ProvePathSystemByKOpt(
+      graph, paths, cudaee::NodeEdge{0, 1},
+      {.max_k = 3, .max_deletion_sets = 1, .cost_backend = cudaee::PathCompatibilityBackend::kCpu});
+
+  const cudaee::PathSystemKOptBatchResult small =
+      cudaee::ProvePathSystemsByKOpt(graph, std::vector<cudaee::NormalizedPathSystem>(31U, paths),
+                                     cudaee::NodeEdge{0, 1}, options);
+  Check(small.cost_backend == "cpu" && small.cost_batches == 1U && small.cost_tasks == 31U &&
+            small.cost_cells == 124U && small.cpu_long_tail_batches == 1U &&
+            small.cpu_long_tail_tasks == 31U && small.cpu_long_tail_cells == 124U &&
+            small.cuda_cost_batches == 0U,
+        "auto leaf matrix below 128 cells uses the explicit CPU long-tail");
+  for (const cudaee::PathSystemKOptProof& proof : small.proofs) {
+    Check(cudaee::SerializePathSystemKOptProof(proof) ==
+              cudaee::SerializePathSystemKOptProof(canonical),
+          "CPU long-tail keeps canonical scalar proof bytes");
+  }
+
+  const cudaee::PathSystemKOptBatchResult boundary =
+      cudaee::ProvePathSystemsByKOpt(graph, std::vector<cudaee::NormalizedPathSystem>(32U, paths),
+                                     cudaee::NodeEdge{0, 1}, options);
+  Check(boundary.cost_batches == 1U && boundary.cost_tasks == 32U && boundary.cost_cells == 128U &&
+            boundary.cpu_long_tail_batches == 0U,
+        "auto leaf matrix at the threshold leaves the CPU long-tail");
+  for (const cudaee::PathSystemKOptProof& proof : boundary.proofs) {
+    Check(cudaee::SerializePathSystemKOptProof(proof) ==
+              cudaee::SerializePathSystemKOptProof(canonical),
+          "threshold crossing does not change canonical proof bytes");
+  }
+#ifdef CUDAEE_HAS_CUDA
+  std::string cuda_reason;
+  if (cudaee::detail::KOptCostCudaAvailable(&cuda_reason)) {
+    Check(boundary.cost_backend == "cuda" && boundary.cuda_cost_batches == 1U,
+          "128-cell auto leaf matrix uses CUDA when a device is available");
+  }
+#endif
 }
 
 void TestLeafCursorDifferential() {
@@ -722,6 +807,7 @@ int main() {
     TestImprovingWitnessAndProof();
     TestNoImprovementAndBudget();
     TestPathSystemLeafCostBatch();
+    TestLeafCpuLongTailThreshold();
     TestLeafCursorDifferential();
     TestExactFallbackAgainstBruteForce();
     TestExactSevenOptProofRoundTrip();

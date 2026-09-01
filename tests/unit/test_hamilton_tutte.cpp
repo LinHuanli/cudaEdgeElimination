@@ -785,6 +785,24 @@ void TestRecursivePointProof() {
             cuda_wavefront.leaf_workspace_cache_hits <= cuda_wavefront.leaf_cuda_cost_batches &&
             cuda_wavefront.peak_leaf_device_cache_bytes > 0U,
         "CUDA wavefront uploads one snapshot/template and reports bounded workspace reuse");
+    cudaee::HtRecursiveOptions auto_long_tail_options = options;
+    auto_long_tail_options.root_options.leaf_options.cost_backend =
+        cudaee::PathCompatibilityBackend::kAuto;
+    const cudaee::HtWavefrontResult auto_long_tail = cudaee::ProveEdgeByWavefrontHt(
+        graph, {2, 4},
+        {.search_options = auto_long_tail_options,
+         .propagation_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .path_append_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCuda});
+    Check(auto_long_tail.status == cuda_wavefront.status &&
+              cudaee::SerializeHtRecursiveProof(auto_long_tail.proof) ==
+                  cudaee::SerializeHtRecursiveProof(cuda_wavefront.proof) &&
+              auto_long_tail.leaf_cost_backend == "cpu" &&
+              auto_long_tail.leaf_cpu_long_tail_batches == auto_long_tail.leaf_cost_batches &&
+              auto_long_tail.leaf_cpu_long_tail_tasks == auto_long_tail.leaf_cost_tasks &&
+              auto_long_tail.leaf_cpu_long_tail_cells == auto_long_tail.leaf_cost_cells &&
+              auto_long_tail.leaf_cuda_cost_batches == 0U,
+          "auto CPU long-tail keeps the full CUDA scheduler proof byte-identical");
     const cudaee::HtWavefrontResult cuda_single_leaf = cudaee::ProveEdgeByWavefrontHt(
         graph, {2, 4},
         {.search_options = cuda_wavefront_options,
