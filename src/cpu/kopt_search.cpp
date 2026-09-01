@@ -807,23 +807,10 @@ std::uint64_t ComputePathSystemHash(const NormalizedPathSystem& paths) {
 
 namespace {
 
-struct PreparedKOptCostRow {
-  std::uint32_t k{};
-  KOptCostTask task;
-  std::vector<std::int64_t> added_costs;
-  std::string backend;
-  std::string error;
-};
-
-bool SameKOptCostTask(const KOptCostTask& first, const KOptCostTask& second) {
-  return first.port_nodes == second.port_nodes && first.deleted_cost == second.deleted_cost;
-}
-
 KOptSearchResult FindKOptWitnessImpl(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
                                      const EndpointMatching& outside,
                                      const std::optional<NodeEdge>& required_edge,
-                                     const KOptSearchOptions& options,
-                                     const PreparedKOptCostRow* const prepared_row) {
+                                     const KOptSearchOptions& options) {
   KOptSearchResult result;
   if (options.max_k < 3 || options.max_k > 5 || options.cost_batch_size == 0) {
     result.reason = "max_k 必须位于 [3,5] 且 cost_batch_size 必须为正数";
@@ -930,30 +917,15 @@ KOptSearchResult FindKOptWitnessImpl(const GraphSnapshot& graph, const Normalize
           tasks.push_back(work.task);
         }
         KOptCostBatchResult costs;
-        const bool use_prepared = prepared_row != nullptr && prepared_row->k == k &&
-                                  tasks.size() == 1U &&
-                                  SameKOptCostTask(tasks.front(), prepared_row->task);
-        if (use_prepared && !prepared_row->error.empty()) {
-          result.status = KOptSearchStatus::kUnresolved;
-          result.reason = "CUDA k-opt cost 失败: " + prepared_row->error;
-          return result;
-        }
-        if (use_prepared) {
-          costs.k = k;
-          costs.template_count = static_cast<std::uint32_t>(reconnect_table.templates.size());
-          costs.added_costs = prepared_row->added_costs;
-          costs.backend = prepared_row->backend;
-        } else {
-          try {
-            costs = EvaluateKOptTemplateCosts(graph, k, tasks, options.cost_backend);
-          } catch (const std::exception& error) {
-            if (options.cost_backend != PathCompatibilityBackend::kAuto) {
-              result.status = KOptSearchStatus::kUnresolved;
-              result.reason = std::string("CUDA k-opt cost 失败: ") + error.what();
-              return result;
-            }
-            costs = EvaluateKOptTemplateCosts(graph, k, tasks, PathCompatibilityBackend::kCpu);
+        try {
+          costs = EvaluateKOptTemplateCosts(graph, k, tasks, options.cost_backend);
+        } catch (const std::exception& error) {
+          if (options.cost_backend != PathCompatibilityBackend::kAuto) {
+            result.status = KOptSearchStatus::kUnresolved;
+            result.reason = std::string("CUDA k-opt cost 失败: ") + error.what();
+            return result;
           }
+          costs = EvaluateKOptTemplateCosts(graph, k, tasks, PathCompatibilityBackend::kCpu);
         }
         if (costs.added_costs.size() != tasks.size() * reconnect_table.templates.size()) {
           result.status = KOptSearchStatus::kUnresolved;
@@ -1009,7 +981,7 @@ KOptSearchResult FindKOptWitness(const GraphSnapshot& graph, const NormalizedPat
                                  const EndpointMatching& outside,
                                  const std::optional<NodeEdge>& required_edge,
                                  const KOptSearchOptions& options) {
-  return FindKOptWitnessImpl(graph, paths, outside, required_edge, options, nullptr);
+  return FindKOptWitnessImpl(graph, paths, outside, required_edge, options);
 }
 
 KOptSearchResult FindExactTourWitness(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
@@ -1402,6 +1374,229 @@ PathSystemKOptProof ProvePathSystemByKOpt(const GraphSnapshot& graph,
 
 namespace {
 
+struct KOptCursorWork {
+  std::vector<std::size_t> deleted_positions;
+  KOptCostTask task;
+};
+
+struct KOptCursorBlock {
+  std::uint32_t k{};
+  std::vector<KOptCursorWork> works;
+  bool budget_blocked{false};
+};
+
+class KOptSearchCursor {
+public:
+  KOptSearchCursor(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
+                   const EndpointMatching& outside, const std::optional<NodeEdge>& required_edge,
+                   const KOptSearchOptions& options)
+      : graph_(&graph), paths_(&paths), outside_(outside), required_edge_(required_edge),
+        options_(options) {
+    if (options_.max_k < 3U || options_.max_k > 5U || options_.cost_batch_size == 0U) {
+      result_.reason = "max_k 必须位于 [3,5] 且 cost_batch_size 必须为正数";
+      finished_ = true;
+      return;
+    }
+    if (options_.cost_backend != PathCompatibilityBackend::kAuto &&
+        options_.cost_backend != PathCompatibilityBackend::kCuda) {
+      result_.reason = "k-opt cost cursor 只接受 auto/cuda 后端";
+      finished_ = true;
+      return;
+    }
+    if (!BuildTourContext(graph, paths, outside_, required_edge_, &context_, &result_.reason)) {
+      finished_ = true;
+    }
+  }
+
+  [[nodiscard]] bool Finished() const { return finished_; }
+
+  [[nodiscard]] const KOptCursorBlock* PrepareNextBlock() {
+    if (finished_) {
+      return nullptr;
+    }
+    if (pending_.has_value()) {
+      return &*pending_;
+    }
+    while (true) {
+      if (!k_ready_ && !PrepareNextK()) {
+        return nullptr;
+      }
+
+      KOptCursorBlock block;
+      block.k = current_k_;
+      block.works.reserve(options_.cost_batch_size);
+      while (has_combination_ && block.works.size() < options_.cost_batch_size) {
+        if (options_.max_deletion_sets != 0U &&
+            result_.deletion_sets_tested >= options_.max_deletion_sets) {
+          block.budget_blocked = true;
+          break;
+        }
+        ++result_.deletion_sets_tested;
+        KOptCursorWork work;
+        work.deleted_positions.reserve(current_k_);
+        for (const std::size_t selected : combination_) {
+          work.deleted_positions.push_back(context_.selectable_positions[selected]);
+        }
+        std::sort(work.deleted_positions.begin(), work.deleted_positions.end());
+        work.task = BuildKOptCostTask(*graph_, context_, work.deleted_positions);
+        block.works.push_back(std::move(work));
+        has_combination_ = AdvanceCombination(&combination_, context_.selectable_positions.size());
+      }
+      if (!block.works.empty()) {
+        pending_ = std::move(block);
+        return &*pending_;
+      }
+      if (block.budget_blocked) {
+        result_.status = KOptSearchStatus::kUnresolved;
+        result_.reason = "k-opt 删除集合预算耗尽";
+        finished_ = true;
+        return nullptr;
+      }
+      k_ready_ = false;
+    }
+  }
+
+  void ConsumeBlock(const KOptCostBatchResult& costs) {
+    if (finished_ || !pending_.has_value()) {
+      throw std::logic_error("k-opt cost cursor 没有待消费 block");
+    }
+    const KOptCursorBlock& block = *pending_;
+    const KOptReconnectTable reconnect_table = BuildKOptReconnectTable(block.k);
+    if (costs.k != block.k || costs.template_count != reconnect_table.templates.size() ||
+        costs.added_costs.size() != block.works.size() * reconnect_table.templates.size()) {
+      result_.status = KOptSearchStatus::kUnresolved;
+      result_.reason = "k-opt cost cursor 矩阵规模错误";
+      pending_.reset();
+      finished_ = true;
+      return;
+    }
+    if (!AddWithoutOverflow(&result_.reconnect_matchings_tested,
+                            static_cast<std::uint64_t>(costs.added_costs.size()))) {
+      result_.status = KOptSearchStatus::kUnresolved;
+      result_.reason = "k-opt cost 单元计数溢出";
+      pending_.reset();
+      finished_ = true;
+      return;
+    }
+
+    for (std::size_t work_index = 0U; work_index < block.works.size(); ++work_index) {
+      const std::size_t row_offset = work_index * reconnect_table.templates.size();
+      for (std::size_t template_index = 0U; template_index < reconnect_table.templates.size();
+           ++template_index) {
+        if (costs.added_costs[row_offset + template_index] >=
+            block.works[work_index].task.deleted_cost) {
+          continue;
+        }
+        const std::vector<EndpointMatching> preferred = {reconnect_table.templates[template_index]};
+        if (ConsumeAttempt(TryReconnect(*graph_, context_, outside_,
+                                        block.works[work_index].deleted_positions, preferred))) {
+          pending_.reset();
+          return;
+        }
+      }
+      // CUDA 仍只是候选器；逐 work 的 CPU 全模板调用保证 completeness。
+      if (costs.backend == "cuda" &&
+          ConsumeAttempt(TryReconnect(*graph_, context_, outside_,
+                                      block.works[work_index].deleted_positions,
+                                      reconnect_table.templates))) {
+        pending_.reset();
+        return;
+      }
+    }
+    const bool budget_blocked = block.budget_blocked;
+    pending_.reset();
+    if (budget_blocked) {
+      result_.status = KOptSearchStatus::kUnresolved;
+      result_.reason = "k-opt 删除集合预算耗尽";
+      finished_ = true;
+      return;
+    }
+    if (!has_combination_) {
+      k_ready_ = false;
+    }
+  }
+
+  void FailCost(std::string reason) {
+    if (finished_) {
+      return;
+    }
+    pending_.reset();
+    result_.status = KOptSearchStatus::kUnresolved;
+    result_.reason = "CUDA k-opt cost 失败: " + std::move(reason);
+    finished_ = true;
+  }
+
+  [[nodiscard]] KOptSearchResult TakeResult() {
+    if (!finished_) {
+      throw std::logic_error("k-opt cost cursor 尚未完成");
+    }
+    return std::move(result_);
+  }
+
+private:
+  bool PrepareNextK() {
+    while (++current_k_ <= options_.max_k) {
+      if (current_k_ >= context_.selectable_positions.size()) {
+        break;
+      }
+      combination_.resize(current_k_);
+      for (std::size_t index = 0U; index < combination_.size(); ++index) {
+        combination_[index] = index;
+      }
+      has_combination_ = true;
+      k_ready_ = true;
+      return true;
+    }
+    result_.status = KOptSearchStatus::kNoImprovement;
+    result_.reason = "已穷举允许的 k-opt 重连但未找到严格改善";
+    finished_ = true;
+    return false;
+  }
+
+  bool ConsumeAttempt(ReconnectAttempt attempt) {
+    if (!AddWithoutOverflow(&result_.reconnect_matchings_tested, attempt.matchings_tested)) {
+      result_.status = KOptSearchStatus::kUnresolved;
+      result_.reason = "k-opt 重连计数溢出";
+      finished_ = true;
+      return true;
+    }
+    if (attempt.fatal) {
+      result_.status = KOptSearchStatus::kInvalid;
+      result_.reason = attempt.reason;
+      finished_ = true;
+      return true;
+    }
+    if (!attempt.witness.has_value()) {
+      return false;
+    }
+    result_.status = KOptSearchStatus::kImproved;
+    result_.reason = "找到严格改善的 k-opt witness";
+    result_.witness = std::move(*attempt.witness);
+    std::string verify_reason;
+    if (!VerifyKOptWitness(*graph_, *paths_, outside_, required_edge_, result_.witness,
+                           &verify_reason)) {
+      result_.status = KOptSearchStatus::kInvalid;
+      result_.reason = "内部 witness 复核失败: " + verify_reason;
+    }
+    finished_ = true;
+    return true;
+  }
+
+  const GraphSnapshot* graph_{};
+  const NormalizedPathSystem* paths_{};
+  EndpointMatching outside_;
+  std::optional<NodeEdge> required_edge_;
+  KOptSearchOptions options_;
+  TourContext context_;
+  KOptSearchResult result_;
+  std::uint32_t current_k_{2U};
+  bool k_ready_{false};
+  bool has_combination_{false};
+  bool finished_{false};
+  std::vector<std::size_t> combination_;
+  std::optional<KOptCursorBlock> pending_;
+};
+
 struct BatchedPathProofWork {
   PathSystemKOptProof proof;
   std::vector<EndpointMatching> outside;
@@ -1438,30 +1633,6 @@ std::optional<std::uint32_t> FirstUncoveredOutside(const BatchedPathProofWork& w
     if (!work.covered[index]) {
       return static_cast<std::uint32_t>(index);
     }
-  }
-  return std::nullopt;
-}
-
-std::optional<PreparedKOptCostRow> BuildFirstKOptCostRowRequest(
-    const GraphSnapshot& graph, const NormalizedPathSystem& paths, const EndpointMatching& outside,
-    const std::optional<NodeEdge>& required_edge, const KOptSearchOptions& options) {
-  TourContext context;
-  std::string reason;
-  if (!BuildTourContext(graph, paths, outside, required_edge, &context, &reason)) {
-    return std::nullopt;
-  }
-  const std::size_t selectable_count = context.selectable_positions.size();
-  for (std::uint32_t k = 3U; k <= options.max_k && k < selectable_count; ++k) {
-    std::vector<std::size_t> deleted_positions;
-    deleted_positions.reserve(k);
-    for (std::size_t index = 0U; index < k; ++index) {
-      deleted_positions.push_back(context.selectable_positions[index]);
-    }
-    std::sort(deleted_positions.begin(), deleted_positions.end());
-    PreparedKOptCostRow row;
-    row.k = k;
-    row.task = BuildKOptCostTask(graph, context, deleted_positions);
-    return row;
   }
   return std::nullopt;
 }
@@ -1567,14 +1738,14 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
     works.push_back(InitializeBatchedPathProof(graph, paths));
   }
   const bool can_batch_costs = options.max_k >= 3U && options.max_k <= 5U &&
-                               options.cost_batch_size != 0U && options.max_deletion_sets == 1U &&
+                               options.cost_batch_size != 0U &&
                                (options.cost_backend == PathCompatibilityBackend::kAuto ||
                                 options.cost_backend == PathCompatibilityBackend::kCuda);
 
   struct ActiveSearch {
     std::size_t path_index{};
     std::uint32_t source{};
-    std::optional<PreparedKOptCostRow> prepared;
+    std::optional<KOptSearchCursor> cursor;
   };
   while (true) {
     std::vector<ActiveSearch> active;
@@ -1588,10 +1759,10 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
         continue;
       }
       const std::uint32_t source = *FirstUncoveredOutside(work);
-      ActiveSearch search{.path_index = path_index, .source = source, .prepared = std::nullopt};
+      ActiveSearch search{.path_index = path_index, .source = source, .cursor = std::nullopt};
       if (can_batch_costs) {
-        search.prepared = BuildFirstKOptCostRowRequest(
-            graph, path_systems[path_index], work.outside[source], required_edge, options);
+        search.cursor.emplace(graph, path_systems[path_index], work.outside[source], required_edge,
+                              options);
       }
       active.push_back(std::move(search));
     }
@@ -1599,64 +1770,99 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
       break;
     }
 
-    for (std::uint32_t k = 3U; k <= 5U; ++k) {
-      std::vector<KOptCostTask> cost_tasks;
-      std::vector<std::size_t> active_indices;
+    struct CursorSlice {
+      std::size_t active_index{};
+      std::size_t row_begin{};
+      std::size_t row_count{};
+    };
+    while (true) {
+      std::array<std::vector<KOptCostTask>, 3U> tasks_by_k;
+      std::array<std::vector<CursorSlice>, 3U> slices_by_k;
+      bool has_pending_block = false;
       for (std::size_t active_index = 0U; active_index < active.size(); ++active_index) {
-        if (active[active_index].prepared.has_value() && active[active_index].prepared->k == k) {
-          cost_tasks.push_back(active[active_index].prepared->task);
-          active_indices.push_back(active_index);
-        }
-      }
-      if (cost_tasks.empty()) {
-        continue;
-      }
-      if (!AddWithoutOverflow(&result.cost_batches, 1U) ||
-          !AddWithoutOverflow(&result.cost_tasks, cost_tasks.size())) {
-        throw std::overflow_error("path-system k-opt batch 统计溢出");
-      }
-      KOptCostBatchResult costs;
-      try {
-        costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, options.cost_backend);
-      } catch (const std::exception& error) {
-        if (options.cost_backend == PathCompatibilityBackend::kCuda) {
-          for (const std::size_t active_index : active_indices) {
-            active[active_index].prepared->error = error.what();
-          }
-          RecordKOptBatchBackend(&result, "cuda-error", -1);
+        if (!active[active_index].cursor.has_value()) {
           continue;
         }
-        costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, PathCompatibilityBackend::kCpu);
+        const KOptCursorBlock* const block = active[active_index].cursor->PrepareNextBlock();
+        if (block == nullptr) {
+          continue;
+        }
+        if (block->k < 3U || block->k > 5U || block->works.empty()) {
+          throw std::logic_error("path-system k-opt cursor 返回非法 block");
+        }
+        const std::size_t bucket = static_cast<std::size_t>(block->k - 3U);
+        CursorSlice slice{.active_index = active_index,
+                          .row_begin = tasks_by_k[bucket].size(),
+                          .row_count = block->works.size()};
+        for (const KOptCursorWork& work : block->works) {
+          tasks_by_k[bucket].push_back(work.task);
+        }
+        slices_by_k[bucket].push_back(slice);
+        has_pending_block = true;
       }
-      if (!AddWithoutOverflow(&result.cost_cells, costs.added_costs.size())) {
-        throw std::overflow_error("path-system k-opt batch cost cell 统计溢出");
+      if (!has_pending_block) {
+        break;
       }
-      RecordKOptBatchBackend(&result, costs.backend, costs.selected_device);
-      if (costs.template_count == 0U ||
-          costs.added_costs.size() != cost_tasks.size() * costs.template_count) {
-        throw std::logic_error("path-system k-opt batch cost 矩阵规模错误");
-      }
-      for (std::size_t row = 0U; row < active_indices.size(); ++row) {
-        PreparedKOptCostRow& prepared = *active[active_indices[row]].prepared;
-        const auto begin =
-            costs.added_costs.begin() + static_cast<std::ptrdiff_t>(row * costs.template_count);
-        const auto end = begin + static_cast<std::ptrdiff_t>(costs.template_count);
-        prepared.added_costs.assign(begin, end);
-        prepared.backend = costs.backend;
+
+      for (std::uint32_t k = 3U; k <= 5U; ++k) {
+        const std::size_t bucket = static_cast<std::size_t>(k - 3U);
+        std::vector<KOptCostTask>& cost_tasks = tasks_by_k[bucket];
+        if (cost_tasks.empty()) {
+          continue;
+        }
+        if (!AddWithoutOverflow(&result.cost_batches, 1U) ||
+            !AddWithoutOverflow(&result.cost_tasks, cost_tasks.size())) {
+          throw std::overflow_error("path-system k-opt batch 统计溢出");
+        }
+        KOptCostBatchResult costs;
+        try {
+          costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, options.cost_backend);
+        } catch (const std::exception& error) {
+          if (options.cost_backend == PathCompatibilityBackend::kCuda) {
+            for (const CursorSlice& slice : slices_by_k[bucket]) {
+              active[slice.active_index].cursor->FailCost(error.what());
+            }
+            RecordKOptBatchBackend(&result, "cuda-error", -1);
+            continue;
+          }
+          costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, PathCompatibilityBackend::kCpu);
+        }
+        if (!AddWithoutOverflow(&result.cost_cells, costs.added_costs.size())) {
+          throw std::overflow_error("path-system k-opt batch cost cell 统计溢出");
+        }
+        RecordKOptBatchBackend(&result, costs.backend, costs.selected_device);
+        if (costs.template_count == 0U ||
+            costs.added_costs.size() != cost_tasks.size() * costs.template_count) {
+          throw std::logic_error("path-system k-opt batch cost 矩阵规模错误");
+        }
+        for (const CursorSlice& slice : slices_by_k[bucket]) {
+          const std::size_t cell_begin = slice.row_begin * costs.template_count;
+          const std::size_t cell_count = slice.row_count * costs.template_count;
+          KOptCostBatchResult cursor_costs;
+          cursor_costs.k = k;
+          cursor_costs.template_count = costs.template_count;
+          cursor_costs.added_costs.assign(
+              costs.added_costs.begin() + static_cast<std::ptrdiff_t>(cell_begin),
+              costs.added_costs.begin() + static_cast<std::ptrdiff_t>(cell_begin + cell_count));
+          cursor_costs.backend = costs.backend;
+          cursor_costs.selected_device = costs.selected_device;
+          active[slice.active_index].cursor->ConsumeBlock(cursor_costs);
+        }
       }
     }
 
     for (ActiveSearch& search : active) {
-      const PreparedKOptCostRow* const prepared =
-          search.prepared.has_value() ? &*search.prepared : nullptr;
-      if (prepared == nullptr) {
+      KOptSearchResult search_result;
+      if (search.cursor.has_value()) {
+        search_result = search.cursor->TakeResult();
+      } else {
         if (!AddWithoutOverflow(&result.scalar_searches, 1U)) {
           throw std::overflow_error("path-system k-opt scalar 统计溢出");
         }
+        search_result = FindKOptWitness(graph, path_systems[search.path_index],
+                                        works[search.path_index].outside[search.source],
+                                        required_edge, options);
       }
-      KOptSearchResult search_result = FindKOptWitnessImpl(
-          graph, path_systems[search.path_index], works[search.path_index].outside[search.source],
-          required_edge, options, prepared);
       ApplyBatchedKOptSearch(graph, path_systems[search.path_index], required_edge, options,
                              search.source, std::move(search_result), &works[search.path_index]);
     }

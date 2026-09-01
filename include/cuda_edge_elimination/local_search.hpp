@@ -144,7 +144,7 @@ ProvePathSystemByKOpt(const GraphSnapshot& graph, const NormalizedPathSystem& pa
                       const std::optional<NodeEdge>& required_edge,
                       const KOptSearchOptions& options = {});
 
-// max_deletion_sets=1 时跨 path systems 合并同 k cost rows；其他搜索安全转入 scalar。
+// 以增量组合游标跨 path systems 合并同 k cost blocks；不预展开后续 deletion sets。
 [[nodiscard]] PathSystemKOptBatchResult ProvePathSystemsByKOpt(
     const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
     const std::optional<NodeEdge>& required_edge, const KOptSearchOptions& options = {});

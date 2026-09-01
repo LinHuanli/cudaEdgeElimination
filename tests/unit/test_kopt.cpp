@@ -442,6 +442,38 @@ void TestNoImprovementAndBudget() {
   Check(exhaustive.deletion_sets_tested == 25, "all anchored 3/4/5 deletion sets tested");
   Check(exhaustive.reconnect_matchings_tested == 1330,
         "all proper 3/4/5 reconnect templates tested");
+
+  const cudaee::KOptSearchOptions cursor_options = {
+      .max_k = 5, .cost_backend = cudaee::PathCompatibilityBackend::kAuto, .cost_batch_size = 2};
+  const cudaee::PathSystemKOptProof scalar_cursor = cudaee::ProvePathSystemByKOpt(
+      seven_node_graph, seven_node_paths, cudaee::NodeEdge{0, 1}, cursor_options);
+  const cudaee::PathSystemKOptBatchResult cursor_batch =
+      cudaee::ProvePathSystemsByKOpt(seven_node_graph, {seven_node_paths, seven_node_paths},
+                                     cudaee::NodeEdge{0, 1}, cursor_options);
+  Check(cursor_batch.cpu_verified && cursor_batch.scalar_searches == 0U &&
+            cursor_batch.cost_tasks == 2U * scalar_cursor.deletion_sets_tested &&
+            cursor_batch.cost_batches == 13U && cursor_batch.cost_tasks == 50U &&
+            cursor_batch.cost_cells == 2660U &&
+            cudaee::SerializePathSystemKOptProof(cursor_batch.proofs[0]) ==
+                cudaee::SerializePathSystemKOptProof(scalar_cursor) &&
+            cudaee::SerializePathSystemKOptProof(cursor_batch.proofs[1]) ==
+                cudaee::SerializePathSystemKOptProof(scalar_cursor),
+        "incremental leaf cursors fuse all 3/4/5 deletion blocks without changing proof bytes");
+
+  cudaee::KOptSearchOptions budget_cursor_options = cursor_options;
+  budget_cursor_options.max_deletion_sets = 3;
+  const cudaee::PathSystemKOptProof scalar_budget_cursor = cudaee::ProvePathSystemByKOpt(
+      seven_node_graph, seven_node_paths, cudaee::NodeEdge{0, 1}, budget_cursor_options);
+  const cudaee::PathSystemKOptBatchResult budget_cursor_batch =
+      cudaee::ProvePathSystemsByKOpt(seven_node_graph, {seven_node_paths, seven_node_paths},
+                                     cudaee::NodeEdge{0, 1}, budget_cursor_options);
+  Check(budget_cursor_batch.cost_batches == 2U && budget_cursor_batch.cost_tasks == 6U &&
+            budget_cursor_batch.cost_cells == 24U &&
+            cudaee::SerializePathSystemKOptProof(budget_cursor_batch.proofs[0]) ==
+                cudaee::SerializePathSystemKOptProof(scalar_budget_cursor) &&
+            cudaee::SerializePathSystemKOptProof(budget_cursor_batch.proofs[1]) ==
+                cudaee::SerializePathSystemKOptProof(scalar_budget_cursor),
+        "incremental leaf cursor preserves a budget boundary inside the second cost block");
 }
 
 void TestPathSystemLeafCostBatch() {
@@ -485,6 +517,45 @@ void TestPathSystemLeafCostBatch() {
             cudaee::SerializePathSystemKOptProof(cpu_batch.proofs[1]) ==
                 cudaee::SerializePathSystemKOptProof(cpu_scalar),
         "CPU leaf bucket keeps the scalar proof semantics");
+}
+
+void TestLeafCursorDifferential() {
+  std::mt19937 random(24092026U); // NOLINT(bugprone-random-generator-seed): 固定差分种子。
+  std::uniform_int_distribution<std::int64_t> coordinate(-40, 40);
+  for (std::uint32_t trial = 0U; trial < 12U; ++trial) {
+    std::vector<cudaee::Point> points;
+    points.reserve(7U);
+    for (std::uint32_t node = 0U; node < 7U; ++node) {
+      const std::int64_t x = coordinate(random);
+      const std::int64_t y = coordinate(random);
+      points.push_back({static_cast<double>(x), static_cast<double>(y), x, y});
+    }
+    const cudaee::GraphSnapshot graph = MakeGraph(points);
+    const std::vector<cudaee::NormalizedPathSystem> path_systems = {
+        cudaee::NormalizePathSystem({{0, 1, 2, 3, 4, 5, 6}}, graph.dimension),
+        cudaee::NormalizePathSystem({{0, 1, 3, 5, 2, 6, 4}}, graph.dimension),
+        cudaee::NormalizePathSystem({{0, 1, 4}, {2, 5, 3, 6}}, graph.dimension)};
+    Check(std::all_of(path_systems.begin(), path_systems.end(),
+                      [](const cudaee::NormalizedPathSystem& paths) { return paths.valid; }),
+          "random leaf cursor inputs are canonical");
+    const std::uint64_t deletion_budget = trial % 4U == 0U ? 0U : 1U + trial % 7U;
+    const cudaee::KOptSearchOptions options = {.max_k = 3U + trial % 3U,
+                                               .max_deletion_sets = deletion_budget,
+                                               .cost_backend =
+                                                   cudaee::PathCompatibilityBackend::kAuto,
+                                               .cost_batch_size = 1U + trial % 4U};
+    const cudaee::PathSystemKOptBatchResult batch =
+        cudaee::ProvePathSystemsByKOpt(graph, path_systems, cudaee::NodeEdge{0, 1}, options);
+    Check(batch.cpu_verified && batch.proofs.size() == path_systems.size(),
+          "random leaf cursor batch returns aligned CPU-verified proofs");
+    for (std::size_t index = 0U; index < path_systems.size(); ++index) {
+      const cudaee::PathSystemKOptProof scalar = cudaee::ProvePathSystemByKOpt(
+          graph, path_systems[index], cudaee::NodeEdge{0, 1}, options);
+      Check(cudaee::SerializePathSystemKOptProof(batch.proofs[index]) ==
+                cudaee::SerializePathSystemKOptProof(scalar),
+            "incremental cursor matches scalar proof on randomized paths and budgets");
+    }
+  }
 }
 
 void TestExactFallbackAgainstBruteForce() {
@@ -614,6 +685,7 @@ int main() {
     TestImprovingWitnessAndProof();
     TestNoImprovementAndBudget();
     TestPathSystemLeafCostBatch();
+    TestLeafCursorDifferential();
     TestExactFallbackAgainstBruteForce();
     TestExactSevenOptProofRoundTrip();
     TestTwoPathCoverageProof();

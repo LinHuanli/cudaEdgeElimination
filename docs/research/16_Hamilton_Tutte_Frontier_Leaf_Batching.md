@@ -2,7 +2,7 @@
 
 ## 范围
 
-M4.3b3b2b2b2a 把 wavefront 的 path-system leaf 从“按状态同步调用”改为“先按复杂度分桶，再跨状态融合首个 k-opt cost row”。首期只融合 `max_deletion_sets=1` 且 cost backend 为 `auto/cuda` 的搜索；一般预算、无可生成 3/4/5-opt task 的状态和其他不规则情况继续调用原 scalar 搜索，不截断删除集合或 outside matching。
+M4.3b3b2b2b2a 把 wavefront 的 path-system leaf 从“按状态同步调用”改为“先按复杂度分桶，再跨状态融合首个 k-opt cost row”。本文件记录首期 `max_deletion_sets=1` 基线；M4.3b3b2b2b2b1 已在相同接口下扩展为一般预算的[增量 leaf 游标](17_Hamilton_Tutte_Incremental_Leaf_Cursors.md)。
 
 公开入口 `ProvePathSystemsByKOpt` 接收多个规范路径系统，返回与输入一一对应的完整 `PathSystemKOptProof`，并记录实际 cost batches/tasks/cells 与 scalar searches。它不改变单状态 `ProvePathSystemByKOpt` 的接口或证书格式。
 
@@ -23,7 +23,7 @@ leaf 计算完成后仍按原 state index 回填 proof，候选 move 和 child �
 对每个尚未完成的 path-system proof，调度器保持独立的 `covered[outside]`。每一轮：
 
 1. 按原规范顺序选择每个 proof 的第一个未覆盖 outside matching；
-2. 在 `max_deletion_sets=1` 输入域构造该搜索会访问的首个删除集合及 `KOptCostTask`；
+2. 首期在 `max_deletion_sets=1` 输入域构造该搜索会访问的首个删除集合及 `KOptCostTask`；
 3. 按相同 `k` 展平所有 rows，一次计算完整 proper template 矩阵；
 4. 把每行结果映射回原 path/outside；
 5. 继续原 `FindKOptWitness` 的 template 顺序、CPU `TryReconnect`、inside coverage 和 exact fallback；
@@ -61,6 +61,6 @@ CUDA cost matrix 仍不是删除授权。任何低于 deleted cost 的 cell 都�
 
 ## 当前限制与后续
 
-首期融合只覆盖单 deletion-set 的规则 cost rows。较大预算仍由既有 per-outside scalar orchestrator 处理，其中 cost backend 可以继续是 CUDA；`leaf_scalar_searches` 因而表示未融合搜索次数，不等同于 CPU 次数。exact Held–Karp 始终在 CPU。
+M4.3b3b2b2b2b1 已解除单 deletion-set 限制；`leaf_scalar_searches` 现在主要记录显式 CPU backend 或不能建立 cost cursor 的输入。exact Held–Karp 始终在 CPU。
 
-每个 cost batch 仍重复复制图坐标和 reconnect templates；路径规范对象、outside/inside 枚举及 witness 构造也仍在主机。M4.3b3b2b2b2b 将扩展多 deletion-set 游标，加入设备快照缓存、明确的 GPU/CPU long-tail 阈值和多 block continuation。HT epoch commit 继续保持待实现。
+每个 cost batch 仍重复复制图坐标和 reconnect templates；路径规范对象、outside/inside 枚举及 witness 构造也仍在主机。后续加入设备快照缓存、明确的 GPU/CPU long-tail 阈值和多 block continuation。HT epoch commit 继续保持待实现。

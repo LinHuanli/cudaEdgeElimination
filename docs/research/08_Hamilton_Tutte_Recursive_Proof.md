@@ -72,4 +72,4 @@ V1 是确定性文本格式，固定记录：
 
 ## M4.3b3 衔接
 
-M4.3b3a 已在不改变 verifier 和文件格式的前提下加入主机 BFS 工作图、CUDA 原子 continuation counters 与 single-block device-persistent queue，详见 [GPU wavefront](09_Hamilton_Tutte_GPU_Wavefront.md)。M4.3b3b1 又加入经 CPU 全量认证的 point/end [GPU path append](10_Hamilton_Tutte_GPU_Path_Append.md)，M4.3b3b2b2b1 已能写出完整规范 child edge SoA，M4.3b3b2b2b2a 已按复杂度分桶并融合规则 leaf cost rows。仍需一般 deletion 游标、设备快照缓存、明确的 CPU long-tail 与多 block 队列；完成后才能把 HT 删除接入不可变 epoch 的确定性 commit。
+M4.3b3a 已在不改变 verifier 和文件格式的前提下加入主机 BFS 工作图、CUDA 原子 continuation counters 与 single-block device-persistent queue，详见 [GPU wavefront](09_Hamilton_Tutte_GPU_Wavefront.md)。M4.3b3b1 又加入经 CPU 全量认证的 point/end [GPU path append](10_Hamilton_Tutte_GPU_Path_Append.md)，M4.3b3b2b2b1 已能写出完整规范 child edge SoA，M4.3b3b2b2b2a/b1 已按复杂度分桶并融合一般 leaf cost blocks。仍需设备快照缓存、明确的 CPU long-tail 与多 block 队列；完成后才能把 HT 删除接入不可变 epoch 的确定性 commit。

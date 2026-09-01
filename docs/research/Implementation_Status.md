@@ -22,7 +22,8 @@
 | M4.3b3b2b2a frontier path append | 完成（调度基线） | 多父状态稀疏 spans；point-first end 筛选；CPU 规范 child 全量认证 |
 | M4.3b3b2b2b1 规范 child edge SoA | 完成（候选器） | CUDA count/write；不可行空 slice；CPU offsets/edges 全数组认证 |
 | M4.3b3b2b2b2a frontier leaf batching | 完成（规则首行） | 确定性复杂度桶；跨 leaf cost rows；CPU witness/proof 复核 |
-| M4.3b3b2b2b2b leaf wavefront 与提交 | 待实现 | 一般 deletion 游标、快照缓存、多 block/CPU long-tail、epoch commit |
+| M4.3b3b2b2b2b1 一般 leaf 游标 | 完成（增量融合） | 分段组合 cursor；3/4/5-opt；预算边界与随机 proof 字节差分 |
+| M4.3b3b2b2b2b2 leaf wavefront 与提交 | 待实现 | 快照/模板缓存、多 block/CPU long-tail、epoch commit |
 | M5 中大型调优 | 待开始 | 首期不设最低加速比；pcb3038 尚未形成认证运行记录 |
 
 ## 当前基准结果
@@ -61,8 +62,10 @@ Frontier path append：一个 chunk 的可尝试 point tasks 先共用一次多�
 
 规范 child edge SoA：父状态新增严格排序的 edge spans。第一阶段输出可行 flags 与 child edge counts，主机建立 `uint64_t` offsets，第二阶段在 task 私有 slice 中复制父边、追加 reply 边并确定性排序；重复边、区间不一致或 CPU 全量差分失败均拒绝批次。固定 recursive-point 全 CUDA wavefront 为 3 batches/84 tasks/172 child edge records，34-state 工作图和 4 节点 V1 proof 保持不变并通过独立重放。
 
-Frontier leaf batching：当前 reply chunk 先按 `(depth,path_count,node_count,max_k,incoming reply bucket)` 分桶。单 deletion-set 输入中，每轮把各 proof 首个未覆盖 outside 的同 k cost rows 合并，然后按原顺序执行 CPU `TryReconnect`、全模板 completeness fallback、inside coverage 与独立 proof verifier。固定 recursive-point 的 34 rows/136 cells 从 34 个 cost batches 降为 6 个，最大 batch 16；`N=1/256` 的 4 节点 V1 proof 逐字节一致。一般 deletion 预算仍进入 scalar orchestrator，不会被截断。
+Frontier leaf batching：当前 reply chunk 先按 `(depth,path_count,node_count,max_k,incoming reply bucket)` 分桶。每轮把各 proof 首个未覆盖 outside 的同 k cost blocks 合并，然后按原顺序执行 CPU `TryReconnect`、全模板 completeness fallback、inside coverage 与独立 proof verifier。固定 recursive-point 的 34 rows/136 cells 从 34 个 cost batches 降为 6 个，最大 batch 16；`N=1/256` 的 4 节点 V1 proof 逐字节一致。
+
+一般 leaf 游标：每个 path/outside 保留当前 k、组合索引、统计计数和至多一个 pending block；主机只在 CPU 消费当前 block 后推进。固定双 7 点完整 3/4/5-opt 穷举把 50 tasks/2660 cells 合为 13 batches，预算 3 的 `2+1` block 停止点也与 scalar 一致；12 组随机图、三种路径布局和多种 k/预算/batch size 的 CPU/CUDA V1 proof 全部逐字节差分。
 
 ## 安全边界
 
-`gpu-eliminate` 目前只实现 JV quick candidate search；path-system leaf 和递归 HT proof 尚未连接全设备 wavefront/epoch commit，因此也不授权删边；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。M4.3b3b2b2b2b 与 M3.1 必须标为 pending；仍严禁从未完整验证的局部结果或 cuOpt 浮点 reduced cost 直接构造删除记录。
+`gpu-eliminate` 目前只实现 JV quick candidate search；path-system leaf 和递归 HT proof 尚未连接全设备 wavefront/epoch commit，因此也不授权删边；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。M4.3b3b2b2b2b2 与 M3.1 必须标为 pending；仍严禁从未完整验证的局部结果或 cuOpt 浮点 reduced cost 直接构造删除记录。
