@@ -105,6 +105,13 @@ void TestGraphCsrAndVerifierSafety() {
   }
   const std::uint64_t first_hash = graph.ContentHash();
   Check(first_hash == graph.ContentHash(), "graph hash determinism");
+
+  // 非规范存储顺序必须走排序回退，不能破坏 CSR 二分查找契约。
+  std::swap(graph.edges.front(), graph.edges.back());
+  graph.RebuildCsr();
+  for (const cudaee::Edge& edge : graph.edges) {
+    Check(graph.HasActiveEdge(edge.u, edge.v), "unsorted graph CSR fallback");
+  }
 }
 
 void TestProtectedTour() {

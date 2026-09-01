@@ -228,6 +228,11 @@ GraphSnapshot GraphSnapshot::Load(const std::filesystem::path& tsp_path,
 }
 
 void GraphSnapshot::RebuildCsr() {
+  const bool canonical_sorted =
+      std::all_of(edges.begin(), edges.end(), [](const Edge& edge) { return edge.u < edge.v; }) &&
+      std::is_sorted(edges.begin(), edges.end(), [](const Edge& lhs, const Edge& rhs) {
+        return std::tie(lhs.u, lhs.v) < std::tie(rhs.u, rhs.v);
+      });
   row_offsets.assign(static_cast<std::size_t>(dimension) + 1, 0);
   for (const Edge& edge : edges) {
     if (!edge.active) {
@@ -256,6 +261,11 @@ void GraphSnapshot::RebuildCsr() {
     }
   }
 
+  // 规范边按 (u,v) 全局排序时，每个 CSR row 已自然按邻点排序；删边只取其子序列。
+  // 手工构造的乱序快照仍走逐行排序回退，保持 HasActiveEdge 的二分查找前提。
+  if (canonical_sorted) {
+    return;
+  }
   for (std::int32_t vertex = 0; vertex < dimension; ++vertex) {
     const auto begin = static_cast<std::size_t>(row_offsets[static_cast<std::size_t>(vertex)]);
     const auto end = static_cast<std::size_t>(row_offsets[static_cast<std::size_t>(vertex) + 1]);

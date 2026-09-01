@@ -17,8 +17,10 @@ namespace {
 
 struct RunMetrics {
   double algorithm_ms{};
+  double snapshot_ms{};
   double propose_ms{};
   double verify_ms{};
+  double commit_ms{};
   double replay_ms{};
   std::size_t edges_scanned{};
   std::size_t committed{};
@@ -72,8 +74,10 @@ RunMetrics RunOnce(const cudaee::GraphSnapshot& initial, const cudaee::Backend b
   metrics.final_hash = result.final_hash;
   for (const cudaee::EpochMetrics& epoch : result.epochs) {
     metrics.edges_scanned += epoch.edges_before;
+    metrics.snapshot_ms += epoch.snapshot_ms;
     metrics.propose_ms += epoch.propose_ms;
     metrics.verify_ms += epoch.verify_ms;
+    metrics.commit_ms += epoch.commit_ms;
   }
   *final_graph = std::move(graph);
   return metrics;
@@ -84,7 +88,8 @@ void PrintMetrics(const std::string_view backend, const std::size_t run,
   std::cout << backend << ',' << run << ',' << std::fixed << std::setprecision(6)
             << metrics.algorithm_ms << ',' << metrics.propose_ms << ',' << metrics.verify_ms << ','
             << metrics.replay_ms << ',' << metrics.edges_scanned << ',' << metrics.committed << ','
-            << metrics.active_edges << ',' << cudaee::HexHash(metrics.final_hash) << '\n';
+            << metrics.active_edges << ',' << cudaee::HexHash(metrics.final_hash) << ','
+            << metrics.snapshot_ms << ',' << metrics.commit_ms << '\n';
 }
 
 } // namespace
@@ -110,7 +115,7 @@ int main(const int argc, char** argv) {
     CheckSameGraph(cpu_reference, cuda_reference, "JV benchmark CPU/CUDA 预热");
 
     std::cout << "backend,run,algorithm_ms,propose_ms,verify_ms,replay_ms,edges_scanned,committed,"
-                 "active_edges,final_hash\n";
+                 "active_edges,final_hash,snapshot_ms,commit_ms\n";
     for (std::size_t run = 1U; run <= runs; ++run) {
       cudaee::GraphSnapshot cpu_graph;
       const RunMetrics cpu = RunOnce(initial, cudaee::Backend::kCpu, &cpu_graph);

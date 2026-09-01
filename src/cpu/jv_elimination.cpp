@@ -274,8 +274,10 @@ EliminationResult RunJvElimination(GraphSnapshot* const graph, const Backend bac
   for (std::uint32_t epoch = 0; epoch < max_rounds; ++epoch) {
     EpochMetrics metrics;
     metrics.epoch = epoch;
+    const auto snapshot_start = std::chrono::steady_clock::now();
     metrics.edges_before = graph->ActiveEdgeCount();
     const std::uint64_t snapshot_hash = graph->ContentHash();
+    metrics.snapshot_ms = ElapsedMilliseconds(snapshot_start);
 
     const auto propose_start = std::chrono::steady_clock::now();
     int selected_device = -1;
@@ -292,6 +294,7 @@ EliminationResult RunJvElimination(GraphSnapshot* const graph, const Backend bac
       throw std::runtime_error("CUDA 候选未通过 CPU 复核；已停止 epoch，未提交删除");
     }
 
+    const auto commit_start = std::chrono::steady_clock::now();
     std::vector<Candidate> committed =
         detail::CommitVerifiedCandidates(graph, std::move(verified), snapshot_hash);
     metrics.committed = committed.size();
@@ -300,6 +303,7 @@ EliminationResult RunJvElimination(GraphSnapshot* const graph, const Backend bac
       result.proof.push_back({epoch, snapshot_hash, candidate.edge_id, edge.u, edge.v,
                               candidate.witness, candidate.method});
     }
+    metrics.commit_ms = ElapsedMilliseconds(commit_start);
     result.epochs.push_back(metrics);
     if (committed.empty()) {
       break;

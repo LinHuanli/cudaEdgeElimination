@@ -43,12 +43,14 @@ EliminationResult CommitHtProofEpoch(GraphSnapshot* const graph,
 
   EliminationResult result;
   result.backend = "ht-sidecar-cpu";
+  const auto snapshot_start = std::chrono::steady_clock::now();
   result.initial_hash = graph->ContentHash();
   const std::uint64_t snapshot_hash = result.initial_hash;
   EpochMetrics metrics;
   metrics.epoch = 0U;
   metrics.edges_before = graph->ActiveEdgeCount();
   metrics.proposed = proofs.size();
+  metrics.snapshot_ms = ElapsedMilliseconds(snapshot_start);
 
   // 端点到 edge_id 的映射也属于快照；重复规范边说明 GraphSnapshot 本身不合法。
   std::map<std::pair<std::int32_t, std::int32_t>, std::int32_t> edge_ids;
@@ -103,6 +105,7 @@ EliminationResult CommitHtProofEpoch(GraphSnapshot* const graph,
   }
 
   // 先在工作副本上完成 degree gate、CSR 重建和结果证书复制；最后一次 move 才发布 epoch。
+  const auto commit_start = std::chrono::steady_clock::now();
   GraphSnapshot updated = *graph;
   const std::vector<Candidate> committed =
       detail::CommitVerifiedCandidates(&updated, std::move(candidates), snapshot_hash);
@@ -121,9 +124,10 @@ EliminationResult CommitHtProofEpoch(GraphSnapshot* const graph,
     result.proof.push_back({0U, snapshot_hash, candidate.edge_id, edge.u, edge.v, -1,
                             EliminationMethod::kHamiltonTutte, certificate_index});
   }
-  result.epochs.push_back(metrics);
   result.final_hash = updated.ContentHash();
   *graph = std::move(updated);
+  metrics.commit_ms = ElapsedMilliseconds(commit_start);
+  result.epochs.push_back(metrics);
   return result;
 }
 

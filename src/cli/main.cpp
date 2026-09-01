@@ -218,8 +218,9 @@ void PrintEliminationSummary(const cudaee::GraphSnapshot& graph,
     std::cout << "epoch=" << epoch.epoch << " edges_before=" << epoch.edges_before
               << " proposed=" << epoch.proposed << " verified=" << epoch.verified
               << " rejected=" << epoch.rejected << " committed=" << epoch.committed
-              << " propose_ms=" << std::fixed << std::setprecision(3) << epoch.propose_ms
-              << " verify_ms=" << epoch.verify_ms << '\n';
+              << " snapshot_ms=" << std::fixed << std::setprecision(3) << epoch.snapshot_ms
+              << " propose_ms=" << epoch.propose_ms << " verify_ms=" << epoch.verify_ms
+              << " commit_ms=" << epoch.commit_ms << '\n';
   }
   std::cout << "status=OK backend=" << result.backend << " committed=" << committed
             << " active_edges=" << graph.ActiveEdgeCount()

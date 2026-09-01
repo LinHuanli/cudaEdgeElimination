@@ -25,8 +25,11 @@ struct EpochMetrics {
   std::size_t verified{};
   std::size_t rejected{};
   std::size_t committed{};
+  // 细分计时只用于当前运行观测；V1/V2 proof 继续只序列化 propose/verify。
+  double snapshot_ms{};
   double propose_ms{};
   double verify_ms{};
+  double commit_ms{};
 };
 
 struct EliminationResult {
