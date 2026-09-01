@@ -13,5 +13,6 @@
 9. [实现状态](research/Implementation_Status.md)：已完成证据、当前结果和明确未完成项。
 10. [路径系统与兼容表](research/06_Path_System_Compatibility.md)：规范化、穷举表、CUDA 查询与 CPU 回退契约。
 11. [浅层 Hamilton–Tutte AND–OR](research/07_Hamilton_Tutte_Shallow_AND_OR.md)：`c,d` moves、完整 replies、嵌套叶证明与 CUDA 候选边界。
+12. [递归 Hamilton–Tutte 证明](research/08_Hamilton_Tutte_Recursive_Proof.md)：point/end moves、continuation arena、全局 V1 证书与独立重放。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

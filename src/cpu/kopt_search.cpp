@@ -13,6 +13,7 @@
 #include <new>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -1412,46 +1413,172 @@ bool VerifyPathSystemKOptProof(const GraphSnapshot& graph, const NormalizedPathS
   return true;
 }
 
+namespace {
+
+void WritePathSystemKOptProofStream(std::ostream* const output, const PathSystemKOptProof& proof) {
+  *output << "CUDAEE_PATH_KOPT_PROOF_V1\n";
+  *output << "proven " << (proof.proven ? 1 : 0) << '\n';
+  *output << "reason " << std::quoted(proof.reason) << '\n';
+  *output << "snapshot_hash " << std::hex << std::setfill('0') << std::setw(16)
+          << proof.snapshot_hash << '\n';
+  *output << "path_system_hash " << std::setw(16) << proof.path_system_hash << '\n';
+  *output << "compatibility_table_hash " << std::setw(16) << proof.compatibility_table_hash
+          << std::dec << '\n';
+  *output << "path_count " << proof.path_count << '\n';
+  *output << "outside_count " << proof.outside_count << '\n';
+  *output << "deletion_sets_tested " << proof.deletion_sets_tested << '\n';
+  *output << "reconnect_matchings_tested " << proof.reconnect_matchings_tested << '\n';
+  *output << "record_count " << proof.records.size() << '\n';
+  for (const OutsideKOptWitness& record : proof.records) {
+    const KOptWitness& witness = record.witness;
+    *output << "record " << record.source_outside_index << ' ' << witness.k << ' '
+            << witness.deleted_cost << ' ' << witness.added_cost << '\n';
+    *output << "deleted " << witness.deleted_edges.size();
+    for (const NodeEdge& edge : witness.deleted_edges) {
+      *output << ' ' << edge.u << ' ' << edge.v;
+    }
+    *output << '\n';
+    *output << "added " << witness.added_edges.size();
+    for (const NodeEdge& edge : witness.added_edges) {
+      *output << ' ' << edge.u << ' ' << edge.v;
+    }
+    *output << '\n';
+    *output << "inside " << static_cast<std::uint32_t>(witness.inside_matching.endpoint_count);
+    for (std::uint32_t endpoint = 0; endpoint < witness.inside_matching.endpoint_count;
+         ++endpoint) {
+      *output << ' ' << static_cast<std::uint32_t>(witness.inside_matching.mate[endpoint]);
+    }
+    *output << "\nendrecord\n";
+  }
+  *output << "END\n";
+}
+
+PathSystemKOptProof ReadPathSystemKOptProofStream(std::istream* const input) {
+  ExpectToken(input, "CUDAEE_PATH_KOPT_PROOF_V1");
+  PathSystemKOptProof proof;
+  int proven = 0;
+  ExpectToken(input, "proven");
+  if (!(*input >> proven) || (proven != 0 && proven != 1)) {
+    throw std::runtime_error("path k-opt proof 的 proven 非法");
+  }
+  proof.proven = proven == 1;
+  ExpectToken(input, "reason");
+  if (!(*input >> std::quoted(proof.reason)) || proof.reason.size() > 4096) {
+    throw std::runtime_error("path k-opt proof 的 reason 非法");
+  }
+  ExpectToken(input, "snapshot_hash");
+  proof.snapshot_hash = ReadHexHash(input, "snapshot_hash");
+  ExpectToken(input, "path_system_hash");
+  proof.path_system_hash = ReadHexHash(input, "path_system_hash");
+  ExpectToken(input, "compatibility_table_hash");
+  proof.compatibility_table_hash = ReadHexHash(input, "compatibility_table_hash");
+  ExpectToken(input, "path_count");
+  if (!(*input >> proof.path_count) || proof.path_count == 0 ||
+      proof.path_count > kMaxTestablePathCount) {
+    throw std::runtime_error("path k-opt proof 的 path_count 非法");
+  }
+  ExpectToken(input, "outside_count");
+  if (!(*input >> proof.outside_count) ||
+      proof.outside_count != ExpectedOutsideMatchingCount(proof.path_count)) {
+    throw std::runtime_error("path k-opt proof 的 outside_count 非法");
+  }
+  ExpectToken(input, "deletion_sets_tested");
+  if (!(*input >> proof.deletion_sets_tested)) {
+    throw std::runtime_error("path k-opt proof 的 deletion_sets_tested 非法");
+  }
+  ExpectToken(input, "reconnect_matchings_tested");
+  if (!(*input >> proof.reconnect_matchings_tested)) {
+    throw std::runtime_error("path k-opt proof 的 reconnect_matchings_tested 非法");
+  }
+  std::size_t record_count = 0;
+  ExpectToken(input, "record_count");
+  if (!(*input >> record_count) || record_count > proof.outside_count) {
+    throw std::runtime_error("path k-opt proof 的 record_count 非法");
+  }
+  proof.records.reserve(record_count);
+  for (std::size_t record_index = 0; record_index < record_count; ++record_index) {
+    OutsideKOptWitness record;
+    ExpectToken(input, "record");
+    if (!(*input >> record.source_outside_index >> record.witness.k >>
+          record.witness.deleted_cost >> record.witness.added_cost) ||
+        record.source_outside_index >= proof.outside_count || record.witness.k < 2 ||
+        record.witness.k > 200 || record.witness.deleted_cost < 0 ||
+        record.witness.added_cost < 0) {
+      throw std::runtime_error("path k-opt proof 的 record 头非法");
+    }
+
+    std::size_t edge_count = 0;
+    ExpectToken(input, "deleted");
+    if (!(*input >> edge_count) || edge_count != record.witness.k) {
+      throw std::runtime_error("path k-opt proof 的 deleted 数量非法");
+    }
+    record.witness.deleted_edges.resize(edge_count);
+    for (NodeEdge& edge : record.witness.deleted_edges) {
+      if (!(*input >> edge.u >> edge.v)) {
+        throw std::runtime_error("path k-opt proof 的 deleted 边非法");
+      }
+    }
+    ExpectToken(input, "added");
+    if (!(*input >> edge_count) || edge_count != record.witness.k) {
+      throw std::runtime_error("path k-opt proof 的 added 数量非法");
+    }
+    record.witness.added_edges.resize(edge_count);
+    for (NodeEdge& edge : record.witness.added_edges) {
+      if (!(*input >> edge.u >> edge.v)) {
+        throw std::runtime_error("path k-opt proof 的 added 边非法");
+      }
+    }
+
+    std::uint32_t endpoint_count = 0;
+    ExpectToken(input, "inside");
+    if (!(*input >> endpoint_count) || endpoint_count != 2U * proof.path_count) {
+      throw std::runtime_error("path k-opt proof 的 inside 端点数非法");
+    }
+    record.witness.inside_matching.endpoint_count = static_cast<std::uint8_t>(endpoint_count);
+    record.witness.inside_matching.mate.fill(kUnmatchedEndpoint);
+    for (std::uint32_t endpoint = 0; endpoint < endpoint_count; ++endpoint) {
+      std::uint32_t partner = 0;
+      if (!(*input >> partner) || partner >= endpoint_count) {
+        throw std::runtime_error("path k-opt proof 的 inside mate 非法");
+      }
+      record.witness.inside_matching.mate[endpoint] = static_cast<std::uint8_t>(partner);
+    }
+    if (!IsPerfectEndpointMatching(record.witness.inside_matching, proof.path_count)) {
+      throw std::runtime_error("path k-opt proof 的 inside 不是完美匹配");
+    }
+    ExpectToken(input, "endrecord");
+    proof.records.push_back(std::move(record));
+  }
+  ExpectToken(input, "END");
+  std::string trailing;
+  if (*input >> trailing) {
+    throw std::runtime_error("path k-opt proof 的 END 后存在多余字段");
+  }
+  return proof;
+}
+
+} // namespace
+
+std::string SerializePathSystemKOptProof(const PathSystemKOptProof& proof) {
+  std::ostringstream output;
+  WritePathSystemKOptProofStream(&output, proof);
+  if (!output) {
+    throw std::runtime_error("序列化 path k-opt proof 失败");
+  }
+  return output.str();
+}
+
+PathSystemKOptProof ParsePathSystemKOptProof(const std::string_view serialized) {
+  std::istringstream input{std::string(serialized)};
+  return ReadPathSystemKOptProofStream(&input);
+}
+
 void WritePathSystemKOptProof(const std::filesystem::path& path, const PathSystemKOptProof& proof) {
   std::ofstream output(path);
   if (!output) {
     throw std::runtime_error("无法创建 path k-opt proof: " + path.string());
   }
-  output << "CUDAEE_PATH_KOPT_PROOF_V1\n";
-  output << "proven " << (proof.proven ? 1 : 0) << '\n';
-  output << "reason " << std::quoted(proof.reason) << '\n';
-  output << "snapshot_hash " << std::hex << std::setfill('0') << std::setw(16)
-         << proof.snapshot_hash << '\n';
-  output << "path_system_hash " << std::setw(16) << proof.path_system_hash << '\n';
-  output << "compatibility_table_hash " << std::setw(16) << proof.compatibility_table_hash
-         << std::dec << '\n';
-  output << "path_count " << proof.path_count << '\n';
-  output << "outside_count " << proof.outside_count << '\n';
-  output << "deletion_sets_tested " << proof.deletion_sets_tested << '\n';
-  output << "reconnect_matchings_tested " << proof.reconnect_matchings_tested << '\n';
-  output << "record_count " << proof.records.size() << '\n';
-  for (const OutsideKOptWitness& record : proof.records) {
-    const KOptWitness& witness = record.witness;
-    output << "record " << record.source_outside_index << ' ' << witness.k << ' '
-           << witness.deleted_cost << ' ' << witness.added_cost << '\n';
-    output << "deleted " << witness.deleted_edges.size();
-    for (const NodeEdge& edge : witness.deleted_edges) {
-      output << ' ' << edge.u << ' ' << edge.v;
-    }
-    output << '\n';
-    output << "added " << witness.added_edges.size();
-    for (const NodeEdge& edge : witness.added_edges) {
-      output << ' ' << edge.u << ' ' << edge.v;
-    }
-    output << '\n';
-    output << "inside " << static_cast<std::uint32_t>(witness.inside_matching.endpoint_count);
-    for (std::uint32_t endpoint = 0; endpoint < witness.inside_matching.endpoint_count;
-         ++endpoint) {
-      output << ' ' << static_cast<std::uint32_t>(witness.inside_matching.mate[endpoint]);
-    }
-    output << "\nendrecord\n";
-  }
-  output << "END\n";
+  WritePathSystemKOptProofStream(&output, proof);
   if (!output) {
     throw std::runtime_error("写入 path k-opt proof 失败: " + path.string());
   }
@@ -1462,107 +1589,7 @@ PathSystemKOptProof ReadPathSystemKOptProof(const std::filesystem::path& path) {
   if (!input) {
     throw std::runtime_error("无法打开 path k-opt proof: " + path.string());
   }
-  ExpectToken(&input, "CUDAEE_PATH_KOPT_PROOF_V1");
-  PathSystemKOptProof proof;
-  int proven = 0;
-  ExpectToken(&input, "proven");
-  if (!(input >> proven) || (proven != 0 && proven != 1)) {
-    throw std::runtime_error("path k-opt proof 的 proven 非法");
-  }
-  proof.proven = proven == 1;
-  ExpectToken(&input, "reason");
-  if (!(input >> std::quoted(proof.reason)) || proof.reason.size() > 4096) {
-    throw std::runtime_error("path k-opt proof 的 reason 非法");
-  }
-  ExpectToken(&input, "snapshot_hash");
-  proof.snapshot_hash = ReadHexHash(&input, "snapshot_hash");
-  ExpectToken(&input, "path_system_hash");
-  proof.path_system_hash = ReadHexHash(&input, "path_system_hash");
-  ExpectToken(&input, "compatibility_table_hash");
-  proof.compatibility_table_hash = ReadHexHash(&input, "compatibility_table_hash");
-  ExpectToken(&input, "path_count");
-  if (!(input >> proof.path_count) || proof.path_count == 0 ||
-      proof.path_count > kMaxTestablePathCount) {
-    throw std::runtime_error("path k-opt proof 的 path_count 非法");
-  }
-  ExpectToken(&input, "outside_count");
-  if (!(input >> proof.outside_count) ||
-      proof.outside_count != ExpectedOutsideMatchingCount(proof.path_count)) {
-    throw std::runtime_error("path k-opt proof 的 outside_count 非法");
-  }
-  ExpectToken(&input, "deletion_sets_tested");
-  if (!(input >> proof.deletion_sets_tested)) {
-    throw std::runtime_error("path k-opt proof 的 deletion_sets_tested 非法");
-  }
-  ExpectToken(&input, "reconnect_matchings_tested");
-  if (!(input >> proof.reconnect_matchings_tested)) {
-    throw std::runtime_error("path k-opt proof 的 reconnect_matchings_tested 非法");
-  }
-  std::size_t record_count = 0;
-  ExpectToken(&input, "record_count");
-  if (!(input >> record_count) || record_count > proof.outside_count) {
-    throw std::runtime_error("path k-opt proof 的 record_count 非法");
-  }
-  proof.records.reserve(record_count);
-  for (std::size_t record_index = 0; record_index < record_count; ++record_index) {
-    OutsideKOptWitness record;
-    ExpectToken(&input, "record");
-    if (!(input >> record.source_outside_index >> record.witness.k >> record.witness.deleted_cost >>
-          record.witness.added_cost) ||
-        record.source_outside_index >= proof.outside_count || record.witness.k < 2 ||
-        record.witness.k > 200 || record.witness.deleted_cost < 0 ||
-        record.witness.added_cost < 0) {
-      throw std::runtime_error("path k-opt proof 的 record 头非法");
-    }
-
-    std::size_t edge_count = 0;
-    ExpectToken(&input, "deleted");
-    if (!(input >> edge_count) || edge_count != record.witness.k) {
-      throw std::runtime_error("path k-opt proof 的 deleted 数量非法");
-    }
-    record.witness.deleted_edges.resize(edge_count);
-    for (NodeEdge& edge : record.witness.deleted_edges) {
-      if (!(input >> edge.u >> edge.v)) {
-        throw std::runtime_error("path k-opt proof 的 deleted 边非法");
-      }
-    }
-    ExpectToken(&input, "added");
-    if (!(input >> edge_count) || edge_count != record.witness.k) {
-      throw std::runtime_error("path k-opt proof 的 added 数量非法");
-    }
-    record.witness.added_edges.resize(edge_count);
-    for (NodeEdge& edge : record.witness.added_edges) {
-      if (!(input >> edge.u >> edge.v)) {
-        throw std::runtime_error("path k-opt proof 的 added 边非法");
-      }
-    }
-
-    std::uint32_t endpoint_count = 0;
-    ExpectToken(&input, "inside");
-    if (!(input >> endpoint_count) || endpoint_count != 2U * proof.path_count) {
-      throw std::runtime_error("path k-opt proof 的 inside 端点数非法");
-    }
-    record.witness.inside_matching.endpoint_count = static_cast<std::uint8_t>(endpoint_count);
-    record.witness.inside_matching.mate.fill(kUnmatchedEndpoint);
-    for (std::uint32_t endpoint = 0; endpoint < endpoint_count; ++endpoint) {
-      std::uint32_t partner = 0;
-      if (!(input >> partner) || partner >= endpoint_count) {
-        throw std::runtime_error("path k-opt proof 的 inside mate 非法");
-      }
-      record.witness.inside_matching.mate[endpoint] = static_cast<std::uint8_t>(partner);
-    }
-    if (!IsPerfectEndpointMatching(record.witness.inside_matching, proof.path_count)) {
-      throw std::runtime_error("path k-opt proof 的 inside 不是完美匹配");
-    }
-    ExpectToken(&input, "endrecord");
-    proof.records.push_back(std::move(record));
-  }
-  ExpectToken(&input, "END");
-  std::string trailing;
-  if (input >> trailing) {
-    throw std::runtime_error("path k-opt proof 的 END 后存在多余字段");
-  }
-  return proof;
+  return ReadPathSystemKOptProofStream(&input);
 }
 
 } // namespace cudaee

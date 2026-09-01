@@ -37,7 +37,9 @@ M4.3a 有界困难叶 CPU fallback 已完成：收缩 forced outside matching �
 
 M4.3b1 浅层 HS 根证明已完成：确定性生成 `c,d` OR moves，对固定 move 完整枚举两个中心的 Hamilton 邻边对笛卡尔积，并逐叶重放；CUDA `c,d` flags 返回前与 CPU 逐项核对。
 
-M4.3b2 继续实现 extra point/end 递归 AND–OR wavefront 和全局证书重放。只有整条证书链完成后才把 HS 候选接入 epoch commit。
+M4.3b2 递归语义与全局证书已完成：CPU DFS 枚举 extra point/end OR moves 和每个 move 的完整 Hamilton replies；成功子树转为扁平 continuation arena，并用 `recursive-ht-proof-v1` 连同嵌套 path-k-opt 叶独立重放。资源上限只返回 `unresolved`。
+
+M4.3b3 继续把相同真值转换为 GPU wavefront：加入状态/候选 continuation counters、分桶批量叶调度、CPU long-tail 回退和全局证书收集。CPU/GPU 对完整小实例真值及证书必须一致；之后才把验证成功的 HT 候选接入 epoch commit。
 
 ## M5：中大型评测与优化
 
@@ -45,4 +47,4 @@ M4.3b2 继续实现 extra point/end 递归 AND–OR wavefront 和全局证书重
 
 ## 当前完成定义
 
-当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶和 M4.3b1 浅层 HT。M3.1 与 M4.3b2 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或浅层 proof 替代删除强度与递归 HS 全链路。
+当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT，以及 M4.3b2 CPU 递归语义与全局证书。M3.1 与 M4.3b3 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或 CPU 原型替代删除强度与 GPU wavefront/提交全链路。

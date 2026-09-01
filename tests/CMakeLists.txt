@@ -7,6 +7,8 @@ add_test(NAME unit.core COMMAND cudaee_unit)
 
 add_executable(cudaee_hamilton_tutte_unit unit/test_hamilton_tutte.cpp)
 target_link_libraries(cudaee_hamilton_tutte_unit PRIVATE cudaee_core)
+target_compile_definitions(cudaee_hamilton_tutte_unit PRIVATE
+  CUDAEE_HT_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}/tmp")
 target_compile_options(cudaee_hamilton_tutte_unit PRIVATE
   -Wall -Wextra -Wconversion -Wshadow -Wformat=2)
 add_test(NAME unit.hamilton_tutte COMMAND cudaee_hamilton_tutte_unit)

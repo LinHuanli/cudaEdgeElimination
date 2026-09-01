@@ -65,6 +65,6 @@ d(n_0,n_1)+d(a,n)+d(b,n).
 - 另有零 surviving reply 的 vacuous AND、reply 预算 `unresolved`、缺 reply、错 move、错 snapshot 和错 leaf hash 门禁；
 - 稀疏 32 点图的 EUC/CEIL `c,d` flags 与 CUDA 逐项一致；GPU 2 上 compute-sanitizer memcheck 为 0 error。
 
-## 下一阶段
+## 后续衔接
 
-M4.3b2 仍需实现 extra-point/extra-end 的递归 OR moves、全部子 reply 的 continuation counters、版本化全局证书序列化和 epoch commit 接线。当前浅层 proof 只作为研究 API 返回，`gpu-eliminate` 仍只提交 JV 证明。
+M4.3b2 已在浅层根语义上加入 extra-point/extra-end 递归、continuation arena 和版本化全局证书，详见[递归 Hamilton–Tutte 证明](08_Hamilton_Tutte_Recursive_Proof.md)。当前浅层与递归 proof 都仍作为研究 API 返回，`gpu-eliminate` 仍只提交 JV 证明；GPU wavefront 调度和 epoch commit 接线属于 M4.3b3。

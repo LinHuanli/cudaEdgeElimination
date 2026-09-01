@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace cudaee {
@@ -139,6 +140,10 @@ ProvePathSystemByKOpt(const GraphSnapshot& graph, const NormalizedPathSystem& pa
 
 void WritePathSystemKOptProof(const std::filesystem::path& path, const PathSystemKOptProof& proof);
 [[nodiscard]] PathSystemKOptProof ReadPathSystemKOptProof(const std::filesystem::path& path);
+
+// 字符串接口供更高层证明格式嵌套 V1 叶证书，仍执行与文件读取器相同的严格校验。
+[[nodiscard]] std::string SerializePathSystemKOptProof(const PathSystemKOptProof& proof);
+[[nodiscard]] PathSystemKOptProof ParsePathSystemKOptProof(std::string_view serialized);
 
 namespace detail {
 

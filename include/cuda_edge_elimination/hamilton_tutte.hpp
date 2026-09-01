@@ -4,7 +4,9 @@
 
 #include <compare>
 #include <cstdint>
+#include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace cudaee {
@@ -90,6 +92,65 @@ struct HtShallowResult {
   HtShallowProof proof;
 };
 
+enum class HtMoveType : std::uint8_t {
+  kLeaf,
+  kCd,
+  kPoint,
+  kEnd,
+};
+
+constexpr std::uint32_t kNoHtChild = UINT32_MAX;
+
+struct HtTreeReply {
+  // kCd 使用两个 pair，kPoint 只使用 first_pair，kEnd 只使用 edge。
+  HtNeighborPair first_pair;
+  HtNeighborPair second_pair;
+  NodeEdge edge{-1, -1};
+  bool path_infeasible{false};
+  std::uint32_t child_index{kNoHtChild};
+};
+
+struct HtTreeNode {
+  NormalizedPathSystem paths;
+  HtMoveType move_type{HtMoveType::kLeaf};
+  std::int32_t move_first{-1};
+  std::int32_t move_second{-1};
+  PathSystemKOptProof leaf_proof;
+  std::vector<HtTreeReply> replies;
+};
+
+struct HtRecursiveOptions {
+  HtShallowOptions root_options{};
+  // 根 c,d 之后允许的 point/end 递归层数；0 退化为浅层证明。
+  std::uint32_t max_depth{2};
+  std::uint64_t max_states{100000};
+  std::uint64_t max_total_replies{1000000};
+  std::uint64_t max_replies_per_move{10000};
+  // 0 表示尝试全部候选。
+  std::uint32_t max_point_candidates{3};
+  std::uint32_t max_end_candidates{3};
+  bool enable_point_moves{true};
+  bool enable_end_moves{true};
+};
+
+struct HtRecursiveProof {
+  bool proven{false};
+  std::string reason;
+  std::uint64_t snapshot_hash{};
+  NodeEdge target_edge;
+  HtCdMode cd_mode{HtCdMode::kActiveIncompatible};
+  std::uint64_t cd_candidates_tested{};
+  std::uint64_t states_expanded{};
+  std::uint64_t replies_expanded{};
+  std::uint64_t leaf_calls{};
+  std::vector<HtTreeNode> nodes;
+};
+
+struct HtRecursiveResult {
+  HtSearchStatus status{HtSearchStatus::kInvalid};
+  HtRecursiveProof proof;
+};
+
 // 生成确定性排序的 OR 候选；reply_product 越小越优先。
 [[nodiscard]] std::vector<HtCdCandidate>
 GenerateHtCdCandidates(const GraphSnapshot& graph, NodeEdge target_edge,
@@ -111,6 +172,21 @@ EnumerateHtHamiltonReplies(const GraphSnapshot& graph, NodeEdge target_edge, std
 // 不信任搜索器保存的计数或叶结论，重新枚举完整 reply 笛卡尔积并逐叶复核。
 [[nodiscard]] bool VerifyHtShallowProof(const GraphSnapshot& graph, const HtShallowProof& proof,
                                         std::string* reason);
+
+// CPU DFS 先实现与 wavefront 相同的 AND–OR 真值；成功 proof 使用扁平 continuation arena。
+[[nodiscard]] HtRecursiveResult ProveEdgeByRecursiveHt(const GraphSnapshot& graph,
+                                                       NodeEdge target_edge,
+                                                       const HtRecursiveOptions& options = {});
+
+// 从根路径开始重建每个 move 的完整 replies、子路径系统和嵌套 leaf proof。
+[[nodiscard]] bool VerifyHtRecursiveProof(const GraphSnapshot& graph, const HtRecursiveProof& proof,
+                                          std::string* reason);
+
+// V1 文本证书嵌入每个 leaf 的 path k-opt V1；读取只做结构校验，授权仍须调用 verifier。
+[[nodiscard]] std::string SerializeHtRecursiveProof(const HtRecursiveProof& proof);
+[[nodiscard]] HtRecursiveProof ParseHtRecursiveProof(std::string_view serialized);
+void WriteHtRecursiveProof(const std::filesystem::path& path, const HtRecursiveProof& proof);
+[[nodiscard]] HtRecursiveProof ReadHtRecursiveProof(const std::filesystem::path& path);
 
 namespace detail {
 
