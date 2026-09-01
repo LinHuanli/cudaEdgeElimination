@@ -69,4 +69,4 @@ d15112 的 parent prepare 从 87.379 ms 降至 2.680 ms，child normalize 从 5,
 
 三实例的 attempted/proven/unresolved/committed、states、replies、leaf calls 和全部五路规范工作计数保持不变。baseline 与优化后每一路的活动边文件逐字节相同；删除 outer metrics timing 行后，五路 V2/HT proof 也逐字节相同。最终图哈希、活动边 SHA-256 和三个受保护 tour 哈希仍分别为文档 37 固化的值。
 
-优化后 rl5915/d15112 的 CPU-fused `work_graph_ms` 中，未细分 host-build residual 仍为 384.056/1,079.489 ms，占 49.99%/47.93%；它已超过 path-append。下一切片先细分候选输入构造、排序/裁剪、task flatten 和 child 写入，再决定是否优化。
+优化后 rl5915/d15112 的 CPU-fused `work_graph_ms` 中，未细分 host-build residual 仍为 384.056/1,079.489 ms，占 49.99%/47.93%；它已超过 path-append。[后续根 child 排除实验](39_M5_HT_Root_Child_Normalization_Profile.md)证明 dense 根规范化只占 host residual 0.41%–2.61%，下一画像转向逐 frontier state 的全维 point-candidate 扫描。

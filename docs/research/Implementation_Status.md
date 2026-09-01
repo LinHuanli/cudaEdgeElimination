@@ -64,6 +64,8 @@ M5 HT CPU cost row 并行与 leaf 桶融合绑定 `34cf918/63133c7/623f167`：8,
 
 M5 HT path-append 画像与稀疏规范化绑定 `ba15919/b551a2e`：V10 report/V13 summary 将包含式总量拆为 parent prepare、child normalize、child edges、CUDA evaluate 和 compare。内部 fast path 只为实际路径节点构造有序邻接，通用 dense 实现继续独立 proof 重放；308-task 单元差分逐项比较完整规范结果。三实例 path-append 加速 `5.503×/9.538×/25.561×`，search 加速 `1.115×/1.679×/3.133×`；五路规范 proof、最终边和受保护 tour 全部不变。下一瓶颈是大实例 host-build residual。
 
+M5 HT 根 child 规范化排除实验绑定 `6b2b8ad`：V11/V14 记录 72/151/647 次根 child dense 规范化，CPU-fused 仅为 0.773/2.174/28.642 ms，占三实例 host residual `0.406%/0.562%/2.605%`。未为低占比路径扩大共享 fast-path API；下一画像目标是逐 frontier state 的全维 point-candidate 扫描。
+
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
 Concorde 随机 20 点 epoch：25 行、43 列；QSopt 与 cuOpt 模型目标均为 `88`。cuOpt primal violation 为 `4.44e-15`，reduced-cost residual 为 `1.57e-14`；完整图 exact lower bound 为 `87.3932819641`，上界为 `88`。

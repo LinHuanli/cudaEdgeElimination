@@ -93,6 +93,8 @@ CPU leaf bucket fusion 组合实验与多实例门禁已完成：V12 增加 CPU 
 
 path-append V10/V13 画像和稀疏规范化已完成：内部 fast path 按实际节点构造有序邻接，通用 dense 实现继续独立重放 proof。三实例 path-append 获得 `5.503×/9.538×/25.561×`，search 获得 `1.115×/1.679×/3.133×`；五路规范 proof 和最终边逐字节不变。rl5915/d15112 下一瓶颈是占 work graph 约一半的 host-build residual，先画像后优化。
 
+根 child dense 规范化已由 V11/V14 排除：三实例只占 host residual `0.406%/0.562%/2.605%`，不值得扩大共享 fast-path API。下一步计量 `BuildPointCandidateNodes` 的 frontier 状态数、全维节点检查量和排序成本。
+
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
