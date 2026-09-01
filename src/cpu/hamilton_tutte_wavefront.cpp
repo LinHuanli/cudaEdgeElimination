@@ -162,6 +162,7 @@ struct WaveBuildContext {
   PathCompatibilityBackend hamilton_reply_backend{PathCompatibilityBackend::kAuto};
   std::uint32_t reply_frontier_batch_states{256};
   std::uint32_t leaf_frontier_batch_states{256};
+  bool fuse_leaf_buckets{false};
   HtWavefrontResult* result{};
   bool budget_exhausted{false};
   bool path_append_failed{false};
@@ -916,6 +917,37 @@ void RecordLeafBatch(WaveBuildContext* const context, const PathSystemKOptBatchR
   }
 }
 
+void EvaluateLeafStateIndices(WaveBuildContext* const context, std::vector<WaveState>* const states,
+                              const std::vector<std::size_t>& state_indices) {
+  const std::size_t max_batch_states =
+      context->leaf_frontier_batch_states == 0U
+          ? state_indices.size()
+          : static_cast<std::size_t>(context->leaf_frontier_batch_states);
+  for (std::size_t begin = 0U; begin < state_indices.size();) {
+    const std::size_t end = begin + std::min(max_batch_states, state_indices.size() - begin);
+    std::vector<NormalizedPathSystem> path_systems;
+    path_systems.reserve(end - begin);
+    for (std::size_t offset = begin; offset < end; ++offset) {
+      path_systems.push_back(states->at(state_indices[offset]).paths);
+    }
+    AddLeafMetric(&context->result->proof.leaf_calls, path_systems.size(), "leaf calls");
+    PathSystemKOptBatchResult batch;
+    {
+      ScopedPhaseTimer timer(&context->result->leaf_ms);
+      batch = ProvePathSystemsByKOpt(*context->graph, path_systems, context->target,
+                                     context->options->root_options.leaf_options);
+    }
+    if (batch.proofs.size() != path_systems.size()) {
+      throw std::logic_error("HT leaf batch 返回的 proof 数量不一致");
+    }
+    RecordLeafBatch(context, batch, path_systems.size());
+    for (std::size_t offset = begin; offset < end; ++offset) {
+      states->at(state_indices[offset]).leaf_proof = std::move(batch.proofs[offset - begin]);
+    }
+    begin = end;
+  }
+}
+
 void EvaluateLeafFrontierChunk(WaveBuildContext* const context,
                                std::vector<WaveState>* const states,
                                const std::size_t frontier_begin, const std::size_t frontier_end) {
@@ -926,35 +958,21 @@ void EvaluateLeafFrontierChunk(WaveBuildContext* const context,
         .push_back(state_index);
   }
   AddLeafMetric(&context->result->leaf_bucket_count, buckets.size(), "bucket count");
+  if (context->fuse_leaf_buckets) {
+    std::vector<std::size_t> fused_state_indices;
+    fused_state_indices.reserve(frontier_end - frontier_begin);
+    // 保留既有规范桶序与桶内 state index 顺序，只消除批调用边界。
+    for (const auto& [key, state_indices] : buckets) {
+      static_cast<void>(key);
+      fused_state_indices.insert(fused_state_indices.end(), state_indices.begin(),
+                                 state_indices.end());
+    }
+    EvaluateLeafStateIndices(context, states, fused_state_indices);
+    return;
+  }
   for (const auto& [key, state_indices] : buckets) {
     static_cast<void>(key);
-    const std::size_t max_batch_states =
-        context->leaf_frontier_batch_states == 0U
-            ? state_indices.size()
-            : static_cast<std::size_t>(context->leaf_frontier_batch_states);
-    for (std::size_t begin = 0U; begin < state_indices.size();) {
-      const std::size_t end = begin + std::min(max_batch_states, state_indices.size() - begin);
-      std::vector<NormalizedPathSystem> path_systems;
-      path_systems.reserve(end - begin);
-      for (std::size_t offset = begin; offset < end; ++offset) {
-        path_systems.push_back(states->at(state_indices[offset]).paths);
-      }
-      AddLeafMetric(&context->result->proof.leaf_calls, path_systems.size(), "leaf calls");
-      PathSystemKOptBatchResult batch;
-      {
-        ScopedPhaseTimer timer(&context->result->leaf_ms);
-        batch = ProvePathSystemsByKOpt(*context->graph, path_systems, context->target,
-                                       context->options->root_options.leaf_options);
-      }
-      if (batch.proofs.size() != path_systems.size()) {
-        throw std::logic_error("HT leaf batch 返回的 proof 数量不一致");
-      }
-      RecordLeafBatch(context, batch, path_systems.size());
-      for (std::size_t offset = begin; offset < end; ++offset) {
-        states->at(state_indices[offset]).leaf_proof = std::move(batch.proofs[offset - begin]);
-      }
-      begin = end;
-    }
+    EvaluateLeafStateIndices(context, states, state_indices);
   }
 }
 
@@ -1272,6 +1290,7 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
                            .hamilton_reply_backend = options.hamilton_reply_backend,
                            .reply_frontier_batch_states = options.reply_frontier_batch_states,
                            .leaf_frontier_batch_states = options.leaf_frontier_batch_states,
+                           .fuse_leaf_buckets = options.fuse_leaf_buckets,
                            .result = &result,
                            .budget_exhausted = false,
                            .path_append_failed = false,

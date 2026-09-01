@@ -117,6 +117,11 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.leaf_cost_backend = wavefront.leaf_cost_backend;
     attempt.leaf_cost_selected_device = wavefront.leaf_cost_selected_device;
     attempt.leaf_cpu_verified = wavefront.leaf_cpu_verified;
+    attempt.leaf_frontier_batches = wavefront.leaf_frontier_batches;
+    attempt.leaf_frontier_states = wavefront.leaf_frontier_states;
+    attempt.leaf_bucket_count = wavefront.leaf_bucket_count;
+    attempt.peak_leaf_frontier_batch = wavefront.peak_leaf_frontier_batch;
+    attempt.leaf_cost_batches = wavefront.leaf_cost_batches;
     attempt.leaf_cost_cells = wavefront.leaf_cost_cells;
     attempt.leaf_cuda_cost_batches = wavefront.leaf_cuda_cost_batches;
     attempt.leaf_cpu_long_tail_cells = wavefront.leaf_cpu_long_tail_cells;
@@ -140,6 +145,12 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.replies_expanded += attempt.replies_expanded;
     scan.leaf_calls += attempt.leaf_calls;
     scan.moves_generated += attempt.moves_generated;
+    scan.leaf_frontier_batches += attempt.leaf_frontier_batches;
+    scan.leaf_frontier_states += attempt.leaf_frontier_states;
+    scan.leaf_bucket_count += attempt.leaf_bucket_count;
+    scan.peak_leaf_frontier_batch =
+        std::max(scan.peak_leaf_frontier_batch, attempt.peak_leaf_frontier_batch);
+    scan.leaf_cost_batches += attempt.leaf_cost_batches;
     scan.leaf_cost_cells += attempt.leaf_cost_cells;
     scan.leaf_cuda_cost_batches += attempt.leaf_cuda_cost_batches;
     scan.leaf_cpu_long_tail_cells += attempt.leaf_cpu_long_tail_cells;

@@ -714,6 +714,10 @@ void TestRecursivePointProof() {
             timed_attempt.proof_verify_ms >= 0.0 && timed_attempt.immediate_verify_ms >= 0.0 &&
             timed_attempt.work_graph_ms + 1.0e-6 >= measured_build_subphases &&
             scan.work_graph_ms == timed_attempt.work_graph_ms &&
+            scan.leaf_frontier_batches == timed_attempt.leaf_frontier_batches &&
+            scan.leaf_frontier_states == timed_attempt.leaf_frontier_states &&
+            scan.leaf_bucket_count == timed_attempt.leaf_bucket_count &&
+            scan.peak_leaf_frontier_batch == timed_attempt.peak_leaf_frontier_batch &&
             scan.immediate_verify_ms == timed_attempt.immediate_verify_ms &&
             scan.total_ms + 1.0e-6 >= scan.search_ms,
         "HT scan exposes consistent inclusive phase timings");
@@ -800,6 +804,21 @@ void TestRecursivePointProof() {
             single_leaf_batches.leaf_frontier_states == wavefront.leaf_frontier_states &&
             single_leaf_batches.peak_leaf_frontier_batch == 1U,
         "leaf bucket batch size preserves the canonical recursive proof");
+
+  const cudaee::HtWavefrontResult fused_leaf_buckets = cudaee::ProveEdgeByWavefrontHt(
+      graph, {2, 4},
+      {.search_options = options,
+       .fuse_leaf_buckets = true,
+       .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu});
+  Check(fused_leaf_buckets.status == wavefront.status &&
+            cudaee::SerializeHtRecursiveProof(fused_leaf_buckets.proof) ==
+                cudaee::SerializeHtRecursiveProof(wavefront.proof) &&
+            fused_leaf_buckets.leaf_frontier_states == wavefront.leaf_frontier_states &&
+            fused_leaf_buckets.leaf_bucket_count == wavefront.leaf_bucket_count &&
+            fused_leaf_buckets.leaf_frontier_batches <= wavefront.leaf_frontier_batches,
+        "fusing leaf complexity buckets preserves proof bytes and complete leaf work");
 
 #ifndef CUDAEE_HAS_CUDA
   const cudaee::HtWavefrontResult auto_fallback = cudaee::ProveEdgeByWavefrontHt(
@@ -1009,6 +1028,22 @@ void TestRecursivePointProof() {
                   cuda_single_leaf.leaf_cuda_cost_batches &&
               cuda_single_leaf.leaf_workspace_cache_hits == cuda_single_leaf.leaf_cuda_cost_batches,
           "subsequent CUDA leaf run fully reuses snapshot, template and workspace caches");
+    const cudaee::HtWavefrontResult cuda_fused_leaf_buckets = cudaee::ProveEdgeByWavefrontHt(
+        graph, {2, 4},
+        {.search_options = cuda_wavefront_options,
+         .fuse_leaf_buckets = true,
+         .propagation_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .path_append_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCuda});
+    Check(
+        cuda_fused_leaf_buckets.status == cuda_wavefront.status &&
+            cudaee::SerializeHtRecursiveProof(cuda_fused_leaf_buckets.proof) ==
+                cudaee::SerializeHtRecursiveProof(cuda_wavefront.proof) &&
+            cuda_fused_leaf_buckets.leaf_cost_tasks == cuda_wavefront.leaf_cost_tasks &&
+            cuda_fused_leaf_buckets.leaf_cost_cells == cuda_wavefront.leaf_cost_cells &&
+            cuda_fused_leaf_buckets.leaf_frontier_batches <= cuda_wavefront.leaf_frontier_batches &&
+            cuda_fused_leaf_buckets.leaf_cuda_cost_batches <= cuda_wavefront.leaf_cuda_cost_batches,
+        "CUDA leaf bucket fusion preserves proof bytes and does not increase launch count");
     Check(cuda_wavefront.hamilton_reply_backend == "cuda" &&
               cuda_wavefront.hamilton_reply_selected_device >= 0 &&
               cuda_wavefront.hamilton_reply_cpu_verified &&

@@ -142,6 +142,13 @@ run_scan() {
       --report "${report}" "${tour_arguments[@]}" "${ht_arguments[@]}" \
       --backend cpu --leaf-backend cuda --reply-backend cpu --path-append-backend cpu \
       --propagation-backend cpu >"${stdout_file}" 2>"${stderr_file}"
+  elif [[ "${backend}" == "fused" ]]; then
+    CUDA_VISIBLE_DEVICES="${physical_gpu}" "${binary}" ht-scan \
+      --tsp "${tsp}" --edges "${jv_edges}" --output "${output}" --proof "${proof}" \
+      --report "${report}" "${tour_arguments[@]}" "${ht_arguments[@]}" \
+      --backend cpu --leaf-backend cuda --reply-backend cpu --path-append-backend cpu \
+      --propagation-backend cpu --fuse-leaf-buckets 1 \
+      >"${stdout_file}" 2>"${stderr_file}"
   else
     "${binary}" ht-scan \
       --tsp "${tsp}" --edges "${jv_edges}" --output "${output}" --proof "${proof}" \
@@ -168,17 +175,23 @@ echo "运行 ${instance} HT scan CUDA，物理 GPU ${physical_gpu}"
 run_scan cuda "${cuda_binary}"
 echo "运行 ${instance} HT scan hybrid，物理 GPU ${physical_gpu}"
 run_scan hybrid "${cuda_binary}"
+echo "运行 ${instance} HT scan fused leaf buckets，物理 GPU ${physical_gpu}"
+run_scan fused "${cuda_binary}"
 
 cmp "${run_dir}/cpu.edg" "${run_dir}/cuda.edg"
 cmp "${run_dir}/cpu.edg" "${run_dir}/hybrid.edg"
+cmp "${run_dir}/cpu.edg" "${run_dir}/fused.edg"
 awk '$1 == "attempt" { print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }' \
   "${run_dir}/cpu.report" >"${run_dir}/cpu.work-signature"
 awk '$1 == "attempt" { print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }' \
   "${run_dir}/cuda.report" >"${run_dir}/cuda.work-signature"
 awk '$1 == "attempt" { print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }' \
   "${run_dir}/hybrid.report" >"${run_dir}/hybrid.work-signature"
+awk '$1 == "attempt" { print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }' \
+  "${run_dir}/fused.report" >"${run_dir}/fused.work-signature"
 cmp "${run_dir}/cpu.work-signature" "${run_dir}/cuda.work-signature"
 cmp "${run_dir}/cpu.work-signature" "${run_dir}/hybrid.work-signature"
+cmp "${run_dir}/cpu.work-signature" "${run_dir}/fused.work-signature"
 
 read_field() {
   awk -v key="$2" '$1 == key { print $2; found = 1 } END { if (!found) exit 1 }' "$1"
@@ -187,6 +200,7 @@ read_field() {
 cpu_search_ms="$(read_field "${run_dir}/cpu.report" search_ms)"
 cuda_search_ms="$(read_field "${run_dir}/cuda.report" search_ms)"
 hybrid_search_ms="$(read_field "${run_dir}/hybrid.report" search_ms)"
+fused_search_ms="$(read_field "${run_dir}/fused.report" search_ms)"
 cpu_candidate_ms="$(read_field "${run_dir}/cpu.report" candidate_ms)"
 cuda_candidate_ms="$(read_field "${run_dir}/cuda.report" candidate_ms)"
 hybrid_candidate_ms="$(read_field "${run_dir}/hybrid.report" candidate_ms)"
@@ -196,6 +210,19 @@ hybrid_work_graph_ms="$(read_field "${run_dir}/hybrid.report" work_graph_ms)"
 cpu_leaf_ms="$(read_field "${run_dir}/cpu.report" leaf_ms)"
 cuda_leaf_ms="$(read_field "${run_dir}/cuda.report" leaf_ms)"
 hybrid_leaf_ms="$(read_field "${run_dir}/hybrid.report" leaf_ms)"
+fused_leaf_ms="$(read_field "${run_dir}/fused.report" leaf_ms)"
+hybrid_leaf_cuda_batches="$(read_field "${run_dir}/hybrid.report" leaf_cuda_cost_batches)"
+fused_leaf_cuda_batches="$(read_field "${run_dir}/fused.report" leaf_cuda_cost_batches)"
+hybrid_leaf_frontier_batches="$(read_field "${run_dir}/hybrid.report" leaf_frontier_batches)"
+fused_leaf_frontier_batches="$(read_field "${run_dir}/fused.report" leaf_frontier_batches)"
+hybrid_leaf_bucket_count="$(read_field "${run_dir}/hybrid.report" leaf_bucket_count)"
+fused_leaf_bucket_count="$(read_field "${run_dir}/fused.report" leaf_bucket_count)"
+hybrid_leaf_cells="$(read_field "${run_dir}/hybrid.report" leaf_cost_cells)"
+fused_leaf_cells="$(read_field "${run_dir}/fused.report" leaf_cost_cells)"
+if [[ "${hybrid_leaf_cells}" != "${fused_leaf_cells}" ]]; then
+  echo "leaf bucket 融合改变了 cost cell 工作量" >&2
+  exit 1
+fi
 cpu_path_append_ms="$(read_field "${run_dir}/cpu.report" path_append_ms)"
 cuda_path_append_ms="$(read_field "${run_dir}/cuda.report" path_append_ms)"
 hybrid_path_append_ms="$(read_field "${run_dir}/hybrid.report" path_append_ms)"
@@ -223,9 +250,11 @@ hybrid_commit_ms="$(read_field "${run_dir}/hybrid.report" commit_ms)"
 cpu_total_ms="$(read_field "${run_dir}/cpu.report" total_ms)"
 cuda_total_ms="$(read_field "${run_dir}/cuda.report" total_ms)"
 hybrid_total_ms="$(read_field "${run_dir}/hybrid.report" total_ms)"
+fused_total_ms="$(read_field "${run_dir}/fused.report" total_ms)"
 cpu_wall_ms="$(<"${run_dir}/cpu.wall-ms")"
 cuda_wall_ms="$(<"${run_dir}/cuda.wall-ms")"
 hybrid_wall_ms="$(<"${run_dir}/hybrid.wall-ms")"
+fused_wall_ms="$(<"${run_dir}/fused.wall-ms")"
 attempted="$(read_field "${run_dir}/cuda.report" attempted_targets)"
 proven="$(read_field "${run_dir}/cuda.report" proven_targets)"
 unresolved="$(read_field "${run_dir}/cuda.report" unresolved_targets)"
@@ -243,6 +272,9 @@ leaf_speedup="$(awk -v cpu="${cpu_leaf_ms}" -v cuda="${cuda_leaf_ms}" 'BEGIN { p
 hybrid_search_speedup="$(awk -v cpu="${cpu_search_ms}" -v hybrid="${hybrid_search_ms}" 'BEGIN { printf "%.3f", cpu/hybrid }')"
 hybrid_wall_speedup="$(awk -v cpu="${cpu_wall_ms}" -v hybrid="${hybrid_wall_ms}" 'BEGIN { printf "%.3f", cpu/hybrid }')"
 hybrid_leaf_speedup="$(awk -v cpu="${cpu_leaf_ms}" -v hybrid="${hybrid_leaf_ms}" 'BEGIN { printf "%.3f", cpu/hybrid }')"
+fused_search_speedup="$(awk -v cpu="${cpu_search_ms}" -v fused="${fused_search_ms}" 'BEGIN { printf "%.3f", cpu/fused }')"
+fused_wall_speedup="$(awk -v cpu="${cpu_wall_ms}" -v fused="${fused_wall_ms}" 'BEGIN { printf "%.3f", cpu/fused }')"
+fused_leaf_speedup="$(awk -v hybrid="${hybrid_leaf_ms}" -v fused="${fused_leaf_ms}" 'BEGIN { printf "%.3f", hybrid/fused }')"
 cpu_host_build_ms="$(awk -v work="${cpu_work_graph_ms}" -v leaf="${cpu_leaf_ms}" \
   -v path="${cpu_path_append_ms}" -v hamilton="${cpu_hamilton_reply_ms}" \
   -v end="${cpu_end_reply_ms}" 'BEGIN { printf "%.6f", work-leaf-path-hamilton-end }')"
@@ -273,7 +305,7 @@ manifest="${run_dir}/run-manifest-v1"
   echo "target_offset ${target_offset}"
   echo "max_targets ${max_targets}"
   echo "target_order weight-desc"
-  echo "benchmark_modes cpu,cuda-all,hybrid-leaf-cuda"
+  echo "benchmark_modes cpu,cuda-all,hybrid-leaf-cuda,fused-leaf-buckets"
   echo "cd_mode missing-or-incompatible"
   echo "max_neighborhood 25"
   echo "max_cd_candidates 5"
@@ -301,7 +333,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V3"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V4"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -324,8 +356,16 @@ summary="${run_dir}/summary.txt"
   echo "cpu_leaf_ms ${cpu_leaf_ms}"
   echo "cuda_leaf_ms ${cuda_leaf_ms}"
   echo "hybrid_leaf_ms ${hybrid_leaf_ms}"
+  echo "fused_leaf_ms ${fused_leaf_ms}"
+  echo "hybrid_leaf_cuda_batches ${hybrid_leaf_cuda_batches}"
+  echo "fused_leaf_cuda_batches ${fused_leaf_cuda_batches}"
+  echo "hybrid_leaf_frontier_batches ${hybrid_leaf_frontier_batches}"
+  echo "fused_leaf_frontier_batches ${fused_leaf_frontier_batches}"
+  echo "hybrid_leaf_bucket_count ${hybrid_leaf_bucket_count}"
+  echo "fused_leaf_bucket_count ${fused_leaf_bucket_count}"
   echo "leaf_speedup ${leaf_speedup}"
   echo "hybrid_leaf_speedup ${hybrid_leaf_speedup}"
+  echo "fused_leaf_speedup_vs_hybrid ${fused_leaf_speedup}"
   echo "cpu_path_append_ms ${cpu_path_append_ms}"
   echo "cuda_path_append_ms ${cuda_path_append_ms}"
   echo "hybrid_path_append_ms ${hybrid_path_append_ms}"
@@ -355,14 +395,19 @@ summary="${run_dir}/summary.txt"
   echo "search_speedup ${search_speedup}"
   echo "hybrid_search_ms ${hybrid_search_ms}"
   echo "hybrid_search_speedup ${hybrid_search_speedup}"
+  echo "fused_search_ms ${fused_search_ms}"
+  echo "fused_search_speedup ${fused_search_speedup}"
   echo "cpu_total_ms ${cpu_total_ms}"
   echo "cuda_total_ms ${cuda_total_ms}"
   echo "hybrid_total_ms ${hybrid_total_ms}"
+  echo "fused_total_ms ${fused_total_ms}"
   echo "cpu_wall_ms ${cpu_wall_ms}"
   echo "cuda_wall_ms ${cuda_wall_ms}"
   echo "wall_speedup ${wall_speedup}"
   echo "hybrid_wall_ms ${hybrid_wall_ms}"
   echo "hybrid_wall_speedup ${hybrid_wall_speedup}"
+  echo "fused_wall_ms ${fused_wall_ms}"
+  echo "fused_wall_speedup ${fused_wall_speedup}"
   echo "initial_hash ${initial_hash}"
   echo "final_hash ${final_hash}"
   echo "verified_edge_sha256 $(sha256sum "${run_dir}/cuda.edg" | awk '{ print $1 }')"

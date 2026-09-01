@@ -182,6 +182,8 @@ struct HtWavefrontOptions {
   std::uint32_t reply_frontier_batch_states{256};
   // 同一复杂度桶内每个 leaf batch 的状态上限；0 表示一次覆盖完整桶。
   std::uint32_t leaf_frontier_batch_states{256};
+  // true 将同一 reply chunk 的复杂度桶按规范桶序拼接后统一合批；只改变 cost 调度。
+  bool fuse_leaf_buckets{false};
   // 只控制 continuation 真值传播；leaf/c,d 后端仍由 search_options 分别配置。
   PathCompatibilityBackend propagation_backend{PathCompatibilityBackend::kAuto};
   // 0 自动选择 cooperative residency 内的 block 数；1 强制单 block 正确性基线。

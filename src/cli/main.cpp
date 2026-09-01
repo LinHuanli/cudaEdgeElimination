@@ -47,6 +47,7 @@ void PrintHelp() {
       << "                [--reply-backend auto|cpu|cuda]\n"
       << "                [--reply-frontier-batch-states N]\n"
       << "                [--leaf-frontier-batch-states N]\n"
+      << "                [--fuse-leaf-buckets 0|1]\n"
       << "                [--cost-batch-size N] [--cuda-min-cost-cells N]\n"
       << "                [--path-append-backend auto|cpu|cuda]\n"
       << "                [--propagation-backend auto|cpu|cuda] [--propagation-blocks N]\n"
@@ -463,6 +464,7 @@ ParseHtWavefrontOptions(const Arguments& arguments,
               OptionalInteger<std::uint32_t>(arguments, "reply-frontier-batch-states", 256U),
           .leaf_frontier_batch_states =
               OptionalInteger<std::uint32_t>(arguments, "leaf-frontier-batch-states", 256U),
+          .fuse_leaf_buckets = ParseBooleanOption(arguments, "fuse-leaf-buckets", false),
           .propagation_backend =
               ParsePathCompatibilityBackend(Optional(arguments, "propagation-backend", "auto")),
           .propagation_blocks = OptionalInteger<std::uint32_t>(arguments, "propagation-blocks", 0U),
@@ -716,7 +718,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V2\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V3\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
@@ -724,6 +726,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "target_offset " << scan.target_offset << '\n';
   output << "target_end_offset " << scan.target_offset + scan.attempts.size() << '\n';
   output << "max_targets " << options.max_targets << '\n';
+  output << "fuse_leaf_buckets " << (options.wavefront_options.fuse_leaf_buckets ? 1 : 0) << '\n';
   output << "attempted_targets " << scan.attempts.size() << '\n';
   output << "proven_targets " << scan.proven_targets << '\n';
   output << "unresolved_targets " << scan.unresolved_targets << '\n';
@@ -732,6 +735,11 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "replies_expanded " << scan.replies_expanded << '\n';
   output << "leaf_calls " << scan.leaf_calls << '\n';
   output << "moves_generated " << scan.moves_generated << '\n';
+  output << "leaf_frontier_batches " << scan.leaf_frontier_batches << '\n';
+  output << "leaf_frontier_states " << scan.leaf_frontier_states << '\n';
+  output << "leaf_bucket_count " << scan.leaf_bucket_count << '\n';
+  output << "peak_leaf_frontier_batch " << scan.peak_leaf_frontier_batch << '\n';
+  output << "leaf_cost_batches " << scan.leaf_cost_batches << '\n';
   output << "leaf_cost_cells " << scan.leaf_cost_cells << '\n';
   output << "leaf_cuda_cost_batches " << scan.leaf_cuda_cost_batches << '\n';
   output << "leaf_cpu_long_tail_cells " << scan.leaf_cpu_long_tail_cells << '\n';
@@ -758,7 +766,8 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "total_ms " << scan.total_ms << '\n';
   output << "attempt_fields index edge_id u v status states replies leaf_calls moves "
             "peak_frontier propagation_backend device blocks cooperative propagation_verified "
-            "leaf_backend leaf_device leaf_verified leaf_cells leaf_cuda_batches "
+            "leaf_backend leaf_device leaf_verified leaf_frontier_batches leaf_frontier_states "
+            "leaf_buckets peak_leaf_frontier_batch leaf_cost_batches leaf_cells leaf_cuda_batches "
             "leaf_cpu_long_tail_cells peak_leaf_cache_bytes path_append_tasks hamilton_replies "
             "end_replies candidate_ms work_graph_ms leaf_ms path_append_ms hamilton_reply_ms "
             "end_reply_ms propagation_ms proof_extract_ms proof_verify_ms immediate_verify_ms "
@@ -773,15 +782,18 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << attempt.propagation_blocks << ' ' << (attempt.propagation_cooperative ? 1 : 0) << ' '
            << (attempt.propagation_cpu_verified ? 1 : 0) << ' ' << attempt.leaf_cost_backend << ' '
            << attempt.leaf_cost_selected_device << ' ' << (attempt.leaf_cpu_verified ? 1 : 0) << ' '
-           << attempt.leaf_cost_cells << ' ' << attempt.leaf_cuda_cost_batches << ' '
-           << attempt.leaf_cpu_long_tail_cells << ' ' << attempt.peak_leaf_device_cache_bytes << ' '
-           << attempt.path_append_tasks << ' ' << attempt.hamilton_replies_generated << ' '
-           << attempt.end_replies_generated << ' ' << attempt.candidate_ms << ' '
-           << attempt.work_graph_ms << ' ' << attempt.leaf_ms << ' ' << attempt.path_append_ms
-           << ' ' << attempt.hamilton_reply_ms << ' ' << attempt.end_reply_ms << ' '
-           << attempt.propagation_ms << ' ' << attempt.proof_extract_ms << ' '
-           << attempt.proof_verify_ms << ' ' << attempt.immediate_verify_ms << ' '
-           << attempt.search_ms << ' ' << std::quoted(SingleLine(attempt.reason)) << '\n';
+           << attempt.leaf_frontier_batches << ' ' << attempt.leaf_frontier_states << ' '
+           << attempt.leaf_bucket_count << ' ' << attempt.peak_leaf_frontier_batch << ' '
+           << attempt.leaf_cost_batches << ' ' << attempt.leaf_cost_cells << ' '
+           << attempt.leaf_cuda_cost_batches << ' ' << attempt.leaf_cpu_long_tail_cells << ' '
+           << attempt.peak_leaf_device_cache_bytes << ' ' << attempt.path_append_tasks << ' '
+           << attempt.hamilton_replies_generated << ' ' << attempt.end_replies_generated << ' '
+           << attempt.candidate_ms << ' ' << attempt.work_graph_ms << ' ' << attempt.leaf_ms << ' '
+           << attempt.path_append_ms << ' ' << attempt.hamilton_reply_ms << ' '
+           << attempt.end_reply_ms << ' ' << attempt.propagation_ms << ' '
+           << attempt.proof_extract_ms << ' ' << attempt.proof_verify_ms << ' '
+           << attempt.immediate_verify_ms << ' ' << attempt.search_ms << ' '
+           << std::quoted(SingleLine(attempt.reason)) << '\n';
   }
   output << "END\n";
   if (!output) {
@@ -857,6 +869,8 @@ void HtScanCommand(const Arguments& arguments) {
               << " propagation_backend=" << attempt.propagation_backend
               << " selected_device=" << attempt.selected_device
               << " leaf_cost_backend=" << attempt.leaf_cost_backend
+              << " leaf_frontier_batches=" << attempt.leaf_frontier_batches
+              << " leaf_cost_batches=" << attempt.leaf_cost_batches
               << " leaf_cost_cells=" << attempt.leaf_cost_cells << " work_graph_ms=" << std::fixed
               << std::setprecision(3) << attempt.work_graph_ms << " leaf_ms=" << attempt.leaf_ms
               << " propagation_ms=" << attempt.propagation_ms

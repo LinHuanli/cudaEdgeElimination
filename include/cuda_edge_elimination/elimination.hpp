@@ -89,6 +89,11 @@ struct HtScanAttempt {
   std::string leaf_cost_backend{"none"};
   int leaf_cost_selected_device{-1};
   bool leaf_cpu_verified{false};
+  std::uint64_t leaf_frontier_batches{};
+  std::uint64_t leaf_frontier_states{};
+  std::uint64_t leaf_bucket_count{};
+  std::uint64_t peak_leaf_frontier_batch{};
+  std::uint64_t leaf_cost_batches{};
   std::uint64_t leaf_cost_cells{};
   std::uint64_t leaf_cuda_cost_batches{};
   std::uint64_t leaf_cpu_long_tail_cells{};
@@ -121,6 +126,11 @@ struct HtScanResult {
   std::uint64_t replies_expanded{};
   std::uint64_t leaf_calls{};
   std::uint64_t moves_generated{};
+  std::uint64_t leaf_frontier_batches{};
+  std::uint64_t leaf_frontier_states{};
+  std::uint64_t leaf_bucket_count{};
+  std::uint64_t peak_leaf_frontier_batch{};
+  std::uint64_t leaf_cost_batches{};
   std::uint64_t leaf_cost_cells{};
   std::uint64_t leaf_cuda_cost_batches{};
   std::uint64_t leaf_cpu_long_tail_cells{};
