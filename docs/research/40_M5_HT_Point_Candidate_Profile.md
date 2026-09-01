@@ -32,13 +32,31 @@ CPU fused 画像如下：
 
 五路工作签名、proof 重放、最终边文件和受保护 tour 均通过；最终哈希和活动边 SHA-256 保持不变。
 
-## 3. 下一单变量实验
+## 3. Top-K 单变量实验
 
-先只把有界分支的全量排序替换为 `std::partial_sort(begin, begin + 25, end)`，随后裁剪；比较键仍是严格全序 `(midpoint_score,node)`，因此前 25 个节点及其顺序应逐项不变。`max_neighborhood=0` 或候选数不超过上限时继续全量排序。
+提交 `4e4f8e3` 只把有界分支的全量排序替换为 `std::partial_sort(begin, begin + k, end)`，随后裁剪；比较键仍是严格全序 `(midpoint_score,node)`。`max_neighborhood=0` 或候选数不超过上限时继续全量排序。
 
-门禁要求：
+正式 runs 均绑定 clean commit `4e4f8e301acf96cf746f32788da63aeef695aea7`、物理 GPU 1、8 个 CPU cost threads 和同一公开最优 tour：
 
-1. CPU Debug/Release、CUDA Release 和 HT compute-sanitizer 全部通过；
-2. 三实例 V15 五路规范计数、proof、边文件和 tour 不变；
-3. baseline 与优化后的每一路规范 proof 和活动边逐字节比较；
-4. 只报告 sort、work graph、search 和 wall 的实测收益，不把未改变的 scan 宣传为优化收益。
+- pcb3038：`artifacts/pcb3038-ht-scan-20260901T232339Z-2667844`；
+- rl5915：`artifacts/rl5915-ht-scan-20260901T232354Z-2668482`；
+- d15112：`artifacts/d15112-ht-scan-20260901T232404Z-2669037`。
+
+CPU fused 与画像基线的单变量对比如下：
+
+| 实例 | sort：基线 → Top-K（ms） | sort 加速 | host residual：基线 → Top-K（ms） | work graph 加速 | search 加速 | wall 加速 |
+|---|---:|---:|---:|---:|---:|---:|
+| pcb3038 | 137.639 → 11.901 | 11.565× | 191.374 → 63.947 | 1.086× | 1.086× | 1.087× |
+| rl5915 | 298.303 → 14.314 | 20.840× | 381.194 → 96.341 | 1.614× | 1.580× | 1.521× |
+| d15112 | 858.648 → 28.784 | 29.831× | 1,075.813 → 244.218 | 1.605× | 1.552× | 1.462× |
+
+scan 基本保持在 `40.342/70.826/165.022 ms`，符合本次只优化排序的预期。门禁结果：
+
+1. CPU Debug/Release 为 17/17，CUDA Release 为 20/20，HT compute-sanitizer 为 0 error；
+2. 三实例 V15 的 scans、checked、ranked、selected 计数五路一致；
+3. baseline 与优化后的五路活动边、工作签名和去除计时行后的规范 proof 逐字节一致；
+4. JV 固定点、受保护最优 tour、最终活动边与 proof 重放全部通过。
+
+## 4. 下一研究切片
+
+排序不再是主要矛盾。剩余 point-candidate scan 占优化后 host residual 的 `63.085%/73.516%/67.571%`，且每个 state 仍遍历完整维度。下一步先验证 `(target,node)` 的中点评分与严格次序是否可在同一目标的不可变图快照上预计算；状态相关逻辑只能做 `ContainsNode` 和度数过滤。若缓存路径无法保持相同 checked/ranked 规范计数和逐项候选顺序，则保留现实现并转向更高层跨目标工作图融合。
