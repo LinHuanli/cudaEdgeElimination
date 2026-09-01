@@ -28,7 +28,7 @@
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
-| M5 中大型调优 | 进行中（JV 三轮 + HT profiling） | JV 三实例门禁；不可变 leaf 表缓存令 CPU search 降 29.2%；剩余 cursor consume 占混合 leaf 约 85.5% |
+| M5 中大型调优 | 进行中（JV 三轮 + HT profiling） | 不可变 leaf 表缓存令 CPU search 降 29.2%；99.864% CUDA rows 进入 CPU completeness fallback |
 
 ## 当前基准结果
 
@@ -49,6 +49,8 @@ M5 HT bucket fusion 绑定 `b5fde24`：V3 报告加入 leaf frontier/bucket/cost
 M5 HT leaf 子阶段画像绑定 `fe99f38`：V4 报告和 V5 summary 把 leaf 拆成 setup、cursor prepare、cost、scatter、consume、apply 与 verifier。相同 8-target clean run 中，混合 leaf 为 `26.489 s`，其中 setup `5.864 s`（`22.139%`）、GPU cost `0.584 s`（`2.204%`）、CPU cursor consume `19.695 s`（`74.352%`）；四路工作签名、最终边集、proof 重放与最优 tour 门禁均一致。下一步先缓存只由 path count/k 决定的不可变组合表，再细分 CPU completeness。
 
 M5 HT 不可变表缓存绑定 `589bca0`：线程安全延迟缓存复用 path-count matching catalog 和 `k=3/4/5` reconnect templates，不缓存任何图相关状态。相对 `fe99f38`，CPU leaf/search 从 `27.231/34.095 s` 降至 `17.760/24.138 s`（`1.533×/1.413×`）；混合 setup 与 cursor consume 分别下降 `70.002%/23.278%`。四路工作签名、51,309,996 cost cells、最终边集、proof 重放和受保护 tour 不变；剩余混合 consume 为 `15.111 s`，是下一画像对象。
+
+M5 HT completeness 画像绑定 `ee4f3aa`：V5 report/V6 summary 显示 727,635 个 CUDA cost rows 中 726,648 个（`99.864%`）进入 CPU 全模板 fallback，51,179,094/51,309,996 cells（`99.745%`）被通用重连器重新穷举。混合 consume 中 candidate/fallback 为 `0.057/15.107 s`，fallback 占 `99.033%`。三条 CUDA leaf 路径计数、proof、图和 tour 均一致；下一步以 CPU 独立精确矩阵替换昂贵的通用无改善认证，不降低 completeness。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 

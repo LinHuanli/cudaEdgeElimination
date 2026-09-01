@@ -81,6 +81,8 @@ leaf 子阶段画像已完成：8-target 混合 leaf 的 GPU cost 仅占 `2.204%
 
 不可变 matching/reconnect 表缓存已完成：相同 8-target 协议下 CPU search 从 34.095 s 降至 24.138 s，四路 leaf 均约 `1.50×` 加速，proof 与图结果不变。缓存后混合 cursor consume 占 leaf 约 `85.45%`；下一门禁是区分候选 CPU 重建与完整 fallback，而不是继续合并只占约 3% 的 GPU cost。
 
+consume 细分已完成：`99.864%` 的 CUDA cost rows 和 `99.745%` 的 cells 进入 CPU 全模板 fallback，耗时占 consume 的 `99.033%`。下一切片必须保留逐 cell CPU 精确 completeness，但可用端口距离预计算和固定数组矩阵认证替换通用 `TryReconnect` 的重复集合/拓扑构造；仅严格改善模板进入完整 witness 重建。
+
 M5 仍未完成：`rl5915/d15112` 的最优 tour witness、跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义

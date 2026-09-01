@@ -67,3 +67,5 @@ matching catalog 复用主要消除了 setup；reconnect template 复用同时�
 4. cursor 状态与计数更新。
 
 只有量化 CPU completeness 后，才决定是优化 CPU 精确 cost/reconnect 数据布局，还是设计显式、默认关闭且“漏报只能 UNRESOLVED”的候选策略。默认 CPU 全模板兜底在新安全论证完成前保持不变。
+
+正式细分见 [M5 HT leaf CPU completeness 画像](30_M5_HT_Leaf_Completeness_Profiling.md)：fallback 覆盖 `99.864%` rows，并占 consume 时间的 `99.033%`。
