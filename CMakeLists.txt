@@ -106,4 +106,9 @@ if(CUDAEE_BUILD_BENCHMARKS)
   target_link_libraries(cudaee_kopt_cost_benchmark PRIVATE cudaee_core)
   target_compile_options(cudaee_kopt_cost_benchmark PRIVATE
     -Wall -Wextra -Wconversion -Wshadow -Wformat=2)
+
+  add_executable(cudaee_jv_benchmark benchmarks/jv_benchmark.cpp)
+  target_link_libraries(cudaee_jv_benchmark PRIVATE cudaee_core)
+  target_compile_options(cudaee_jv_benchmark PRIVATE
+    -Wall -Wextra -Wconversion -Wshadow -Wformat=2)
 endif()

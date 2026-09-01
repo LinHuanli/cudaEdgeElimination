@@ -1,0 +1,4 @@
+# instance<TAB>只读 TSPLIB 路径<TAB>仓库内 ElimTSP 稀疏边集
+pcb3038	../references/tensoraco/TSPLIB/pcb3038.tsp.gz	third_party/ElimTSP/data/pcb3038.all.edg.gz
+rl5915	../references/tensoraco/TSPLIB/rl5915.tsp.gz	third_party/ElimTSP/data/rl5915.all.edg.gz
+d15112	../references/tensoraco/TSPLIB/d15112.tsp.gz	third_party/ElimTSP/data/d15112.all.edg.gz
