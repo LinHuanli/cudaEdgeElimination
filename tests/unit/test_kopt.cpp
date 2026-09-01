@@ -44,6 +44,35 @@ cudaee::NodeEdge CanonicalEdge(const std::int32_t first, const std::int32_t seco
   return first < second ? cudaee::NodeEdge{first, second} : cudaee::NodeEdge{second, first};
 }
 
+// 独立测试 oracle 使用动态边表逐项检查，不复用生产 scorer 的固定数组或距离缓存。
+std::int64_t ReferenceKOptTemplateCost(const cudaee::GraphSnapshot& graph, const std::uint32_t k,
+                                       const cudaee::KOptCostTask& task,
+                                       const cudaee::EndpointMatching& reconnect_template) {
+  std::vector<cudaee::NodeEdge> deleted;
+  for (std::uint32_t edge = 0U; edge < k; ++edge) {
+    deleted.push_back(CanonicalEdge(task.port_nodes[2U * edge], task.port_nodes[2U * edge + 1U]));
+  }
+  std::vector<cudaee::NodeEdge> added;
+  __int128 total = 0;
+  for (std::uint32_t port = 0U; port < reconnect_template.endpoint_count; ++port) {
+    const std::uint32_t partner = reconnect_template.mate[port];
+    if (port >= partner) {
+      continue;
+    }
+    const cudaee::NodeEdge edge = CanonicalEdge(task.port_nodes[port], task.port_nodes[partner]);
+    if (edge.u == edge.v || std::find(deleted.begin(), deleted.end(), edge) != deleted.end() ||
+        std::find(added.begin(), added.end(), edge) != added.end()) {
+      return cudaee::kInvalidKOptTemplateCost;
+    }
+    added.push_back(edge);
+    total += graph.Distance(edge.u, edge.v);
+  }
+  if (added.size() != k || total > std::numeric_limits<std::int64_t>::max()) {
+    return cudaee::kInvalidKOptTemplateCost;
+  }
+  return static_cast<std::int64_t>(total);
+}
+
 std::vector<cudaee::NodeEdge> OutsideEdges(const cudaee::NormalizedPathSystem& paths,
                                            const cudaee::EndpointMatching& outside) {
   std::vector<std::int32_t> endpoints;
@@ -163,17 +192,30 @@ void TestKOptCostMatrixCpuCuda() {
 
     const cudaee::KOptCostBatchResult cpu =
         cudaee::EvaluateKOptTemplateCosts(graph, k, tasks, cudaee::PathCompatibilityBackend::kCpu);
-    Check(cpu.backend == "cpu", "CPU k-opt cost backend");
+    Check(cpu.backend == "cpu" && cpu.cpu_verified && cpu.cpu_certify_ms >= 0.0,
+          "CPU k-opt cost backend");
     Check(cpu.template_count == kExpectedTemplateCounts[static_cast<std::size_t>(k - 3U)],
           "k-opt cost template count");
     Check(cpu.added_costs.size() == tasks.size() * cpu.template_count,
           "CPU k-opt cost matrix shape");
+    const cudaee::KOptReconnectTable reconnect_table = cudaee::BuildKOptReconnectTable(k);
+    for (std::size_t task_index = 0U; task_index < tasks.size(); ++task_index) {
+      for (std::size_t template_index = 0U; template_index < reconnect_table.templates.size();
+           ++template_index) {
+        const std::size_t cell = task_index * reconnect_table.templates.size() + template_index;
+        Check(cpu.added_costs[cell] ==
+                  ReferenceKOptTemplateCost(graph, k, tasks[task_index],
+                                            reconnect_table.templates[template_index]),
+              "fixed-array CPU scorer matches the independent edge-list oracle");
+      }
+    }
 
 #ifdef CUDAEE_HAS_CUDA
     if (cuda_available) {
       const cudaee::KOptCostBatchResult gpu = cudaee::EvaluateKOptTemplateCosts(
           graph, k, tasks, cudaee::PathCompatibilityBackend::kCuda);
-      Check(gpu.backend == "cuda", "CUDA k-opt cost backend");
+      Check(gpu.backend == "cuda" && gpu.cpu_verified && gpu.cpu_certify_ms >= 0.0,
+            "CUDA k-opt cost backend");
       Check(gpu.selected_device >= 0, "CUDA k-opt cost selected device");
       Check(gpu.added_costs == cpu.added_costs, "CPU/CUDA k-opt cost matrices are exact");
       Check(gpu.cuda_cache.snapshot_hit == (k != 3U) && !gpu.cuda_cache.template_hit &&
@@ -182,8 +224,9 @@ void TestKOptCostMatrixCpuCuda() {
       if (k == 3U) {
         const cudaee::KOptCostBatchResult cached = cudaee::EvaluateKOptTemplateCosts(
             graph, k, tasks, cudaee::PathCompatibilityBackend::kCuda);
-        Check(cached.added_costs == cpu.added_costs && cached.cuda_cache.snapshot_hit &&
-                  cached.cuda_cache.template_hit && cached.cuda_cache.workspace_hit &&
+        Check(cached.added_costs == cpu.added_costs && cached.cpu_verified &&
+                  cached.cuda_cache.snapshot_hit && cached.cuda_cache.template_hit &&
+                  cached.cuda_cache.workspace_hit &&
                   cached.cuda_cache.resident_bytes == gpu.cuda_cache.resident_bytes,
               "repeated CUDA k-opt batch reuses the exact resident snapshot and workspace");
       }
@@ -513,6 +556,7 @@ void TestNoImprovementAndBudget() {
             cursor_batch.cost_tasks == 2U * scalar_cursor.deletion_sets_tested &&
             cursor_batch.cost_batches == 13U && cursor_batch.cost_tasks == 50U &&
             cursor_batch.cost_cells == 2660U && cursor_batch.cost_rows_consumed == 50U &&
+            cursor_batch.cpu_certified_cost_cells == cursor_batch.cost_cells &&
             cursor_batch.candidate_recheck_ms >= 0.0 &&
             cursor_batch.completeness_fallback_ms >= 0.0 &&
             cudaee::SerializePathSystemKOptProof(cursor_batch.proofs[0]) ==
@@ -527,9 +571,11 @@ void TestNoImprovementAndBudget() {
               cursor_batch.template_cache_hits + 3U == cursor_batch.cuda_cost_batches &&
               cursor_batch.workspace_cache_hits + 3U == cursor_batch.cuda_cost_batches &&
               cursor_batch.peak_device_cache_bytes > 0U &&
-              cursor_batch.cpu_completeness_rows == cursor_batch.cost_rows_consumed &&
-              cursor_batch.cpu_completeness_templates == cursor_batch.cost_cells &&
-              cursor_batch.completeness_fallback_ms > 0.0,
+              cursor_batch.cpu_certified_cost_cells == cursor_batch.cost_cells &&
+              cursor_batch.cpu_completeness_rows == 0U &&
+              cursor_batch.cpu_completeness_templates == 0U &&
+              cursor_batch.completeness_fallback_ms == 0.0 &&
+              cursor_batch.cost_cpu_certify_ms > 0.0,
           "incremental leaf batches expose one snapshot and three template/workspace uploads");
   }
 #endif

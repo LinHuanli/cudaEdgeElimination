@@ -70,9 +70,12 @@ struct KOptCostBatchResult {
   std::string backend;
   int selected_device{-1};
   KOptCudaCacheUsage cuda_cache;
+  bool cpu_verified{false};
+  double cpu_certify_ms{};
 };
 
-// 返回 [task][template] 精确成本矩阵。它只是候选 oracle，不能用“无命中”授权证明。
+// 返回 [task][template] 精确成本矩阵；CUDA 结果逐 cell 经独立 CPU 矩阵认证。
+// 成本矩阵仍只筛选 witness，不能脱离完整 path proof 直接授权删除。
 [[nodiscard]] KOptCostBatchResult EvaluateKOptTemplateCosts(const GraphSnapshot& graph,
                                                             std::uint32_t k,
                                                             const std::vector<KOptCostTask>& tasks,
@@ -158,10 +161,12 @@ struct PathSystemKOptBatchResult {
   std::uint64_t candidate_templates_rechecked{};
   std::uint64_t cpu_completeness_rows{};
   std::uint64_t cpu_completeness_templates{};
+  std::uint64_t cpu_certified_cost_cells{};
   // 同步 wall time 只用于诊断，不进入 leaf proof。
   double setup_ms{};
   double cursor_prepare_ms{};
   double cost_evaluate_ms{};
+  double cost_cpu_certify_ms{};
   double cost_scatter_ms{};
   double cursor_consume_ms{};
   double candidate_recheck_ms{};

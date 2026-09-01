@@ -129,6 +129,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.leaf_candidate_templates_rechecked = wavefront.leaf_candidate_templates_rechecked;
     attempt.leaf_cpu_completeness_rows = wavefront.leaf_cpu_completeness_rows;
     attempt.leaf_cpu_completeness_templates = wavefront.leaf_cpu_completeness_templates;
+    attempt.leaf_cpu_certified_cost_cells = wavefront.leaf_cpu_certified_cost_cells;
     attempt.peak_leaf_device_cache_bytes = wavefront.peak_leaf_device_cache_bytes;
     attempt.path_append_tasks = wavefront.path_append_tasks;
     attempt.hamilton_replies_generated = wavefront.hamilton_replies_generated;
@@ -139,6 +140,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.leaf_setup_ms = wavefront.leaf_setup_ms;
     attempt.leaf_cursor_prepare_ms = wavefront.leaf_cursor_prepare_ms;
     attempt.leaf_cost_evaluate_ms = wavefront.leaf_cost_evaluate_ms;
+    attempt.leaf_cost_cpu_certify_ms = wavefront.leaf_cost_cpu_certify_ms;
     attempt.leaf_cost_scatter_ms = wavefront.leaf_cost_scatter_ms;
     attempt.leaf_cursor_consume_ms = wavefront.leaf_cursor_consume_ms;
     attempt.leaf_candidate_recheck_ms = wavefront.leaf_candidate_recheck_ms;
@@ -172,6 +174,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.leaf_candidate_templates_rechecked += attempt.leaf_candidate_templates_rechecked;
     scan.leaf_cpu_completeness_rows += attempt.leaf_cpu_completeness_rows;
     scan.leaf_cpu_completeness_templates += attempt.leaf_cpu_completeness_templates;
+    scan.leaf_cpu_certified_cost_cells += attempt.leaf_cpu_certified_cost_cells;
     scan.peak_leaf_device_cache_bytes =
         std::max(scan.peak_leaf_device_cache_bytes, attempt.peak_leaf_device_cache_bytes);
     scan.candidate_ms += attempt.candidate_ms;
@@ -180,6 +183,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.leaf_setup_ms += attempt.leaf_setup_ms;
     scan.leaf_cursor_prepare_ms += attempt.leaf_cursor_prepare_ms;
     scan.leaf_cost_evaluate_ms += attempt.leaf_cost_evaluate_ms;
+    scan.leaf_cost_cpu_certify_ms += attempt.leaf_cost_cpu_certify_ms;
     scan.leaf_cost_scatter_ms += attempt.leaf_cost_scatter_ms;
     scan.leaf_cursor_consume_ms += attempt.leaf_cursor_consume_ms;
     scan.leaf_candidate_recheck_ms += attempt.leaf_candidate_recheck_ms;

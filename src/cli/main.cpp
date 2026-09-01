@@ -548,6 +548,7 @@ bool HtProveCommand(const Arguments& arguments) {
   std::uint64_t leaf_candidate_templates_rechecked = 0;
   std::uint64_t leaf_cpu_completeness_rows = 0;
   std::uint64_t leaf_cpu_completeness_templates = 0;
+  std::uint64_t leaf_cpu_certified_cost_cells = 0;
   std::uint64_t hamilton_reply_batches = 0;
   std::uint64_t hamilton_reply_centers = 0;
   std::uint64_t hamilton_replies_generated = 0;
@@ -568,6 +569,7 @@ bool HtProveCommand(const Arguments& arguments) {
   double leaf_setup_ms = 0.0;
   double leaf_cursor_prepare_ms = 0.0;
   double leaf_cost_evaluate_ms = 0.0;
+  double leaf_cost_cpu_certify_ms = 0.0;
   double leaf_cost_scatter_ms = 0.0;
   double leaf_cursor_consume_ms = 0.0;
   double leaf_candidate_recheck_ms = 0.0;
@@ -627,6 +629,7 @@ bool HtProveCommand(const Arguments& arguments) {
     leaf_candidate_templates_rechecked = result.leaf_candidate_templates_rechecked;
     leaf_cpu_completeness_rows = result.leaf_cpu_completeness_rows;
     leaf_cpu_completeness_templates = result.leaf_cpu_completeness_templates;
+    leaf_cpu_certified_cost_cells = result.leaf_cpu_certified_cost_cells;
     hamilton_reply_batches = result.hamilton_reply_batches;
     hamilton_reply_centers = result.hamilton_reply_centers;
     hamilton_replies_generated = result.hamilton_replies_generated;
@@ -647,6 +650,7 @@ bool HtProveCommand(const Arguments& arguments) {
     leaf_setup_ms = result.leaf_setup_ms;
     leaf_cursor_prepare_ms = result.leaf_cursor_prepare_ms;
     leaf_cost_evaluate_ms = result.leaf_cost_evaluate_ms;
+    leaf_cost_cpu_certify_ms = result.leaf_cost_cpu_certify_ms;
     leaf_cost_scatter_ms = result.leaf_cost_scatter_ms;
     leaf_cursor_consume_ms = result.leaf_cursor_consume_ms;
     leaf_candidate_recheck_ms = result.leaf_candidate_recheck_ms;
@@ -705,6 +709,7 @@ bool HtProveCommand(const Arguments& arguments) {
               << " leaf_candidate_templates_rechecked=" << leaf_candidate_templates_rechecked
               << " leaf_cpu_completeness_rows=" << leaf_cpu_completeness_rows
               << " leaf_cpu_completeness_templates=" << leaf_cpu_completeness_templates
+              << " leaf_cpu_certified_cost_cells=" << leaf_cpu_certified_cost_cells
               << " reply_backend=" << hamilton_reply_backend
               << " reply_device=" << hamilton_reply_selected_device
               << " reply_batches=" << hamilton_reply_batches
@@ -724,6 +729,7 @@ bool HtProveCommand(const Arguments& arguments) {
               << " leaf_ms=" << leaf_ms << " leaf_setup_ms=" << leaf_setup_ms
               << " leaf_cursor_prepare_ms=" << leaf_cursor_prepare_ms
               << " leaf_cost_evaluate_ms=" << leaf_cost_evaluate_ms
+              << " leaf_cost_cpu_certify_ms=" << leaf_cost_cpu_certify_ms
               << " leaf_cost_scatter_ms=" << leaf_cost_scatter_ms
               << " leaf_cursor_consume_ms=" << leaf_cursor_consume_ms
               << " leaf_candidate_recheck_ms=" << leaf_candidate_recheck_ms
@@ -759,7 +765,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V5\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V6\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
@@ -789,6 +795,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
          << '\n';
   output << "leaf_cpu_completeness_rows " << scan.leaf_cpu_completeness_rows << '\n';
   output << "leaf_cpu_completeness_templates " << scan.leaf_cpu_completeness_templates << '\n';
+  output << "leaf_cpu_certified_cost_cells " << scan.leaf_cpu_certified_cost_cells << '\n';
   output << "peak_leaf_device_cache_bytes " << scan.peak_leaf_device_cache_bytes << '\n';
   output << "protected_tour_checked " << (protected_tour != nullptr ? 1 : 0) << '\n';
   if (protected_tour != nullptr) {
@@ -803,6 +810,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "leaf_setup_ms " << scan.leaf_setup_ms << '\n';
   output << "leaf_cursor_prepare_ms " << scan.leaf_cursor_prepare_ms << '\n';
   output << "leaf_cost_evaluate_ms " << scan.leaf_cost_evaluate_ms << '\n';
+  output << "leaf_cost_cpu_certify_ms " << scan.leaf_cost_cpu_certify_ms << '\n';
   output << "leaf_cost_scatter_ms " << scan.leaf_cost_scatter_ms << '\n';
   output << "leaf_cursor_consume_ms " << scan.leaf_cursor_consume_ms << '\n';
   output << "leaf_candidate_recheck_ms " << scan.leaf_candidate_recheck_ms << '\n';
@@ -825,10 +833,12 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
             "leaf_backend leaf_device leaf_verified leaf_frontier_batches leaf_frontier_states "
             "leaf_buckets peak_leaf_frontier_batch leaf_cost_batches leaf_cells leaf_cuda_batches "
             "leaf_cpu_long_tail_cells leaf_cost_rows leaf_candidate_rechecks "
-            "leaf_completeness_rows leaf_completeness_templates peak_leaf_cache_bytes "
+            "leaf_completeness_rows leaf_completeness_templates leaf_cpu_certified_cells "
+            "peak_leaf_cache_bytes "
             "path_append_tasks hamilton_replies "
             "end_replies candidate_ms work_graph_ms leaf_ms leaf_setup_ms "
-            "leaf_cursor_prepare_ms leaf_cost_evaluate_ms leaf_cost_scatter_ms "
+            "leaf_cursor_prepare_ms leaf_cost_evaluate_ms leaf_cost_cpu_certify_ms "
+            "leaf_cost_scatter_ms "
             "leaf_cursor_consume_ms leaf_candidate_recheck_ms "
             "leaf_completeness_fallback_ms leaf_scalar_search_ms leaf_apply_ms "
             "leaf_proof_verify_ms "
@@ -851,19 +861,21 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << attempt.leaf_cuda_cost_batches << ' ' << attempt.leaf_cpu_long_tail_cells << ' '
            << attempt.leaf_cost_rows_consumed << ' ' << attempt.leaf_candidate_templates_rechecked
            << ' ' << attempt.leaf_cpu_completeness_rows << ' '
-           << attempt.leaf_cpu_completeness_templates << ' ' << attempt.peak_leaf_device_cache_bytes
+           << attempt.leaf_cpu_completeness_templates << ' '
+           << attempt.leaf_cpu_certified_cost_cells << ' ' << attempt.peak_leaf_device_cache_bytes
            << ' ' << attempt.path_append_tasks << ' ' << attempt.hamilton_replies_generated << ' '
            << attempt.end_replies_generated << ' ' << attempt.candidate_ms << ' '
            << attempt.work_graph_ms << ' ' << attempt.leaf_ms << ' ' << attempt.leaf_setup_ms << ' '
            << attempt.leaf_cursor_prepare_ms << ' ' << attempt.leaf_cost_evaluate_ms << ' '
-           << attempt.leaf_cost_scatter_ms << ' ' << attempt.leaf_cursor_consume_ms << ' '
-           << attempt.leaf_candidate_recheck_ms << ' ' << attempt.leaf_completeness_fallback_ms
-           << ' ' << attempt.leaf_scalar_search_ms << ' ' << attempt.leaf_apply_ms << ' '
-           << attempt.leaf_proof_verify_ms << ' ' << attempt.path_append_ms << ' '
-           << attempt.hamilton_reply_ms << ' ' << attempt.end_reply_ms << ' '
-           << attempt.propagation_ms << ' ' << attempt.proof_extract_ms << ' '
-           << attempt.proof_verify_ms << ' ' << attempt.immediate_verify_ms << ' '
-           << attempt.search_ms << ' ' << std::quoted(SingleLine(attempt.reason)) << '\n';
+           << attempt.leaf_cost_cpu_certify_ms << ' ' << attempt.leaf_cost_scatter_ms << ' '
+           << attempt.leaf_cursor_consume_ms << ' ' << attempt.leaf_candidate_recheck_ms << ' '
+           << attempt.leaf_completeness_fallback_ms << ' ' << attempt.leaf_scalar_search_ms << ' '
+           << attempt.leaf_apply_ms << ' ' << attempt.leaf_proof_verify_ms << ' '
+           << attempt.path_append_ms << ' ' << attempt.hamilton_reply_ms << ' '
+           << attempt.end_reply_ms << ' ' << attempt.propagation_ms << ' '
+           << attempt.proof_extract_ms << ' ' << attempt.proof_verify_ms << ' '
+           << attempt.immediate_verify_ms << ' ' << attempt.search_ms << ' '
+           << std::quoted(SingleLine(attempt.reason)) << '\n';
   }
   output << "END\n";
   if (!output) {
@@ -944,6 +956,7 @@ void HtScanCommand(const Arguments& arguments) {
               << " leaf_cost_cells=" << attempt.leaf_cost_cells << " work_graph_ms=" << std::fixed
               << std::setprecision(3) << attempt.work_graph_ms << " leaf_ms=" << attempt.leaf_ms
               << " leaf_cost_evaluate_ms=" << attempt.leaf_cost_evaluate_ms
+              << " leaf_cost_cpu_certify_ms=" << attempt.leaf_cost_cpu_certify_ms
               << " leaf_cursor_consume_ms=" << attempt.leaf_cursor_consume_ms
               << " leaf_candidate_recheck_ms=" << attempt.leaf_candidate_recheck_ms
               << " leaf_completeness_fallback_ms=" << attempt.leaf_completeness_fallback_ms

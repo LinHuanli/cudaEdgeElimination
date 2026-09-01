@@ -605,9 +605,11 @@ ReconnectAttempt TryReconnectFromCostRow(const GraphSnapshot& graph, const TourC
                                          const KOptCostTask& task,
                                          const std::vector<EndpointMatching>& reconnect_templates,
                                          const std::span<const std::int64_t> added_costs,
-                                         const std::string_view cost_backend) {
+                                         const std::string_view cost_backend,
+                                         const bool cost_matrix_cpu_verified) {
   if (added_costs.size() != reconnect_templates.size() ||
-      (cost_backend != "cpu" && cost_backend != "cuda")) {
+      (cost_backend != "cpu" && cost_backend != "cuda") ||
+      (cost_backend == "cpu" && !cost_matrix_cpu_verified)) {
     ReconnectAttempt invalid;
     invalid.fatal = true;
     invalid.reason = "k-opt cost row 或后端非法";
@@ -637,7 +639,7 @@ ReconnectAttempt TryReconnectFromCostRow(const GraphSnapshot& graph, const TourC
     }
   }
   const double candidate_recheck_ms = ElapsedMilliseconds(candidate_begin);
-  if (cost_backend == "cuda") {
+  if (cost_backend == "cuda" && !cost_matrix_cpu_verified) {
     // CUDA 仍只是候选器；没有 CPU 接受的候选时完整枚举，保证 completeness。
     const SteadyClock::time_point completeness_begin = SteadyClock::now();
     ReconnectAttempt fallback =
@@ -721,41 +723,73 @@ void ValidateKOptCostTask(const GraphSnapshot& graph, const std::uint32_t k,
   }
 }
 
-std::int64_t ScoreKOptTemplateCpu(const GraphSnapshot& graph, const std::uint32_t k,
-                                  const KOptCostTask& task,
-                                  const EndpointMatching& reconnect_template) {
-  EdgeSet deleted_edges;
-  for (std::uint32_t edge = 0; edge < k; ++edge) {
-    const std::size_t first_port = std::size_t{2} * edge;
-    deleted_edges.insert(
-        CanonicalEdge(task.port_nodes[first_port], task.port_nodes[first_port + 1]));
-  }
-  EdgeSet added_edges;
-  for (std::uint32_t port = 0; port < reconnect_template.endpoint_count; ++port) {
-    const std::uint32_t partner = reconnect_template.mate[port];
-    if (port >= partner) {
-      continue;
+class KOptCostTaskCpuScorer {
+public:
+  KOptCostTaskCpuScorer(const GraphSnapshot& graph, const std::uint32_t k, const KOptCostTask& task)
+      : graph_(&graph), k_(k), task_(&task) {
+    port_distances_.fill(-1);
+    for (std::uint32_t edge = 0U; edge < k_; ++edge) {
+      const std::size_t first_port = std::size_t{2} * edge;
+      deleted_edges_[edge] =
+          CanonicalEdge(task_->port_nodes[first_port], task_->port_nodes[first_port + 1U]);
     }
-    const NodeEdge edge = CanonicalEdge(task.port_nodes[port], task.port_nodes[partner]);
-    if (edge.u == edge.v || deleted_edges.contains(edge) || !added_edges.insert(edge).second) {
+  }
+
+  [[nodiscard]] std::int64_t Score(const EndpointMatching& reconnect_template) {
+    if (reconnect_template.endpoint_count != 2U * k_) {
       return kInvalidKOptTemplateCost;
     }
-  }
-  if (added_edges.size() != k) {
-    return kInvalidKOptTemplateCost;
-  }
-  __int128 total = 0;
-  for (const NodeEdge& edge : added_edges) {
-    const std::int64_t distance = graph.Distance(edge.u, edge.v);
-    if (distance < 0) {
-      return kInvalidKOptTemplateCost;
+    std::array<NodeEdge, 5U> added_edges{};
+    std::uint32_t added_count = 0U;
+    std::int64_t total = 0;
+    for (std::uint32_t port = 0U; port < reconnect_template.endpoint_count; ++port) {
+      const std::uint32_t partner = reconnect_template.mate[port];
+      if (port >= partner) {
+        continue;
+      }
+      const NodeEdge edge = CanonicalEdge(task_->port_nodes[port], task_->port_nodes[partner]);
+      if (edge.u == edge.v ||
+          std::find(deleted_edges_.begin(), deleted_edges_.begin() + k_, edge) !=
+              deleted_edges_.begin() + k_ ||
+          std::find(added_edges.begin(), added_edges.begin() + added_count, edge) !=
+              added_edges.begin() + added_count) {
+        return kInvalidKOptTemplateCost;
+      }
+      std::int64_t& distance =
+          port_distances_[static_cast<std::size_t>(port) * task_->port_nodes.size() + partner];
+      if (distance < 0) {
+        distance = graph_->Distance(edge.u, edge.v);
+      }
+      if (distance < 0 || total > std::numeric_limits<std::int64_t>::max() - distance) {
+        return kInvalidKOptTemplateCost;
+      }
+      added_edges[added_count++] = edge;
+      total += distance;
     }
-    total += distance;
+    return added_count == k_ ? total : kInvalidKOptTemplateCost;
   }
-  if (total > std::numeric_limits<std::int64_t>::max()) {
-    return kInvalidKOptTemplateCost;
+
+private:
+  const GraphSnapshot* graph_{};
+  std::uint32_t k_{};
+  const KOptCostTask* task_{};
+  std::array<NodeEdge, 5U> deleted_edges_{};
+  std::array<std::int64_t, 100U> port_distances_{};
+};
+
+std::vector<std::int64_t>
+EvaluateKOptTemplateCostsCpu(const GraphSnapshot& graph, const std::uint32_t k,
+                             const std::vector<KOptCostTask>& tasks,
+                             const std::vector<EndpointMatching>& reconnect_templates) {
+  std::vector<std::int64_t> costs;
+  costs.reserve(tasks.size() * reconnect_templates.size());
+  for (const KOptCostTask& task : tasks) {
+    KOptCostTaskCpuScorer scorer(graph, k, task);
+    for (const EndpointMatching& reconnect_template : reconnect_templates) {
+      costs.push_back(scorer.Score(reconnect_template));
+    }
   }
-  return static_cast<std::int64_t>(total);
+  return costs;
 }
 
 void ExpectToken(std::istream* const input, const std::string_view expected) {
@@ -953,15 +987,26 @@ KOptCostBatchResult EvaluateKOptTemplateCosts(const GraphSnapshot& graph, const 
     }
     result.added_costs = detail::EvaluateKOptTemplateCostsCuda(
         graph, table, tasks, &result.selected_device, &result.cuda_cache);
-    result.backend = "cuda";
-  } else {
-    result.added_costs.reserve(tasks.size() * table.templates.size());
-    for (const KOptCostTask& task : tasks) {
-      for (const EndpointMatching& reconnect_template : table.templates) {
-        result.added_costs.push_back(ScoreKOptTemplateCpu(graph, k, task, reconnect_template));
-      }
+    const SteadyClock::time_point cpu_begin = SteadyClock::now();
+    const std::vector<std::int64_t> cpu_costs =
+        EvaluateKOptTemplateCostsCpu(graph, k, tasks, table.templates);
+    const auto mismatch = std::mismatch(result.added_costs.begin(), result.added_costs.end(),
+                                        cpu_costs.begin(), cpu_costs.end());
+    result.cpu_certify_ms = ElapsedMilliseconds(cpu_begin);
+    if (mismatch.first != result.added_costs.end() || mismatch.second != cpu_costs.end()) {
+      const std::size_t cell =
+          static_cast<std::size_t>(mismatch.first - result.added_costs.begin());
+      throw std::runtime_error("CUDA k-opt cost 未通过 CPU 精确矩阵认证，cell=" +
+                               std::to_string(cell));
     }
+    result.backend = "cuda";
+    result.cpu_verified = true;
+  } else {
+    const SteadyClock::time_point cpu_begin = SteadyClock::now();
+    result.added_costs = EvaluateKOptTemplateCostsCpu(graph, k, tasks, table.templates);
+    result.cpu_certify_ms = ElapsedMilliseconds(cpu_begin);
     result.backend = "cpu";
+    result.cpu_verified = true;
   }
   if (result.added_costs.size() != tasks.size() * table.templates.size()) {
     throw std::logic_error("k-opt cost 后端返回矩阵规模错误");
@@ -1122,7 +1167,8 @@ KOptSearchResult FindKOptWitnessImpl(const GraphSnapshot& graph, const Normalize
                                                   reconnect_table.templates.size());
           if (consume_attempt(TryReconnectFromCostRow(
                   graph, context, outside, works[work_index].deleted_positions,
-                  works[work_index].task, reconnect_table.templates, row, costs.backend))) {
+                  works[work_index].task, reconnect_table.templates, row, costs.backend,
+                  costs.cpu_verified))) {
             return result;
           }
         }
@@ -1650,7 +1696,8 @@ public:
                                               reconnect_table.templates.size());
       ReconnectAttempt attempt = TryReconnectFromCostRow(
           *graph_, context_, outside_, block.works[work_index].deleted_positions,
-          block.works[work_index].task, reconnect_table.templates, row, costs.backend);
+          block.works[work_index].task, reconnect_table.templates, row, costs.backend,
+          costs.cpu_verified);
       stats.candidate_templates_rechecked += attempt.candidate_templates_rechecked;
       stats.candidate_recheck_ms += attempt.candidate_recheck_ms;
       stats.completeness_fallback_ms += attempt.completeness_fallback_ms;
@@ -2034,6 +2081,13 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
         if (!AddWithoutOverflow(&result.cost_cells, costs.added_costs.size())) {
           throw std::overflow_error("path-system k-opt batch cost cell 统计溢出");
         }
+        if (!costs.cpu_verified) {
+          throw std::logic_error("path-system k-opt cost 矩阵未通过 CPU 完整认证");
+        }
+        if (!AddWithoutOverflow(&result.cpu_certified_cost_cells, costs.added_costs.size())) {
+          throw std::overflow_error("path-system k-opt CPU 认证 cell 统计溢出");
+        }
+        result.cost_cpu_certify_ms += costs.cpu_certify_ms;
         RecordKOptBatchBackend(&result, costs.backend, costs.selected_device);
         RecordKOptCudaCache(&result, costs);
         if (cpu_long_tail) {
@@ -2056,6 +2110,7 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
                 costs.added_costs.begin() + static_cast<std::ptrdiff_t>(cell_begin + cell_count));
             cursor_costs.backend = costs.backend;
             cursor_costs.selected_device = costs.selected_device;
+            cursor_costs.cpu_verified = costs.cpu_verified;
           }
           {
             ScopedPhaseTimer timer(&result.cursor_consume_ms);

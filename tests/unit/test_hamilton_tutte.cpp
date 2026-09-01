@@ -721,6 +721,8 @@ void TestRecursivePointProof() {
             timed_attempt.proof_verify_ms >= 0.0 && timed_attempt.immediate_verify_ms >= 0.0 &&
             timed_attempt.work_graph_ms + 1.0e-6 >= measured_build_subphases &&
             timed_attempt.leaf_ms + 1.0e-6 >= measured_leaf_subphases &&
+            timed_attempt.leaf_cost_evaluate_ms + 1.0e-6 >=
+                timed_attempt.leaf_cost_cpu_certify_ms &&
             timed_attempt.leaf_cursor_consume_ms + 1.0e-6 >= measured_consume_subphases &&
             scan.work_graph_ms == timed_attempt.work_graph_ms &&
             scan.leaf_frontier_batches == timed_attempt.leaf_frontier_batches &&
@@ -995,10 +997,12 @@ void TestRecursivePointProof() {
               cuda_wavefront.leaf_cost_scatter_ms >= 0.0 &&
               cuda_wavefront.leaf_cursor_consume_ms > 0.0 &&
               cuda_wavefront.leaf_cost_rows_consumed > 0U &&
-              cuda_wavefront.leaf_cpu_completeness_rows > 0U &&
-              cuda_wavefront.leaf_cpu_completeness_templates > 0U &&
+              cuda_wavefront.leaf_cpu_certified_cost_cells == cuda_wavefront.leaf_cost_cells &&
+              cuda_wavefront.leaf_cpu_completeness_rows == 0U &&
+              cuda_wavefront.leaf_cpu_completeness_templates == 0U &&
               cuda_wavefront.leaf_candidate_recheck_ms >= 0.0 &&
-              cuda_wavefront.leaf_completeness_fallback_ms > 0.0 &&
+              cuda_wavefront.leaf_completeness_fallback_ms == 0.0 &&
+              cuda_wavefront.leaf_cost_cpu_certify_ms > 0.0 &&
               cuda_wavefront.leaf_apply_ms >= 0.0 && cuda_wavefront.leaf_proof_verify_ms >= 0.0,
           "CUDA wavefront fuses CPU-verified 3-opt leaf cost rows");
     Check(

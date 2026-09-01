@@ -101,6 +101,7 @@ struct HtScanAttempt {
   std::uint64_t leaf_candidate_templates_rechecked{};
   std::uint64_t leaf_cpu_completeness_rows{};
   std::uint64_t leaf_cpu_completeness_templates{};
+  std::uint64_t leaf_cpu_certified_cost_cells{};
   std::uint64_t peak_leaf_device_cache_bytes{};
   std::uint64_t path_append_tasks{};
   std::uint64_t hamilton_replies_generated{};
@@ -111,6 +112,7 @@ struct HtScanAttempt {
   double leaf_setup_ms{};
   double leaf_cursor_prepare_ms{};
   double leaf_cost_evaluate_ms{};
+  double leaf_cost_cpu_certify_ms{};
   double leaf_cost_scatter_ms{};
   double leaf_cursor_consume_ms{};
   double leaf_candidate_recheck_ms{};
@@ -152,6 +154,7 @@ struct HtScanResult {
   std::uint64_t leaf_candidate_templates_rechecked{};
   std::uint64_t leaf_cpu_completeness_rows{};
   std::uint64_t leaf_cpu_completeness_templates{};
+  std::uint64_t leaf_cpu_certified_cost_cells{};
   std::uint64_t peak_leaf_device_cache_bytes{};
   double target_selection_ms{};
   double candidate_ms{};
@@ -160,6 +163,7 @@ struct HtScanResult {
   double leaf_setup_ms{};
   double leaf_cursor_prepare_ms{};
   double leaf_cost_evaluate_ms{};
+  double leaf_cost_cpu_certify_ms{};
   double leaf_cost_scatter_ms{};
   double leaf_cursor_consume_ms{};
   double leaf_candidate_recheck_ms{};
