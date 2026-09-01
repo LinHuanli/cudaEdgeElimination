@@ -2,7 +2,7 @@
 
 ## 范围与安全边界
 
-M4.3b3b1 迁移递归 point/end reply 中最规则的一步：判断把一条或两条边加入规范路径系统后，是否立刻产生度数冲突、重复边或提前成环。CUDA 只返回候选 `feasible[]`；CPU 对同一批每项运行完整 `NormalizePathSystem`，逐字节比较 flags，并且工作图只接收 CPU 生成的规范 child。GPU 结果因此不会直接进入证明或授权删边。
+M4.3b3b1 迁移递归 point/end reply 中最规则的一步：判断把一条或两条边加入规范路径系统后，是否立刻产生度数冲突、重复边或提前成环。初版 CUDA 只返回候选 `feasible[]`；M4.3b3b2b2b1 已扩展为同时写出完整规范 child edge SoA。CPU 对同一批每项运行完整 `NormalizePathSystem`，逐项比较 flags、offsets 和边，并且工作图只接收 CPU 生成的规范 child。GPU 结果因此不会直接进入证明或授权删边。
 
 公开入口为：
 
@@ -50,11 +50,11 @@ wavefront 在每个未解决父状态上：
 ## 回归与当前结果
 
 - 固定两个父状态的 11-task 表期望 flags 为 `[1,0,0,1,1,0,0,1,1,0,1]`，覆盖不同分量合并、同分量成环、内部节点度数冲突、重复边和新节点；
-- CPU-only build 验证 `auto` 回退与显式 CUDA 失败；CUDA build 对全部 flags 与规范 children 做逐项差分；
+- CPU-only build 验证 `auto` 回退与显式 CUDA 失败；CUDA build 对全部 flags、child offsets 和规范边做逐项差分；
 - 固定递归 point 实例使用 CUDA c,d、path append 和 continuation 三段候选器，得到 34 states、18 moves、84 replies、9 append batches、84 append tasks，最终 V1 arena 为 4 个节点并通过独立 `ht-verify`；
 - 包含 path-append 与 persistent continuation kernel 的完整 Hamilton–Tutte 单测经 compute-sanitizer memcheck 为 0 error；
 - 单 move/总 reply 预算在 batch 前限制任务数，状态预算在物化 CPU child 时再次检查；预算不足、设备异常和内存不足都只会保留目标边。
 
 ## 后续
 
-M4.3b3b2b2a 已用同一 chunk spans 把 path-append 跨父状态合并：point flags 先返回，再只为没有 vacuous-success point move 的状态建立 end batch，详见 [frontier path append](14_Hamilton_Tutte_Frontier_Path_Append.md)。当前 node records 和规范 children 仍由 CPU 构造；下一步在 GPU 上写出规范 child SoA，并让小桶、超大 reply、深层状态与精确 DP 进入 CPU long-tail。只有完整小实例差分、显存峰值和端到端收益均过门禁后，HT 证明才会接入不可变 epoch commit。
+M4.3b3b2b2a 已用同一 chunk spans 把 path-append 跨父状态合并：point flags 先返回，再只为没有 vacuous-success point move 的状态建立 end batch，详见 [frontier path append](14_Hamilton_Tutte_Frontier_Path_Append.md)。M4.3b3b2b2b1 又加入经 CPU 全数组认证的设备端 [规范 child edge SoA](15_Hamilton_Tutte_GPU_Child_Edge_SoA.md)。规范 `NormalizedPathSystem` 对象仍由 CPU 构造并用于工作图；下一步让 leaf 分桶、小桶、超大 reply、深层状态与精确 DP 进入 GPU/CPU long-tail。只有完整小实例差分、显存峰值和端到端收益均过门禁后，HT 证明才会接入不可变 epoch commit。

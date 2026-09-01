@@ -197,8 +197,10 @@ struct HtWavefrontResult {
   std::string path_append_backend{"none"};
   int path_append_selected_device{-1};
   bool path_append_cpu_verified{false};
+  bool path_append_device_children_verified{false};
   std::uint64_t path_append_batches{};
   std::uint64_t path_append_tasks{};
+  std::uint64_t path_append_child_edges{};
   std::string hamilton_reply_backend{"none"};
   int hamilton_reply_selected_device{-1};
   bool hamilton_reply_cpu_verified{false};
@@ -256,12 +258,17 @@ struct HtPathAppendBatchResult {
   std::vector<std::uint8_t> feasible;
   // 与 task 一一对应；不可行项保留 NormalizePathSystem 给出的失败原因。
   std::vector<NormalizedPathSystem> children;
+  // 第 i 个 task 的规范 child 边集为 [offsets[i], offsets[i+1])；不可行项为空。
+  std::vector<std::uint64_t> child_edge_offsets;
+  std::vector<NodeEdge> child_edges;
   std::string backend;
   int selected_device{-1};
   bool cpu_verified{false};
+  // 仅当 CUDA 写出的完整 offsets/edges 与 CPU 规范化结果逐项相等时为 true。
+  bool device_children_verified{false};
 };
 
-// 批量检查递归 HT point/end reply，并始终用 CPU 规范化结果逐项认证 GPU flags。
+// 批量检查递归 HT point/end reply，并用 CPU 规范化结果认证 GPU flags 与 child edge SoA。
 [[nodiscard]] HtPathAppendBatchResult
 EvaluateHtPathAppends(std::int32_t dimension, const std::vector<NormalizedPathSystem>& parents,
                       const std::vector<HtPathAppendTask>& tasks,
@@ -325,12 +332,20 @@ namespace detail {
 struct HtPathStateSpan {
   std::uint32_t node_begin{};
   std::uint32_t node_count{};
+  std::uint32_t edge_begin{};
+  std::uint32_t edge_count{};
 };
 
 struct HtPathNodeRecord {
   std::int32_t node{-1};
   std::uint32_t component{};
   std::uint8_t degree{};
+};
+
+struct HtPathAppendDeviceBatch {
+  std::vector<std::uint8_t> feasible;
+  std::vector<std::uint64_t> child_edge_offsets;
+  std::vector<NodeEdge> child_edges;
 };
 
 struct HtHamiltonReplyDeviceBatch {
@@ -367,9 +382,10 @@ EvaluateHtWavefrontCuda(const std::vector<HtWavefrontStateTask>& states,
                         const std::vector<std::uint32_t>& level_offsets, int* selected_device);
 
 [[nodiscard]] bool HtPathAppendCudaAvailable(std::string* reason);
-[[nodiscard]] std::vector<std::uint8_t>
+[[nodiscard]] HtPathAppendDeviceBatch
 EvaluateHtPathAppendsCuda(std::int32_t dimension, const std::vector<HtPathStateSpan>& states,
                           const std::vector<HtPathNodeRecord>& nodes,
+                          const std::vector<NodeEdge>& parent_edges,
                           const std::vector<HtPathAppendTask>& tasks, int* selected_device);
 
 } // namespace detail

@@ -57,4 +57,4 @@ frontier state order
 
 初版 frontier reply batching 为保持父状态的 child 插入顺序，在知道 point move 是否 vacuous-success 之前预取 end replies，固定样例一度从 8 tasks/48 edges 增至 18 tasks/108 edges。M4.3b3b2b2a 已先跨 chunk 计算 point path-append flags，筛掉必然 shortcut 的 states 后才生成 end replies；当前工作量恢复为 8/48，且 child 仍按原顺序物化。
 
-后续将按相同 span 映射批量写出规范 child SoA。该优化必须继续保持 `N=1`/批量 proof 逐字节一致。
+M4.3b3b2b2b1 已按相同 span 映射批量写出规范 child edge SoA，并继续保持 `N=1`/批量 proof 逐字节一致。下一步是 leaf 分桶与批处理。

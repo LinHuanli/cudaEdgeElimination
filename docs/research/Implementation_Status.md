@@ -20,7 +20,8 @@
 | M4.3b3b2a2 GPU end replies | 完成（候选器） | 多端点 count/write；空区间/重复 task；CPU 完整边列表认证 |
 | M4.3b3b2b1 frontier reply batching | 完成（调度基线） | 可配置 chunk；跨父状态 spans；单状态/批量 V1 proof 逐字节一致 |
 | M4.3b3b2b2a frontier path append | 完成（调度基线） | 多父状态稀疏 spans；point-first end 筛选；CPU 规范 child 全量认证 |
-| M4.3b3b2b2b 全设备 wavefront 与提交 | 待实现 | 规范状态写出、批量叶、多 block/CPU long-tail、epoch commit |
+| M4.3b3b2b2b1 规范 child edge SoA | 完成（候选器） | CUDA count/write；不可行空 slice；CPU offsets/edges 全数组认证 |
+| M4.3b3b2b2b2 leaf wavefront 与提交 | 待实现 | 批量叶与复杂度分桶、多 block/CPU long-tail、epoch commit |
 | M5 中大型调优 | 待开始 | 首期不设最低加速比；pcb3038 尚未形成认证运行记录 |
 
 ## 当前基准结果
@@ -47,7 +48,7 @@ CPU 精确困难叶：将每条 forced outside edge 收缩为可双向访问的 
 
 混合 wavefront：主机 BFS 为每个状态先跑 leaf，再生成有界 point/end OR moves 及其完整 replies；所有 child 只指向下一层。CPU 从后向前得到规范状态真值；CUDA 从 leaf/vacuous/无 move 终态队列开始，每个完成 child 原子更新 move 的 `remaining_children/failed`，成功 move 立即完成父状态，失败 move 递减父状态的 `remaining_moves`，最后一个失败 move 才宣告 OR 失败。单-block persistent kernel 在设备端冻结并消费动态队列批次，要求每个状态恰好入队一次；队列溢出或提前停滞均失败。CUDA/CPU 任一状态不同即返回 `invalid`。成功时仅复制第一个成功 move 的子树到既有 continuation arena，再运行完整 proof verifier。
 
-GPU path append：规范父路径展平为 `(node,component,degree)`，一个线程检查一个 point/end task。point 中心必须是新节点；两个连接点度数均小于 2 且不能来自同一分量。end 必须从现有端点出发，另一端只能是新节点或其他分量端点。同一父状态的全部 point 候选合为一个 batch、全部 end 候选合为另一个 batch；CPU 对每项仍执行 `NormalizePathSystem`，只有 flags 全等才使用 CPU 生成的规范 child。固定双父状态 11-task 表覆盖合并、成环、内部节点、重复边与新节点；实际 point CLI 运行生成 34 states、18 moves、84 replies，峰值 frontier 27，append 为 9 batches/84 tasks，最终压缩为 4 节点证明。这些是正确性样例，不是性能结论。
+GPU path append：规范父路径展平为 `(node,component,degree)` 与规范父边 spans，一个线程检查一个 point/end task。point 中心必须是新节点；两个连接点度数均小于 2 且不能来自同一分量。end 必须从现有端点出发，另一端只能是新节点或其他分量端点。CUDA count/write 为每个可行 task 输出父边加新增边的严格排序 CSR slice；CPU 对每项仍执行 `NormalizePathSystem`，独立重建 flags、offsets 和全部边，只有全数组相等才标记设备 child 已认证。固定双父状态 11-task 表得到 27 条 child edges；不可行 task 保持空 slice。工作图仍只使用 CPU 规范 child，这些是正确性样例，不是性能结论。
 
 GPU Hamilton replies：CUDA 对每个中心先 count，再由主机建立 `uint64_t` 前缀区间，最后按排序 CSR 的确定顺序 write。整数平方根实现与 CPU 的 `EUC_2D`/`CEIL_2D` 精确边界一致；根 `c,d` 两中心合批，递归 point 的全部候选中心在单个父状态内合批。CPU 始终重新枚举完整 offsets 和 reply 列表并逐元素比较，只有 CPU 列表进入工作图。12 点完整图覆盖两种距离、重复中心和 CPU-only 回退；固定 point CLI 为 9 batches、16 centers、46 surviving pairs，证明规模和重放结果保持不变。这些仍是正确性指标，不代表端到端加速。
 
@@ -57,6 +58,8 @@ Frontier reply batching：当前层按最多 256 个父状态切成资源 chunk�
 
 Frontier path append：一个 chunk 的可尝试 point tasks 先共用一次多父状态 batch；根据 CPU 认证 flags 排除 vacuous-success states 后，才生成 end replies 和 end append batch。固定 point 实例的 path-append batches 从 9 降为 3，tasks 保持 84；end batches 从 2 降为 1，工作量在两种 chunk 大小下均为 8 tasks/48 edges。全局预算和 child 写入仍按原 state/candidate/reply 顺序执行，V1 proof 逐字节一致。
 
+规范 child edge SoA：父状态新增严格排序的 edge spans。第一阶段输出可行 flags 与 child edge counts，主机建立 `uint64_t` offsets，第二阶段在 task 私有 slice 中复制父边、追加 reply 边并确定性排序；重复边、区间不一致或 CPU 全量差分失败均拒绝批次。固定 recursive-point 全 CUDA wavefront 为 3 batches/84 tasks/172 child edge records，34-state 工作图和 4 节点 V1 proof 保持不变并通过独立重放。
+
 ## 安全边界
 
-`gpu-eliminate` 目前只实现 JV quick candidate search；path-system leaf 和递归 HT proof 尚未连接全设备 wavefront/epoch commit，因此也不授权删边；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。M4.3b3b2b2b 与 M3.1 必须标为 pending；仍严禁从未完整验证的局部结果或 cuOpt 浮点 reduced cost 直接构造删除记录。
+`gpu-eliminate` 目前只实现 JV quick candidate search；path-system leaf 和递归 HT proof 尚未连接全设备 wavefront/epoch commit，因此也不授权删边；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。M4.3b3b2b2b2 与 M3.1 必须标为 pending；仍严禁从未完整验证的局部结果或 cuOpt 浮点 reduced cost 直接构造删除记录。

@@ -208,6 +208,11 @@ void RecordPathAppendBatch(WaveBuildContext* const context, const HtPathAppendBa
   result.path_append_cpu_verified = result.path_append_batches == 1U
                                         ? batch.cpu_verified
                                         : result.path_append_cpu_verified && batch.cpu_verified;
+  result.path_append_device_children_verified =
+      result.path_append_batches == 1U
+          ? batch.device_children_verified
+          : result.path_append_device_children_verified && batch.device_children_verified;
+  result.path_append_child_edges += batch.child_edges.size();
   if (result.path_append_backend == "none") {
     result.path_append_backend = batch.backend;
   } else if (result.path_append_backend != batch.backend) {

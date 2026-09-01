@@ -628,7 +628,8 @@ void TestRecursivePointProof() {
   Check(wavefront.moves_generated > 0U && wavefront.peak_frontier > 0U,
         "wavefront records generated moves and frontier width");
   Check(wavefront.path_append_backend == "cpu" && wavefront.path_append_cpu_verified &&
-            wavefront.path_append_batches > 0U && wavefront.path_append_tasks > 0U,
+            !wavefront.path_append_device_children_verified && wavefront.path_append_batches > 0U &&
+            wavefront.path_append_tasks > 0U && wavefront.path_append_child_edges > 0U,
         "CPU wavefront records fully verified path-append batches");
   Check(wavefront.hamilton_reply_backend == "cpu" && wavefront.hamilton_reply_cpu_verified &&
             wavefront.hamilton_reply_batches > 0U && wavefront.hamilton_reply_centers > 0U &&
@@ -743,7 +744,9 @@ void TestRecursivePointProof() {
           "CUDA wavefront propagation is fully CPU verified");
     Check(cuda_wavefront.path_append_backend == "cuda" &&
               cuda_wavefront.path_append_selected_device >= 0 &&
-              cuda_wavefront.path_append_cpu_verified && cuda_wavefront.path_append_tasks > 0U,
+              cuda_wavefront.path_append_cpu_verified &&
+              cuda_wavefront.path_append_device_children_verified &&
+              cuda_wavefront.path_append_tasks > 0U && cuda_wavefront.path_append_child_edges > 0U,
           "CUDA wavefront path-append batches are fully CPU verified");
     Check(cuda_wavefront.hamilton_reply_backend == "cuda" &&
               cuda_wavefront.hamilton_reply_selected_device >= 0 &&
@@ -880,6 +883,25 @@ void TestPathAppendBatch() {
   Check(cpu.children.size() == tasks.size() && cpu.children.front().valid &&
             cpu.children.front().edge_count == parent.edge_count + 2U && !cpu.children[1].valid,
         "path-append batch keeps canonical children and infeasibility records aligned");
+  const std::vector<std::uint64_t> expected_offsets = {0, 5, 5, 5, 10, 14, 14, 14, 18, 23, 23, 27};
+  std::vector<cudaee::NodeEdge> expected_child_edges;
+  for (const cudaee::NormalizedPathSystem& child : cpu.children) {
+    if (!child.valid) {
+      continue;
+    }
+    std::vector<cudaee::NodeEdge> slice;
+    for (const cudaee::Path& path : child.paths) {
+      for (std::size_t offset = 1U; offset < path.size(); ++offset) {
+        slice.push_back(
+            {std::min(path[offset - 1U], path[offset]), std::max(path[offset - 1U], path[offset])});
+      }
+    }
+    std::sort(slice.begin(), slice.end());
+    expected_child_edges.insert(expected_child_edges.end(), slice.begin(), slice.end());
+  }
+  Check(!cpu.device_children_verified && cpu.child_edge_offsets == expected_offsets &&
+            cpu.child_edges == expected_child_edges,
+        "CPU path-append exposes aligned canonical child edge SoA");
 
   std::vector<cudaee::HtPathAppendTask> bad_point = tasks;
   bad_point.front().center = 1;
@@ -906,8 +928,10 @@ void TestPathAppendBatch() {
     const cudaee::HtPathAppendBatchResult gpu =
         cudaee::EvaluateHtPathAppends(8, parents, tasks, cudaee::PathCompatibilityBackend::kCuda);
     Check(gpu.backend == "cuda" && gpu.selected_device >= 0 && gpu.cpu_verified &&
-              gpu.feasible == expected,
-          "CUDA path-append flags exactly match CPU normalization");
+              gpu.device_children_verified && gpu.feasible == expected &&
+              gpu.child_edge_offsets == cpu.child_edge_offsets &&
+              gpu.child_edges == cpu.child_edges,
+          "CUDA path-append child SoA exactly matches CPU normalization");
     for (std::size_t index = 0; index < tasks.size(); ++index) {
       Check(gpu.children[index].valid == cpu.children[index].valid &&
                 gpu.children[index].paths == cpu.children[index].paths,

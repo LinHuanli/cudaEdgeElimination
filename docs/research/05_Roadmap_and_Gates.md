@@ -51,7 +51,9 @@ M4.3b3b2b1 frontier reply batching 已完成：按可配置父状态数切分当
 
 M4.3b3b2b2a frontier path-append batching 已完成：一个 chunk 的全部 point tasks 共用多父状态稀疏 batch；取得 point flags 后排除 vacuous-success states，再批量生成和检查 end tasks。CPU 仍逐 task 规范化，child 按原顺序物化。
 
-M4.3b3b2b2b 继续把规范子状态 SoA 和 leaf 批处理迁到 GPU，加入基于 `(depth,path_count,reply bucket)` 的复杂度分桶、多 block 队列与 CPU long-tail。CPU/GPU 对完整小实例真值及证书必须一致；之后才把验证成功的 HT 候选接入 epoch commit。
+M4.3b3b2b2b1 规范 child edge SoA 已完成：CUDA 为每个可行 path-append task count/write 完整规范边集；不可行 slice 为空，主机前缀和使用 `uint64_t`。CPU 从完整 `NormalizePathSystem` 结果独立重建 offsets/edges 并逐元素认证，工作图仍只使用 CPU child。
+
+M4.3b3b2b2b2 继续迁移 leaf 批处理，加入基于 `(depth,path_count,node_count,k_max,reply bucket)` 的复杂度分桶、多 block 队列与 CPU long-tail。CPU/GPU 对完整小实例真值及证书必须一致；之后才把验证成功的 HT 候选接入 epoch commit。
 
 ## M5：中大型评测与优化
 
@@ -59,4 +61,4 @@ M4.3b3b2b2b 继续把规范子状态 SoA 和 leaf 批处理迁到 GPU，加入�
 
 ## 当前完成定义
 
-当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching，以及 M4.3b3b2b2a frontier path-append batching。M3.1 与 M4.3b3b2b2b 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或部分 GPU 化原型替代删除强度与完整 GPU/提交链路。
+当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append batching，以及 M4.3b3b2b2b1 规范 child edge SoA。M3.1 与 M4.3b3b2b2b2 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或部分 GPU 化原型替代删除强度与完整 GPU/提交链路。

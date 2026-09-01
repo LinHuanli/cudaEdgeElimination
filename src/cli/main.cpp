@@ -387,9 +387,11 @@ bool HtProveCommand(const Arguments& arguments) {
   int path_append_selected_device = -1;
   int hamilton_reply_selected_device = -1;
   bool path_append_cpu_verified = false;
+  bool path_append_device_children_verified = false;
   bool hamilton_reply_cpu_verified = false;
   std::uint64_t path_append_batches = 0;
   std::uint64_t path_append_tasks = 0;
+  std::uint64_t path_append_child_edges = 0;
   std::uint64_t hamilton_reply_batches = 0;
   std::uint64_t hamilton_reply_centers = 0;
   std::uint64_t hamilton_replies_generated = 0;
@@ -429,9 +431,11 @@ bool HtProveCommand(const Arguments& arguments) {
     path_append_selected_device = result.path_append_selected_device;
     hamilton_reply_selected_device = result.hamilton_reply_selected_device;
     path_append_cpu_verified = result.path_append_cpu_verified;
+    path_append_device_children_verified = result.path_append_device_children_verified;
     hamilton_reply_cpu_verified = result.hamilton_reply_cpu_verified;
     path_append_batches = result.path_append_batches;
     path_append_tasks = result.path_append_tasks;
+    path_append_child_edges = result.path_append_child_edges;
     hamilton_reply_batches = result.hamilton_reply_batches;
     hamilton_reply_centers = result.hamilton_reply_centers;
     hamilton_replies_generated = result.hamilton_replies_generated;
@@ -466,7 +470,10 @@ bool HtProveCommand(const Arguments& arguments) {
               << " path_append_device=" << path_append_selected_device
               << " path_append_batches=" << path_append_batches
               << " path_append_tasks=" << path_append_tasks
+              << " path_append_child_edges=" << path_append_child_edges
               << " path_append_cpu_verified=" << (path_append_cpu_verified ? 1 : 0)
+              << " path_append_device_children_verified="
+              << (path_append_device_children_verified ? 1 : 0)
               << " reply_backend=" << hamilton_reply_backend
               << " reply_device=" << hamilton_reply_selected_device
               << " reply_batches=" << hamilton_reply_batches

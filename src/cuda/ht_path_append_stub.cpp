@@ -11,10 +11,11 @@ bool HtPathAppendCudaAvailable(std::string* const reason) {
   return false;
 }
 
-std::vector<std::uint8_t> EvaluateHtPathAppendsCuda(const std::int32_t,
-                                                    const std::vector<HtPathStateSpan>&,
-                                                    const std::vector<HtPathNodeRecord>&,
-                                                    const std::vector<HtPathAppendTask>&, int*) {
+HtPathAppendDeviceBatch EvaluateHtPathAppendsCuda(const std::int32_t,
+                                                  const std::vector<HtPathStateSpan>&,
+                                                  const std::vector<HtPathNodeRecord>&,
+                                                  const std::vector<NodeEdge>&,
+                                                  const std::vector<HtPathAppendTask>&, int*) {
   throw std::runtime_error("当前二进制未编译 CUDA HT path-append 后端");
 }
 

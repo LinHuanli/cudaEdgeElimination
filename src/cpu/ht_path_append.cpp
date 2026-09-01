@@ -39,6 +39,24 @@ std::vector<Path> BuildRawChild(const NormalizedPathSystem& parent, const HtPath
   return raw;
 }
 
+std::vector<NodeEdge> BuildCanonicalEdges(const NormalizedPathSystem& paths) {
+  std::vector<NodeEdge> edges;
+  edges.reserve(paths.edge_count);
+  for (const Path& path : paths.paths) {
+    for (std::size_t offset = 1U; offset < path.size(); ++offset) {
+      const std::int32_t first = path[offset - 1U];
+      const std::int32_t second = path[offset];
+      edges.push_back({std::min(first, second), std::max(first, second)});
+    }
+  }
+  std::sort(edges.begin(), edges.end());
+  if (edges.size() != paths.edge_count ||
+      std::adjacent_find(edges.begin(), edges.end()) != edges.end()) {
+    throw std::logic_error("规范路径系统的边计数或唯一性失效");
+  }
+  return edges;
+}
+
 void ValidateTask(const std::int32_t dimension, const std::vector<NormalizedPathSystem>& parents,
                   const HtPathAppendTask& task) {
   if (task.parent_index >= parents.size() || task.first < 0 || task.first >= dimension ||
@@ -74,6 +92,7 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
 
   std::vector<detail::HtPathStateSpan> state_spans;
   std::vector<detail::HtPathNodeRecord> node_records;
+  std::vector<NodeEdge> parent_edges;
   state_spans.reserve(parents.size());
   for (const NormalizedPathSystem& parent : parents) {
     const NormalizedPathSystem canonical = NormalizePathSystem(parent.paths, dimension);
@@ -87,13 +106,18 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
       }
       parent_node_count += path.size();
     }
-    constexpr std::size_t kMaxNodeRecords = std::numeric_limits<std::uint32_t>::max();
-    if (parent_node_count > kMaxNodeRecords ||
-        node_records.size() > kMaxNodeRecords - parent_node_count) {
+    constexpr std::size_t kMaxRecords = std::numeric_limits<std::uint32_t>::max();
+    if (parent_node_count > kMaxRecords || node_records.size() > kMaxRecords - parent_node_count) {
       throw std::overflow_error("HT path-append 节点记录过多");
+    }
+    const std::vector<NodeEdge> canonical_edges = BuildCanonicalEdges(parent);
+    if (canonical_edges.size() > kMaxRecords ||
+        parent_edges.size() > kMaxRecords - canonical_edges.size()) {
+      throw std::overflow_error("HT path-append 父边记录过多");
     }
     detail::HtPathStateSpan span;
     span.node_begin = static_cast<std::uint32_t>(node_records.size());
+    span.edge_begin = static_cast<std::uint32_t>(parent_edges.size());
     for (std::size_t component = 0; component < parent.paths.size(); ++component) {
       const Path& path = parent.paths[component];
       if (component > std::numeric_limits<std::uint32_t>::max()) {
@@ -106,17 +130,30 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
       }
     }
     span.node_count = static_cast<std::uint32_t>(parent_node_count);
+    span.edge_count = static_cast<std::uint32_t>(canonical_edges.size());
+    parent_edges.insert(parent_edges.end(), canonical_edges.begin(), canonical_edges.end());
     state_spans.push_back(span);
   }
 
   HtPathAppendBatchResult result;
   result.feasible.reserve(tasks.size());
   result.children.reserve(tasks.size());
+  result.child_edge_offsets.reserve(tasks.size() + 1U);
+  result.child_edge_offsets.push_back(0U);
   for (const HtPathAppendTask& task : tasks) {
     ValidateTask(dimension, parents, task);
     result.children.push_back(
         NormalizePathSystem(BuildRawChild(parents[task.parent_index], task), dimension));
     result.feasible.push_back(static_cast<std::uint8_t>(result.children.back().valid));
+    if (result.children.back().valid) {
+      const std::vector<NodeEdge> child_edges = BuildCanonicalEdges(result.children.back());
+      if (child_edges.size() >
+          std::numeric_limits<std::uint64_t>::max() - result.child_edges.size()) {
+        throw std::overflow_error("HT path-append child 边记录过多");
+      }
+      result.child_edges.insert(result.child_edges.end(), child_edges.begin(), child_edges.end());
+    }
+    result.child_edge_offsets.push_back(static_cast<std::uint64_t>(result.child_edges.size()));
   }
   result.cpu_verified = true;
 
@@ -134,10 +171,10 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
     return result;
   }
 
-  std::vector<std::uint8_t> cuda_flags;
+  detail::HtPathAppendDeviceBatch cuda_batch;
   try {
-    cuda_flags = detail::EvaluateHtPathAppendsCuda(dimension, state_spans, node_records, tasks,
-                                                   &result.selected_device);
+    cuda_batch = detail::EvaluateHtPathAppendsCuda(dimension, state_spans, node_records,
+                                                   parent_edges, tasks, &result.selected_device);
   } catch (const std::exception&) {
     if (backend == PathCompatibilityBackend::kCuda) {
       throw;
@@ -146,9 +183,14 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
     result.backend = "cpu-fallback";
     return result;
   }
-  if (cuda_flags != result.feasible) {
-    throw std::logic_error("CUDA HT path-append flags 与 CPU 规范化结果不一致");
+  if (cuda_batch.feasible != result.feasible ||
+      cuda_batch.child_edge_offsets != result.child_edge_offsets ||
+      cuda_batch.child_edges != result.child_edges) {
+    throw std::logic_error("CUDA HT path-append child SoA 与 CPU 规范化结果不一致");
   }
+  result.child_edge_offsets = std::move(cuda_batch.child_edge_offsets);
+  result.child_edges = std::move(cuda_batch.child_edges);
+  result.device_children_verified = true;
   result.backend = "cuda";
   return result;
 }

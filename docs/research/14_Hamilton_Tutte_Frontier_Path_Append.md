@@ -4,7 +4,7 @@
 
 M4.3b3b2b2a 将 path-append 从每个父状态一次 point/end 调用改为每个 frontier chunk 最多两次调用。它复用 `EvaluateHtPathAppends` 已支持的多父状态输入：规范父路径分别展平为稀疏 `(node,component,degree)` spans，每个 task 用 `parent_index` 指向自己的 span。
 
-GPU 仍只判断冲突 flags。CPU 为每个展平 task 独立运行 `NormalizePathSystem`、比较全部 flags，并保存真正用于建图的规范 child。跨父状态合批不扩大 GPU 的证明权限。
+M4.3b3b2b2b1 已在同一接口上加入设备端规范 child edge SoA：GPU 除冲突 flags 外还输出每个可行 task 的完整规范边 slice；CPU 为每个展平 task 独立运行 `NormalizePathSystem` 并比较 flags、offsets 和全部边。真正用于建图的 child 仍由 CPU 保存，跨父状态合批不扩大 GPU 的证明权限。
 
 ## 两阶段流水线
 
@@ -43,4 +43,4 @@ point/end task 分别形成一个展平数组；candidate 保存数组起点，r
 
 ## 后续
 
-M4.3b3b2b2b 将把 CPU 已认证的规范 children 转换为设备端 append-only SoA 候选输出，并对整个 frontier 的 leaf tasks 按 `(path_count,node_count,k_max,depth)` 分桶。设备快照缓存、多 block continuation 和 CPU long-tail 必须在独立 V1 proof 等价门禁下逐项加入。
+设备端 append-only [规范 child edge SoA](15_Hamilton_Tutte_GPU_Child_Edge_SoA.md) 已完成。下一阶段对整个 frontier 的 leaf tasks 按 `(path_count,node_count,k_max,depth,reply bucket)` 分桶；设备快照缓存、多 block continuation 和 CPU long-tail 必须在独立 V1 proof 等价门禁下逐项加入。
