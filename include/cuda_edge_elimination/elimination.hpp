@@ -96,6 +96,17 @@ struct HtScanAttempt {
   std::uint64_t path_append_tasks{};
   std::uint64_t hamilton_replies_generated{};
   std::uint64_t end_replies_generated{};
+  double candidate_ms{};
+  double work_graph_ms{};
+  double leaf_ms{};
+  double path_append_ms{};
+  double hamilton_reply_ms{};
+  double end_reply_ms{};
+  double propagation_ms{};
+  double proof_extract_ms{};
+  double proof_verify_ms{};
+  // PROVEN sidecar 离开 wavefront 后的第二次即时 CPU 重放。
+  double immediate_verify_ms{};
   double search_ms{};
   std::string reason;
 };
@@ -114,7 +125,20 @@ struct HtScanResult {
   std::uint64_t leaf_cuda_cost_batches{};
   std::uint64_t leaf_cpu_long_tail_cells{};
   std::uint64_t peak_leaf_device_cache_bytes{};
+  double target_selection_ms{};
+  double candidate_ms{};
+  double work_graph_ms{};
+  double leaf_ms{};
+  double path_append_ms{};
+  double hamilton_reply_ms{};
+  double end_reply_ms{};
+  double propagation_ms{};
+  double proof_extract_ms{};
+  double proof_verify_ms{};
+  double immediate_verify_ms{};
+  double commit_ms{};
   double search_ms{};
+  double total_ms{};
   std::vector<HtScanAttempt> attempts;
 };
 

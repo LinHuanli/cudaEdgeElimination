@@ -74,13 +74,16 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     throw std::invalid_argument("HT scan max_targets 必须位于 [1,1000000]");
   }
 
+  const auto total_start = std::chrono::steady_clock::now();
   const std::uint64_t snapshot_hash = graph->ContentHash();
+  const auto selection_start = std::chrono::steady_clock::now();
   const std::vector<std::int32_t> targets = SelectHtTargetEdgeIds(*graph, options.target_order);
   if (options.target_offset > targets.size()) {
     throw std::invalid_argument("HT scan target_offset 超过 eligible target 数量");
   }
 
   HtScanResult scan;
+  scan.target_selection_ms = ElapsedMilliseconds(selection_start);
   scan.eligible_targets = targets.size();
   scan.target_offset = options.target_offset;
   const std::uint64_t remaining = scan.eligible_targets - options.target_offset;
@@ -121,6 +124,15 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.path_append_tasks = wavefront.path_append_tasks;
     attempt.hamilton_replies_generated = wavefront.hamilton_replies_generated;
     attempt.end_replies_generated = wavefront.end_replies_generated;
+    attempt.candidate_ms = wavefront.candidate_ms;
+    attempt.work_graph_ms = wavefront.work_graph_ms;
+    attempt.leaf_ms = wavefront.leaf_ms;
+    attempt.path_append_ms = wavefront.path_append_ms;
+    attempt.hamilton_reply_ms = wavefront.hamilton_reply_ms;
+    attempt.end_reply_ms = wavefront.end_reply_ms;
+    attempt.propagation_ms = wavefront.propagation_ms;
+    attempt.proof_extract_ms = wavefront.proof_extract_ms;
+    attempt.proof_verify_ms = wavefront.proof_verify_ms;
     attempt.search_ms = ElapsedMilliseconds(search_start);
     attempt.reason = wavefront.proof.reason;
     scan.search_ms += attempt.search_ms;
@@ -133,6 +145,15 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.leaf_cpu_long_tail_cells += attempt.leaf_cpu_long_tail_cells;
     scan.peak_leaf_device_cache_bytes =
         std::max(scan.peak_leaf_device_cache_bytes, attempt.peak_leaf_device_cache_bytes);
+    scan.candidate_ms += attempt.candidate_ms;
+    scan.work_graph_ms += attempt.work_graph_ms;
+    scan.leaf_ms += attempt.leaf_ms;
+    scan.path_append_ms += attempt.path_append_ms;
+    scan.hamilton_reply_ms += attempt.hamilton_reply_ms;
+    scan.end_reply_ms += attempt.end_reply_ms;
+    scan.propagation_ms += attempt.propagation_ms;
+    scan.proof_extract_ms += attempt.proof_extract_ms;
+    scan.proof_verify_ms += attempt.proof_verify_ms;
 
     if (wavefront.status == HtSearchStatus::kInvalid) {
       // 此时所有搜索都只读原图，尚未进入 commit；invalid 必须整批失败关闭。
@@ -142,7 +163,11 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     }
     if (wavefront.status == HtSearchStatus::kProven) {
       std::string reason;
-      if (!VerifyHtRecursiveProof(*graph, wavefront.proof, &reason)) {
+      const auto verify_start = std::chrono::steady_clock::now();
+      const bool verified = VerifyHtRecursiveProof(*graph, wavefront.proof, &reason);
+      attempt.immediate_verify_ms = ElapsedMilliseconds(verify_start);
+      scan.immediate_verify_ms += attempt.immediate_verify_ms;
+      if (!verified) {
         throw std::runtime_error("HT scan 成功 proof 即时 CPU 复核失败: " + reason);
       }
       ++scan.proven_targets;
@@ -157,8 +182,11 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     }
   }
 
+  const auto commit_start = std::chrono::steady_clock::now();
   scan.elimination = CommitHtProofEpoch(graph, proven);
+  scan.commit_ms = ElapsedMilliseconds(commit_start);
   scan.elimination.backend = "ht-wavefront-scan-cpu-verified";
+  scan.total_ms = ElapsedMilliseconds(total_start);
   return scan;
 }
 

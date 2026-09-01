@@ -243,6 +243,16 @@ struct HtWavefrontResult {
   std::uint64_t peak_reply_frontier_batch{};
   std::uint64_t moves_generated{};
   std::uint64_t peak_frontier{};
+  // 计时只用于性能诊断，不进入 proof。work_graph_ms 包含其后的四个 build 子阶段。
+  double candidate_ms{};
+  double work_graph_ms{};
+  double leaf_ms{};
+  double path_append_ms{};
+  double hamilton_reply_ms{};
+  double end_reply_ms{};
+  double propagation_ms{};
+  double proof_extract_ms{};
+  double proof_verify_ms{};
 };
 
 // GPU continuation 层使用的紧凑只读任务；CPU 在接受结果前复算全部状态。

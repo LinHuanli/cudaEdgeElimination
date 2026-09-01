@@ -705,6 +705,18 @@ void TestRecursivePointProof() {
             scan.attempts.front().leaf_cpu_verified && scan.states_expanded > 0U &&
             scan.moves_generated > 0U && scan.search_ms >= 0.0,
         "HT scan deterministically searches the requested bounded slice");
+  const cudaee::HtScanAttempt& timed_attempt = scan.attempts.front();
+  const double measured_build_subphases = timed_attempt.leaf_ms + timed_attempt.path_append_ms +
+                                          timed_attempt.hamilton_reply_ms +
+                                          timed_attempt.end_reply_ms;
+  Check(timed_attempt.candidate_ms >= 0.0 && timed_attempt.work_graph_ms >= 0.0 &&
+            timed_attempt.propagation_ms >= 0.0 && timed_attempt.proof_extract_ms >= 0.0 &&
+            timed_attempt.proof_verify_ms >= 0.0 && timed_attempt.immediate_verify_ms >= 0.0 &&
+            timed_attempt.work_graph_ms + 1.0e-6 >= measured_build_subphases &&
+            scan.work_graph_ms == timed_attempt.work_graph_ms &&
+            scan.immediate_verify_ms == timed_attempt.immediate_verify_ms &&
+            scan.total_ms + 1.0e-6 >= scan.search_ms,
+        "HT scan exposes consistent inclusive phase timings");
   Check(scan.elimination.backend == "ht-wavefront-scan-cpu-verified" &&
             scan.elimination.proof.size() == 1U && scan.elimination.ht_proofs.size() == 1U &&
             !scanned_graph.HasActiveEdge(2, 4),

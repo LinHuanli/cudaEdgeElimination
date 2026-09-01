@@ -552,6 +552,15 @@ bool HtProveCommand(const Arguments& arguments) {
   std::uint64_t peak_reply_frontier_batch = 0;
   std::uint64_t moves_generated = 0;
   std::uint64_t peak_frontier = 0;
+  double candidate_ms = 0.0;
+  double work_graph_ms = 0.0;
+  double leaf_ms = 0.0;
+  double path_append_ms = 0.0;
+  double hamilton_reply_ms = 0.0;
+  double end_reply_ms = 0.0;
+  double propagation_ms = 0.0;
+  double proof_extract_ms = 0.0;
+  double proof_verify_ms = 0.0;
   if (scheduler == "dfs") {
     cudaee::HtRecursiveResult result = cudaee::ProveEdgeByRecursiveHt(graph, target, options);
     search_status = result.status;
@@ -608,6 +617,15 @@ bool HtProveCommand(const Arguments& arguments) {
     peak_reply_frontier_batch = result.peak_reply_frontier_batch;
     moves_generated = result.moves_generated;
     peak_frontier = result.peak_frontier;
+    candidate_ms = result.candidate_ms;
+    work_graph_ms = result.work_graph_ms;
+    leaf_ms = result.leaf_ms;
+    path_append_ms = result.path_append_ms;
+    hamilton_reply_ms = result.hamilton_reply_ms;
+    end_reply_ms = result.end_reply_ms;
+    propagation_ms = result.propagation_ms;
+    proof_extract_ms = result.proof_extract_ms;
+    proof_verify_ms = result.proof_verify_ms;
   } else {
     throw std::invalid_argument("--scheduler 必须是 dfs 或 wavefront");
   }
@@ -663,7 +681,12 @@ bool HtProveCommand(const Arguments& arguments) {
               << " end_reply_cpu_verified=" << (end_reply_cpu_verified ? 1 : 0)
               << " reply_frontier_batches=" << reply_frontier_batches
               << " reply_frontier_states=" << reply_frontier_states
-              << " peak_reply_frontier_batch=" << peak_reply_frontier_batch;
+              << " peak_reply_frontier_batch=" << peak_reply_frontier_batch
+              << " candidate_ms=" << candidate_ms << " work_graph_ms=" << work_graph_ms
+              << " leaf_ms=" << leaf_ms << " path_append_ms=" << path_append_ms
+              << " hamilton_reply_ms=" << hamilton_reply_ms << " end_reply_ms=" << end_reply_ms
+              << " propagation_ms=" << propagation_ms << " proof_extract_ms=" << proof_extract_ms
+              << " proof_verify_ms=" << proof_verify_ms;
   }
   std::cout << " reason=" << std::quoted(proof.reason) << '\n';
   if (search_status == cudaee::HtSearchStatus::kInvalid) {
@@ -689,7 +712,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V1\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V2\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
@@ -714,12 +737,28 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
     output << "protected_tour_cost " << protected_tour->cost << '\n';
     output << "protected_tour_hash " << cudaee::HexHash(protected_tour->tour_hash) << '\n';
   }
-  output << "search_ms " << std::fixed << std::setprecision(6) << scan.search_ms << '\n';
+  output << std::fixed << std::setprecision(6);
+  output << "target_selection_ms " << scan.target_selection_ms << '\n';
+  output << "candidate_ms " << scan.candidate_ms << '\n';
+  output << "work_graph_ms " << scan.work_graph_ms << '\n';
+  output << "leaf_ms " << scan.leaf_ms << '\n';
+  output << "path_append_ms " << scan.path_append_ms << '\n';
+  output << "hamilton_reply_ms " << scan.hamilton_reply_ms << '\n';
+  output << "end_reply_ms " << scan.end_reply_ms << '\n';
+  output << "propagation_ms " << scan.propagation_ms << '\n';
+  output << "proof_extract_ms " << scan.proof_extract_ms << '\n';
+  output << "proof_verify_ms " << scan.proof_verify_ms << '\n';
+  output << "immediate_verify_ms " << scan.immediate_verify_ms << '\n';
+  output << "commit_ms " << scan.commit_ms << '\n';
+  output << "search_ms " << scan.search_ms << '\n';
+  output << "total_ms " << scan.total_ms << '\n';
   output << "attempt_fields index edge_id u v status states replies leaf_calls moves "
             "peak_frontier propagation_backend device blocks cooperative propagation_verified "
             "leaf_backend leaf_device leaf_verified leaf_cells leaf_cuda_batches "
             "leaf_cpu_long_tail_cells peak_leaf_cache_bytes path_append_tasks hamilton_replies "
-            "end_replies search_ms reason\n";
+            "end_replies candidate_ms work_graph_ms leaf_ms path_append_ms hamilton_reply_ms "
+            "end_reply_ms propagation_ms proof_extract_ms proof_verify_ms immediate_verify_ms "
+            "search_ms reason\n";
   for (std::size_t index = 0U; index < scan.attempts.size(); ++index) {
     const cudaee::HtScanAttempt& attempt = scan.attempts[index];
     output << "attempt " << index << ' ' << attempt.edge_id << ' ' << attempt.target_edge.u << ' '
@@ -733,8 +772,12 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << attempt.leaf_cost_cells << ' ' << attempt.leaf_cuda_cost_batches << ' '
            << attempt.leaf_cpu_long_tail_cells << ' ' << attempt.peak_leaf_device_cache_bytes << ' '
            << attempt.path_append_tasks << ' ' << attempt.hamilton_replies_generated << ' '
-           << attempt.end_replies_generated << ' ' << attempt.search_ms << ' '
-           << std::quoted(SingleLine(attempt.reason)) << '\n';
+           << attempt.end_replies_generated << ' ' << attempt.candidate_ms << ' '
+           << attempt.work_graph_ms << ' ' << attempt.leaf_ms << ' ' << attempt.path_append_ms
+           << ' ' << attempt.hamilton_reply_ms << ' ' << attempt.end_reply_ms << ' '
+           << attempt.propagation_ms << ' ' << attempt.proof_extract_ms << ' '
+           << attempt.proof_verify_ms << ' ' << attempt.immediate_verify_ms << ' '
+           << attempt.search_ms << ' ' << std::quoted(SingleLine(attempt.reason)) << '\n';
   }
   output << "END\n";
   if (!output) {
@@ -810,14 +853,21 @@ void HtScanCommand(const Arguments& arguments) {
               << " propagation_backend=" << attempt.propagation_backend
               << " selected_device=" << attempt.selected_device
               << " leaf_cost_backend=" << attempt.leaf_cost_backend
-              << " leaf_cost_cells=" << attempt.leaf_cost_cells << " search_ms=" << std::fixed
-              << std::setprecision(3) << attempt.search_ms
+              << " leaf_cost_cells=" << attempt.leaf_cost_cells << " work_graph_ms=" << std::fixed
+              << std::setprecision(3) << attempt.work_graph_ms << " leaf_ms=" << attempt.leaf_ms
+              << " propagation_ms=" << attempt.propagation_ms
+              << " proof_verify_ms=" << attempt.proof_verify_ms
+              << " immediate_verify_ms=" << attempt.immediate_verify_ms
+              << " search_ms=" << attempt.search_ms
               << " reason=" << std::quoted(SingleLine(attempt.reason)) << '\n';
   }
   std::cout << "scan_status=OK target_order=" << HtTargetOrderName(options.target_order)
             << " eligible=" << scan.eligible_targets << " attempted=" << scan.attempts.size()
             << " proven=" << scan.proven_targets << " unresolved=" << scan.unresolved_targets
             << " committed=" << scan.elimination.proof.size() << " search_ms=" << scan.search_ms
+            << " work_graph_ms=" << scan.work_graph_ms << " leaf_ms=" << scan.leaf_ms
+            << " propagation_ms=" << scan.propagation_ms << " commit_ms=" << scan.commit_ms
+            << " total_ms=" << scan.total_ms
             << " protected_tour_checked=" << (protected_tour_report != nullptr ? 1 : 0) << '\n';
   PrintEliminationSummary(graph, scan.elimination);
 }

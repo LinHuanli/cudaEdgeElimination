@@ -1,6 +1,7 @@
 #include "cuda_edge_elimination/hamilton_tutte.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -18,6 +19,27 @@ namespace {
 constexpr std::size_t kHardWavefrontStates = 1000000U;
 constexpr std::size_t kHardWavefrontMoves = 1000000U;
 constexpr std::uint64_t kHardWavefrontReplies = 1000000U;
+
+using SteadyClock = std::chrono::steady_clock;
+
+double ElapsedMilliseconds(const SteadyClock::time_point begin) {
+  return std::chrono::duration<double, std::milli>(SteadyClock::now() - begin).count();
+}
+
+// 后端调用抛错时也要保留已消耗时间；target 始终属于外层仍存活的 result。
+class ScopedPhaseTimer {
+public:
+  explicit ScopedPhaseTimer(double* const target) : target_(target), begin_(SteadyClock::now()) {}
+
+  ScopedPhaseTimer(const ScopedPhaseTimer&) = delete;
+  ScopedPhaseTimer& operator=(const ScopedPhaseTimer&) = delete;
+
+  ~ScopedPhaseTimer() { *target_ += ElapsedMilliseconds(begin_); }
+
+private:
+  double* target_;
+  SteadyClock::time_point begin_;
+};
 
 NodeEdge CanonicalEdge(const std::int32_t first, const std::int32_t second) {
   return first < second ? NodeEdge{first, second} : NodeEdge{second, first};
@@ -230,6 +252,7 @@ std::optional<HtPathAppendBatchResult>
 EvaluatePathAppendBatch(WaveBuildContext* const context,
                         const std::vector<NormalizedPathSystem>& parents,
                         const std::vector<HtPathAppendTask>& tasks) {
+  ScopedPhaseTimer timer(&context->result->path_append_ms);
   try {
     HtPathAppendBatchResult batch = EvaluateHtPathAppends(context->graph->dimension, parents, tasks,
                                                           context->path_append_backend);
@@ -280,6 +303,7 @@ void RecordHamiltonReplyBatch(WaveBuildContext* const context,
 std::optional<HtHamiltonReplyBatchResult>
 EvaluateHamiltonReplyBatch(WaveBuildContext* const context,
                            const std::vector<std::int32_t>& centers) {
+  ScopedPhaseTimer timer(&context->result->hamilton_reply_ms);
   try {
     HtHamiltonReplyBatchResult batch = EvaluateHtHamiltonReplies(
         *context->graph, context->target, centers, context->hamilton_reply_backend);
@@ -341,6 +365,7 @@ void RecordEndReplyBatch(WaveBuildContext* const context, const HtEndReplyBatchR
 
 std::optional<HtEndReplyBatchResult>
 EvaluateEndReplyBatch(WaveBuildContext* const context, const std::vector<HtEndReplyTask>& tasks) {
+  ScopedPhaseTimer timer(&context->result->end_reply_ms);
   try {
     HtEndReplyBatchResult batch =
         EvaluateHtEndReplies(*context->graph, tasks, context->hamilton_reply_backend);
@@ -915,9 +940,12 @@ void EvaluateLeafFrontierChunk(WaveBuildContext* const context,
         path_systems.push_back(states->at(state_indices[offset]).paths);
       }
       AddLeafMetric(&context->result->proof.leaf_calls, path_systems.size(), "leaf calls");
-      PathSystemKOptBatchResult batch =
-          ProvePathSystemsByKOpt(*context->graph, path_systems, context->target,
-                                 context->options->root_options.leaf_options);
+      PathSystemKOptBatchResult batch;
+      {
+        ScopedPhaseTimer timer(&context->result->leaf_ms);
+        batch = ProvePathSystemsByKOpt(*context->graph, path_systems, context->target,
+                                       context->options->root_options.leaf_options);
+      }
       if (batch.proofs.size() != path_systems.size()) {
         throw std::logic_error("HT leaf batch 返回的 proof 数量不一致");
       }
@@ -1196,6 +1224,7 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
   }
 
   HtCdBatchResult candidates;
+  const SteadyClock::time_point candidate_begin = SteadyClock::now();
   try {
     candidates =
         EvaluateHtCdCandidates(graph, proof.target_edge, options.search_options.root_options);
@@ -1206,19 +1235,23 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
         cpu_options.candidate_backend = PathCompatibilityBackend::kCpu;
         candidates = EvaluateHtCdCandidates(graph, proof.target_edge, cpu_options);
       } catch (const std::exception& cpu_error) {
+        result.candidate_ms += ElapsedMilliseconds(candidate_begin);
         proof.reason = cpu_error.what();
         return result;
       }
     } else if (options.search_options.root_options.candidate_backend ==
                PathCompatibilityBackend::kCuda) {
+      result.candidate_ms += ElapsedMilliseconds(candidate_begin);
       result.status = HtSearchStatus::kUnresolved;
       proof.reason = std::string("CUDA HT wavefront c,d 筛选失败: ") + error.what();
       return result;
     } else {
+      result.candidate_ms += ElapsedMilliseconds(candidate_begin);
       proof.reason = error.what();
       return result;
     }
   }
+  result.candidate_ms += ElapsedMilliseconds(candidate_begin);
   if (candidates.candidates.empty()) {
     result.status = HtSearchStatus::kUnresolved;
     proof.reason = "HT wavefront 没有可用 c,d 根 move";
@@ -1257,7 +1290,11 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
       WaveState root;
       root.paths = root_paths;
       states.push_back(std::move(root));
-      const RootBuildStatus root_status = BuildRootMove(&context, candidate, &states);
+      RootBuildStatus root_status;
+      {
+        ScopedPhaseTimer timer(&result.work_graph_ms);
+        root_status = BuildRootMove(&context, candidate, &states);
+      }
       if (root_status == RootBuildStatus::kSkipped) {
         continue;
       }
@@ -1274,7 +1311,12 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
       }
 
       std::vector<std::uint32_t> level_offsets;
-      if (!ExpandWavefront(&context, &states, &level_offsets)) {
+      bool expanded = false;
+      {
+        ScopedPhaseTimer timer(&result.work_graph_ms);
+        expanded = ExpandWavefront(&context, &states, &level_offsets);
+      }
+      if (!expanded) {
         if (context.path_append_invalid) {
           result.status = HtSearchStatus::kInvalid;
           proof.reason = "HT path-append CPU/CUDA 复核失败: " + context.path_append_reason;
@@ -1309,8 +1351,12 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
       }
       std::vector<std::uint8_t> status;
       std::string propagation_reason;
-      const PropagationStatus propagated =
-          PropagateWavefront(options, states, level_offsets, &result, &status, &propagation_reason);
+      PropagationStatus propagated;
+      {
+        ScopedPhaseTimer timer(&result.propagation_ms);
+        propagated = PropagateWavefront(options, states, level_offsets, &result, &status,
+                                        &propagation_reason);
+      }
       if (propagated == PropagationStatus::kUnavailable) {
         result.status = HtSearchStatus::kUnresolved;
         proof.reason = propagation_reason;
@@ -1326,11 +1372,19 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
       }
 
       proof.nodes.clear();
-      CopySuccessfulState(0U, states, status, &proof.nodes);
+      {
+        ScopedPhaseTimer timer(&result.proof_extract_ms);
+        CopySuccessfulState(0U, states, status, &proof.nodes);
+      }
       proof.proven = true;
       proof.reason = "HT wavefront 的一个 c,d 根 move 已完成全部 AND replies";
       std::string verify_reason;
-      if (!VerifyHtRecursiveProof(graph, proof, &verify_reason)) {
+      bool verified = false;
+      {
+        ScopedPhaseTimer timer(&result.proof_verify_ms);
+        verified = VerifyHtRecursiveProof(graph, proof, &verify_reason);
+      }
+      if (!verified) {
         proof.proven = false;
         proof.nodes.clear();
         proof.reason = "内部 HT wavefront 复核失败: " + verify_reason;
