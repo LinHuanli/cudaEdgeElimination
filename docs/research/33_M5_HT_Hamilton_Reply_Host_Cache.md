@@ -127,3 +127,5 @@ CPU search 的阶段占比现在约为：
 Hamilton validation 即使全部消除也只能再节省约 16 ms，不应继续优先。研究焦点返回 leaf：setup `1,757.315 ms` 与 CPU matrix evaluate `2,320.345 ms` 合计占 leaf 的约 `91.64%`。
 
 下一切片优先量化 CPU matrix 的 task/row 并行性与 setup 中 path normalization/catalog/cursor 构造的比例。任何线程化必须保持每个 cursor 的规范消费顺序、首次 witness 和 proof 字节不变；并行只允许发生在互不依赖的 cost cells/tasks 生成阶段。
+
+该 setup 细分及首轮优化已完成，结果见 [M5 HT leaf setup 画像与快照哈希复用](34_M5_HT_Leaf_Setup_Snapshot_Hash.md)。

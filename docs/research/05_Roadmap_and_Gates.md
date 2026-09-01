@@ -85,6 +85,8 @@ CPU 精确矩阵认证与公平基线均已完成：固定数组 scorer 逐 cell
 
 Hamilton reply 主机优化已完成：batch 入口只验证一次图，重复 center 复用规范回复，每邻边的 2-opt 条件只计算一次。8-target 的 27,598 个逻辑 centers 在 batch 内归并为 1,395 次枚举，CPU reply `6.079 s -> 0.019 s`，CPU search `11.015 s -> 4.870 s`。当前 leaf 占 search `91.38%`；下一步拆分 setup 并评估 CPU cost task 并行化。
 
+leaf setup 画像与快照哈希复用已完成：同一 8-target 协议中，9,891 个 cursor 的 setup 有 92.57% 来自每个 leaf state 重算不可变 graph 哈希。改为每个 leaf batch 计算一次后，CPU setup 从 1.761 秒降至 0.232 秒，leaf/search 从 `4.497/4.915 s` 降至 `2.981/3.398 s`；proof、规范工作计数、最终图和受保护 tour 均不变。当前优先级转为占 leaf 78.67% 的 CPU 精确 cost matrix。
+
 M5 仍未完成：`rl5915/d15112` 的最优 tour witness、跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义

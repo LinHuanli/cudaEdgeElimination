@@ -28,7 +28,7 @@
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
-| M5 中大型调优 | 进行中（JV 三轮 + HT host fast paths） | reply 批内去重约 94.95%；CPU search `4.870 s`；leaf 占比转为 91.38% |
+| M5 中大型调优 | 进行中（JV 三轮 + HT host fast paths） | reply 批内去重约 94.95%；leaf 批内快照哈希复用；CPU search `3.398 s` |
 
 ## 当前基准结果
 
@@ -57,6 +57,8 @@ M5 HT CPU 精确矩阵认证绑定 `48d68dc`：固定数组 scorer 对 CUDA cost
 M5 HT CPU matrix 公平基线绑定 `9fa301d`：显式 CPU leaf 进入相同增量 cursor，并修复 cost block 尾部未消费 rows 被计入 proof 的既有规范计数问题。随机 direct/auto/CPU-matrix 三路现与 CPU scalar proof 逐字节一致。8-target clean run 中 CPU matrix leaf/search 为 `4.491/11.015 s`，优于 all-CUDA `4.848/11.730 s`、hybrid `5.034/11.430 s` 和 fused `4.974/11.594 s`；四路 51,309,996 cells、727,635 consumed rows、987 个候选、最终图和 tour 均一致。同步全量 CPU 认证下 GPU 没有净 leaf 加速，下一画像转向占 CPU search `55.19%` 的 Hamilton reply。
 
 M5 HT Hamilton reply 主机优化绑定 `f12c181`：批 API 只验证一次图，同批重复 center 复用规范回复，并把 2-opt quick filter 提升为每邻边一次。8-target 的 72 batches/27,598 逻辑 centers 只实际枚举 1,395 个 batch-unique centers 和 11,515 个邻边对，仍输出相同 245,965 replies。CPU reply 从 `6.079 s` 降至 `0.019 s`（约 `321×`），CPU search 从 `11.015 s` 降至 `4.870 s`（约 `2.26×`）；all-CUDA/hybrid/fused search 为 `5.562/5.345/5.354 s`。四路工作图、51,309,996 leaf cells、最终图、proof 重放和 tour 门禁均一致；下一瓶颈是占 CPU search `91.38%` 的 leaf。
+
+M5 HT leaf setup 画像与快照哈希复用绑定 `f71b472/c968b01`：V8 report/V10 summary 将 setup 拆为 proof 初始化、coverage 扫描和 cursor 构造，并要求四路 cursor 数一致。基线的 9,891 个 cursor 中，proof 初始化占 setup `92.57%`，根因是每个 leaf state 都重算同一不可变 graph 哈希。改为每 batch 计算一次后，CPU setup/leaf/search 从 `1.761/4.497/4.915 s` 降至 `0.232/2.981/3.398 s`，分别加速 `7.59×/1.51×/1.45×`。四路 51,309,996 cells、proof、最终图和 tour 均不变；下一瓶颈是占 CPU leaf `78.67%` 的精确 cost matrix。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
