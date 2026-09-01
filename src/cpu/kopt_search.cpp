@@ -816,6 +816,82 @@ KOptReconnectTable BuildKOptReconnectTable(const std::uint32_t k) {
   return table;
 }
 
+namespace {
+
+const KOptReconnectTable& CachedKOptReconnectTable(const std::uint32_t k) {
+  // proper templates 只由 k 决定；函数内静态对象由 C++ 保证线程安全地延迟初始化。
+  switch (k) {
+  case 3U: {
+    static const KOptReconnectTable table = BuildKOptReconnectTable(3U);
+    return table;
+  }
+  case 4U: {
+    static const KOptReconnectTable table = BuildKOptReconnectTable(4U);
+    return table;
+  }
+  case 5U: {
+    static const KOptReconnectTable table = BuildKOptReconnectTable(5U);
+    return table;
+  }
+  default:
+    throw std::invalid_argument("reconnect template 缓存的 k 必须位于 [3,5]");
+  }
+}
+
+struct PathMatchingCatalog {
+  std::vector<EndpointMatching> outside;
+  std::vector<EndpointMatching> inside;
+  std::optional<PathCompatibilityTable> table;
+};
+
+PathMatchingCatalog BuildPathMatchingCatalog(const std::uint32_t path_count) {
+  PathMatchingCatalog catalog;
+  catalog.outside = EnumerateOutsideMatchings(path_count);
+  catalog.inside = EnumerateInsideMatchings(path_count);
+  if (path_count <= kMaxGpuPathCount) {
+    catalog.table = BuildPathCompatibilityTable(path_count);
+  }
+  return catalog;
+}
+
+const PathMatchingCatalog& CachedPathMatchingCatalog(const std::uint32_t path_count) {
+  // outside/inside 规范顺序和兼容表都只由 path_count 决定；调用方只能持有 const 引用。
+  switch (path_count) {
+  case 1U: {
+    static const PathMatchingCatalog catalog = BuildPathMatchingCatalog(1U);
+    return catalog;
+  }
+  case 2U: {
+    static const PathMatchingCatalog catalog = BuildPathMatchingCatalog(2U);
+    return catalog;
+  }
+  case 3U: {
+    static const PathMatchingCatalog catalog = BuildPathMatchingCatalog(3U);
+    return catalog;
+  }
+  case 4U: {
+    static const PathMatchingCatalog catalog = BuildPathMatchingCatalog(4U);
+    return catalog;
+  }
+  case 5U: {
+    static const PathMatchingCatalog catalog = BuildPathMatchingCatalog(5U);
+    return catalog;
+  }
+  case 6U: {
+    static const PathMatchingCatalog catalog = BuildPathMatchingCatalog(6U);
+    return catalog;
+  }
+  case 7U: {
+    static const PathMatchingCatalog catalog = BuildPathMatchingCatalog(7U);
+    return catalog;
+  }
+  default:
+    throw std::invalid_argument("path matching 缓存的路径数必须位于 [1,7]");
+  }
+}
+
+} // namespace
+
 KOptCostBatchResult EvaluateKOptTemplateCosts(const GraphSnapshot& graph, const std::uint32_t k,
                                               const std::vector<KOptCostTask>& tasks,
                                               const PathCompatibilityBackend backend) {
@@ -829,7 +905,7 @@ KOptCostBatchResult EvaluateKOptTemplateCosts(const GraphSnapshot& graph, const 
   for (const KOptCostTask& task : tasks) {
     ValidateKOptCostTask(graph, k, task);
   }
-  const KOptReconnectTable table = BuildKOptReconnectTable(k);
+  const KOptReconnectTable& table = CachedKOptReconnectTable(k);
   if (!tasks.empty() &&
       table.templates.size() > std::numeric_limits<std::size_t>::max() / tasks.size()) {
     throw std::overflow_error("k-opt cost 矩阵规模溢出");
@@ -936,7 +1012,7 @@ KOptSearchResult FindKOptWitnessImpl(const GraphSnapshot& graph, const Normalize
 
   const std::size_t selectable_count = context.selectable_positions.size();
   for (std::uint32_t k = 3; k <= options.max_k && k < selectable_count; ++k) {
-    const KOptReconnectTable reconnect_table = BuildKOptReconnectTable(k);
+    const KOptReconnectTable& reconnect_table = CachedKOptReconnectTable(k);
     std::vector<std::size_t> combination(k);
     for (std::size_t index = 0; index < combination.size(); ++index) {
       combination[index] = index;
@@ -1364,13 +1440,12 @@ PathSystemKOptProof ProvePathSystemByKOpt(const GraphSnapshot& graph,
     proof.reason = "路径数不在 [1,7]";
     return proof;
   }
-  const std::vector<EndpointMatching> outside = EnumerateOutsideMatchings(proof.path_count);
-  const std::vector<EndpointMatching> inside = EnumerateInsideMatchings(proof.path_count);
+  const PathMatchingCatalog& catalog = CachedPathMatchingCatalog(proof.path_count);
+  const std::vector<EndpointMatching>& outside = catalog.outside;
+  const std::vector<EndpointMatching>& inside = catalog.inside;
   proof.outside_count = static_cast<std::uint32_t>(outside.size());
-  std::optional<PathCompatibilityTable> table;
-  if (proof.path_count <= kMaxGpuPathCount) {
-    table = BuildPathCompatibilityTable(proof.path_count);
-    proof.compatibility_table_hash = table->generator_hash;
+  if (catalog.table.has_value()) {
+    proof.compatibility_table_hash = catalog.table->generator_hash;
   }
 
   std::vector<bool> covered(outside.size(), false);
@@ -1418,8 +1493,8 @@ PathSystemKOptProof ProvePathSystemByKOpt(const GraphSnapshot& graph,
     const auto inside_index = static_cast<std::uint32_t>(inside_iterator - inside.begin());
     for (std::uint32_t outside_index = 0; outside_index < outside.size(); ++outside_index) {
       const bool compatible =
-          table.has_value()
-              ? table->Covers(outside_index, inside_index)
+          catalog.table.has_value()
+              ? catalog.table->Covers(outside_index, inside_index)
               : IsAlternatingHamiltonianCycle(outside[outside_index],
                                               search.witness.inside_matching, proof.path_count);
       covered[outside_index] = covered[outside_index] || compatible;
@@ -1526,7 +1601,7 @@ public:
       throw std::logic_error("k-opt cost cursor 没有待消费 block");
     }
     const KOptCursorBlock& block = *pending_;
-    const KOptReconnectTable reconnect_table = BuildKOptReconnectTable(block.k);
+    const KOptReconnectTable& reconnect_table = CachedKOptReconnectTable(block.k);
     if (costs.k != block.k || costs.template_count != reconnect_table.templates.size() ||
         costs.added_costs.size() != block.works.size() * reconnect_table.templates.size()) {
       result_.status = KOptSearchStatus::kUnresolved;
@@ -1642,9 +1717,7 @@ private:
 
 struct BatchedPathProofWork {
   PathSystemKOptProof proof;
-  std::vector<EndpointMatching> outside;
-  std::vector<EndpointMatching> inside;
-  std::optional<PathCompatibilityTable> table;
+  const PathMatchingCatalog* catalog{};
   std::vector<bool> covered;
   bool finished{false};
 };
@@ -1660,14 +1733,12 @@ BatchedPathProofWork InitializeBatchedPathProof(const GraphSnapshot& graph,
     work.finished = true;
     return work;
   }
-  work.outside = EnumerateOutsideMatchings(work.proof.path_count);
-  work.inside = EnumerateInsideMatchings(work.proof.path_count);
-  work.proof.outside_count = static_cast<std::uint32_t>(work.outside.size());
-  if (work.proof.path_count <= kMaxGpuPathCount) {
-    work.table = BuildPathCompatibilityTable(work.proof.path_count);
-    work.proof.compatibility_table_hash = work.table->generator_hash;
+  work.catalog = &CachedPathMatchingCatalog(work.proof.path_count);
+  work.proof.outside_count = static_cast<std::uint32_t>(work.catalog->outside.size());
+  if (work.catalog->table.has_value()) {
+    work.proof.compatibility_table_hash = work.catalog->table->generator_hash;
   }
-  work.covered.assign(work.outside.size(), false);
+  work.covered.assign(work.catalog->outside.size(), false);
   return work;
 }
 
@@ -1701,7 +1772,7 @@ void ApplyBatchedKOptSearch(const GraphSnapshot& graph, const NormalizedPathSyst
     return;
   }
   if (search.status != KOptSearchStatus::kImproved && options.exact_fallback_max_blocks != 0U) {
-    KOptSearchResult exact = FindExactTourWitness(graph, paths, work->outside[source],
+    KOptSearchResult exact = FindExactTourWitness(graph, paths, work->catalog->outside[source],
                                                   required_edge, options.exact_fallback_max_blocks);
     if (!AddWithoutOverflow(&work->proof.exact_states_tested, exact.exact_states_tested)) {
       work->proof.reason = "path-system exact DP 状态计数溢出";
@@ -1721,25 +1792,27 @@ void ApplyBatchedKOptSearch(const GraphSnapshot& graph, const NormalizedPathSyst
     return;
   }
   std::string verify_reason;
-  if (!VerifyKOptWitness(graph, paths, work->outside[source], required_edge, search.witness,
-                         &verify_reason)) {
+  if (!VerifyKOptWitness(graph, paths, work->catalog->outside[source], required_edge,
+                         search.witness, &verify_reason)) {
     work->proof.reason = "outside witness 复核失败: " + verify_reason;
     work->finished = true;
     return;
   }
-  const auto inside_iterator =
-      std::find(work->inside.begin(), work->inside.end(), search.witness.inside_matching);
-  if (inside_iterator == work->inside.end()) {
+  const auto inside_iterator = std::find(work->catalog->inside.begin(), work->catalog->inside.end(),
+                                         search.witness.inside_matching);
+  if (inside_iterator == work->catalog->inside.end()) {
     work->proof.reason = "witness inside matching 不在规范枚举中";
     work->finished = true;
     return;
   }
-  const auto inside_index = static_cast<std::uint32_t>(inside_iterator - work->inside.begin());
-  for (std::uint32_t outside_index = 0U; outside_index < work->outside.size(); ++outside_index) {
+  const auto inside_index =
+      static_cast<std::uint32_t>(inside_iterator - work->catalog->inside.begin());
+  for (std::uint32_t outside_index = 0U; outside_index < work->catalog->outside.size();
+       ++outside_index) {
     const bool compatible =
-        work->table.has_value()
-            ? work->table->Covers(outside_index, inside_index)
-            : IsAlternatingHamiltonianCycle(work->outside[outside_index],
+        work->catalog->table.has_value()
+            ? work->catalog->table->Covers(outside_index, inside_index)
+            : IsAlternatingHamiltonianCycle(work->catalog->outside[outside_index],
                                             search.witness.inside_matching, work->proof.path_count);
     work->covered[outside_index] = work->covered[outside_index] || compatible;
   }
@@ -1833,7 +1906,7 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
         const std::uint32_t source = *FirstUncoveredOutside(work);
         ActiveSearch search{.path_index = path_index, .source = source, .cursor = std::nullopt};
         if (can_batch_costs) {
-          search.cursor.emplace(graph, path_systems[path_index], work.outside[source],
+          search.cursor.emplace(graph, path_systems[path_index], work.catalog->outside[source],
                                 required_edge, options);
         }
         active.push_back(std::move(search));
@@ -1960,7 +2033,7 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
         {
           ScopedPhaseTimer timer(&result.scalar_search_ms);
           search_result = FindKOptWitness(graph, path_systems[search.path_index],
-                                          works[search.path_index].outside[search.source],
+                                          works[search.path_index].catalog->outside[search.source],
                                           required_edge, options);
         }
       }
@@ -2006,14 +2079,14 @@ bool VerifyPathSystemKOptProof(const GraphSnapshot& graph, const NormalizedPathS
     SetReason(reason, "path-system proof 的状态或绑定哈希不一致");
     return false;
   }
-  const std::vector<EndpointMatching> outside = EnumerateOutsideMatchings(proof.path_count);
+  const PathMatchingCatalog& catalog = CachedPathMatchingCatalog(proof.path_count);
+  const std::vector<EndpointMatching>& outside = catalog.outside;
   if (proof.outside_count != outside.size()) {
     SetReason(reason, "path-system proof 的 outside 数量不一致");
     return false;
   }
-  if (proof.path_count <= kMaxGpuPathCount) {
-    if (proof.compatibility_table_hash !=
-        BuildPathCompatibilityTable(proof.path_count).generator_hash) {
+  if (catalog.table.has_value()) {
+    if (proof.compatibility_table_hash != catalog.table->generator_hash) {
       SetReason(reason, "path-system proof 的兼容表哈希不一致");
       return false;
     }
