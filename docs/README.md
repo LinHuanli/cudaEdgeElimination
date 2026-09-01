@@ -45,5 +45,6 @@
 41. [M5 HT 多实例融合门禁](research/37_M5_HT_Multi_Instance_Fusion_Gates.md)：锁定三份最优 tour、三实例 V12 门禁与 CPU leaf 后端感知默认值。
 42. [M5 HT path-append 稀疏规范化](research/38_M5_HT_Path_Append_Profile.md)：V10/V13 画像、dense 差分门禁及三实例 path-append 5.503×–25.561× 加速。
 43. [M5 HT 根 child 规范化排除实验](research/39_M5_HT_Root_Child_Normalization_Profile.md)：V11/V14 计时证明根 dense 规范化仅占 host residual 0.41%–2.61%。
+44. [M5 HT point-candidate 全维选择画像](research/40_M5_HT_Point_Candidate_Profile.md)：V12/V15 证明全维扫描与全量排序占 host residual 93.61%–96.96%。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

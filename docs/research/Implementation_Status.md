@@ -66,6 +66,8 @@ M5 HT path-append 画像与稀疏规范化绑定 `ba15919/b551a2e`：V10 report/
 
 M5 HT 根 child 规范化排除实验绑定 `6b2b8ad`：V11/V14 记录 72/151/647 次根 child dense 规范化，CPU-fused 仅为 0.773/2.174/28.642 ms，占三实例 host residual `0.406%/0.562%/2.605%`。未为低占比路径扩大共享 fast-path API；下一画像目标是逐 frontier state 的全维 point-candidate 扫描。
 
+M5 HT point-candidate 画像绑定 `5944476`：V12/V15 记录 state scans、checked/ranked/selected 节点、扫描与排序时间。三实例 scan+sort 占 host residual `93.613%/96.956%/95.258%`；d15112 为保留 23,925 项累计排序 14,354,406 项，排序耗时 858.648 ms。下一步用严格全序的有界 `partial_sort(top 25)` 保持输出不变。
+
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
 Concorde 随机 20 点 epoch：25 行、43 列；QSopt 与 cuOpt 模型目标均为 `88`。cuOpt primal violation 为 `4.44e-15`，reduced-cost residual 为 `1.57e-14`；完整图 exact lower bound 为 `87.3932819641`，上界为 `88`。

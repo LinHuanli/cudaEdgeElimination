@@ -95,6 +95,8 @@ path-append V10/V13 画像和稀疏规范化已完成：内部 fast path 按实�
 
 根 child dense 规范化已由 V11/V14 排除：三实例只占 host residual `0.406%/0.562%/2.605%`，不值得扩大共享 fast-path API。下一步计量 `BuildPointCandidateNodes` 的 frontier 状态数、全维节点检查量和排序成本。
 
+point-candidate V12/V15 画像已完成：全维扫描和全量排序占三实例 host residual `93.613%/96.956%/95.258%`；每个 state 只保留 25 个节点，d15112 却累计排序 14,354,406 项。下一单变量实验以严格全序的 `partial_sort(top 25)` 替代全量排序。
+
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
