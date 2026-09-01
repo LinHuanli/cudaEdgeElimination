@@ -95,7 +95,7 @@ path-append V10/V13 画像和稀疏规范化已完成：内部 fast path 按实�
 
 根 child dense 规范化已由 V11/V14 排除：三实例只占 host residual `0.406%/0.562%/2.605%`，不值得扩大共享 fast-path API。下一步计量 `BuildPointCandidateNodes` 的 frontier 状态数、全维节点检查量和排序成本。
 
-point-candidate V12/V15 画像与 Top-K 优化已完成：严格全序的 `partial_sort(top 25)` 将三实例排序加速 `11.565×/20.840×/29.831×`，CPU-fused search 加速 `1.086×/1.580×/1.552×`。五路活动边、工作签名和规范 proof 逐字节不变。下一切片验证同一 target 的静态评分顺序能否安全复用，以消除逐 state 全维评分。
+point-candidate V12/V15 画像、Top-K 与静态次序缓存已完成：target 级严格全序配合 state generation marks，使三实例 point scan 相对 Top-K 再加速 `188.364×/238.242×/293.326×`，累计 CPU-fused search 相对全量排序画像加速 `1.135×/1.858×/1.756×`。五路规范计数、活动边、工作签名和 proof 逐字节不变。该 host 路径已不再是主要矛盾，下一切片转向跨目标不可变 leaf 数据与调度共享。
 
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 

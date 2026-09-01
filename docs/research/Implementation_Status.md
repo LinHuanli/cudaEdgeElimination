@@ -68,6 +68,8 @@ M5 HT 根 child 规范化排除实验绑定 `6b2b8ad`：V11/V14 记录 72/151/64
 
 M5 HT point-candidate 画像与 Top-K 优化绑定 `5944476/4e4f8e3`：V12/V15 记录 state scans、checked/ranked/selected 节点、扫描与排序时间；严格全序的 `partial_sort(top 25)` 将三实例排序从 `137.639/298.303/858.648 ms` 降至 `11.901/14.314/28.784 ms`，CPU-fused search 加速 `1.086×/1.580×/1.552×`。三实例五路活动边、工作签名、规范 proof 和受保护 tour 全部不变。下一步验证同一 target 的静态评分顺序复用。
 
+M5 HT point-candidate 静态次序缓存绑定 `ea85ffa`：每个 target 只计算一次中点评分和严格全序，逐 state 用 generation marks 过滤已有路径节点，同时保持完整维度 checked 与原 ranked 计数。相对 Top-K，三实例 scan 再加速 `188.364×/238.242×/293.326×`，CPU-fused search 加速 `1.045×/1.176×/1.131×`；相对全量排序画像的累计 search 加速为 `1.135×/1.858×/1.756×`。三实例五路规范计数、边、工作签名、proof 和 tour 全部不变。下一步转向跨目标 leaf 准备数据与调度共享。
+
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
 Concorde 随机 20 点 epoch：25 行、43 列；QSopt 与 cuOpt 模型目标均为 `88`。cuOpt primal violation 为 `4.44e-15`，reduced-cost residual 为 `1.57e-14`；完整图 exact lower bound 为 `87.3932819641`，上界为 `88`。
