@@ -93,13 +93,32 @@ CPU 叶搜索没有复制 `swap.c` 的 1,900 余行展开判断，而是从相�
 
 回归覆盖 proper 3/4/5-opt 的全部模板路径：一个无严格改善的 7 节点实例会检查 25 个 anchor 删除集合和 1,330 个 proper reconnect 单元；另有 `m=1`、`m=2` 的成功 proof、成本篡改和 snapshot-hash 篡改拒绝测试。
 
+## 批量 CUDA k-opt cost 候选器
+
+`EvaluateKOptTemplateCosts` 接收同一 `k` 桶内的删除集合，每个任务保存按原巡回次序排列的至多 10 个端口。CUDA kernel 的一个线程计算一个 `(task, reconnect template)` 单元：
+
+- 检查加边自环、实际重复边和重新加入的实际删除边；
+- 用与 JV kernel 相同的 64 位整数平方根规则计算 `EUC_2D/CEIL_2D` 距离；
+- 用 `int64_t` 检查累加溢出；
+- 输出完整 `[task][template]` 成本矩阵，非法单元为 `INT64_MAX`。
+
+CPU 有独立的成本矩阵实现，CUDA 回归逐单元比较三阶模板及包含相邻删除边端口的任务；批量搜索成功路径也会重建 witness 并再次调用 `VerifyKOptWitness`。compute-sanitizer memcheck 为 0 error。
+
+这张 GPU 成本矩阵被严格定义为**候选 oracle**，不是 completeness certificate。`FindKOptWitness` 按 `cost_batch_size` 分批调用它：
+
+1. 对 GPU 标出的低成本模板逐个做 CPU 完整重连与 witness 复核；
+2. 若某个候选成功，可安全提前返回；
+3. 若 GPU 对一个删除集合没有给出可接受 witness，CPU 对该集合重新穷举全部 proper templates；
+4. `auto` 模式的 CUDA 运行错误转 CPU；显式 CUDA 失败返回 `unresolved`；
+5. 因而 kernel 漏报只会损失性能，不会把“未知”变成证明。
+
 ## 后续接线
 
 M4 后续必须按顺序完成：
 
-1. 把 proper reconnect 成本筛选做成批量 CUDA 候选器，候选仍由现有 CPU verifier 接受；
-2. 对未被 k-opt 解决的叶转入 CPU Held–Karp/原 LocalElimination fallback；
-3. 实现 HS `c,d` 候选与 AND–OR 状态传播；
+1. 对未被 k-opt 解决的叶转入 CPU Held–Karp/原 LocalElimination fallback；
+2. 实现 HS `c,d` 候选与 AND–OR 状态传播；
+3. 缓存坐标/模板设备常驻数据，并用真实任务桶评估 kernel 粒度；
 4. 将 leaf proof 嵌入完整 HS 证书，从不可变 epoch 快照递归重放；
 5. 将完整 HS 证书链接入候选阶段，继续由 epoch commit 的 CPU 门禁授权。
 

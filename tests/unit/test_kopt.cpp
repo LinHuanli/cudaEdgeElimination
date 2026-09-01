@@ -39,6 +39,74 @@ cudaee::GraphSnapshot MakeGraph(const std::vector<cudaee::Point>& points) {
   return graph;
 }
 
+void TestKOptCostMatrixCpuCuda() {
+  std::vector<cudaee::Point> points;
+  for (std::int64_t node = 0; node < 17; ++node) {
+    const std::int64_t x = (7 * node) % 23;
+    const std::int64_t y = (node * node + 3 * node) % 19;
+    points.push_back({static_cast<double>(x), static_cast<double>(y), static_cast<std::int64_t>(x),
+                      static_cast<std::int64_t>(y)});
+  }
+  const cudaee::GraphSnapshot graph = MakeGraph(points);
+  constexpr std::array<std::size_t, 3> kExpectedTemplateCounts = {4, 25, 208};
+  for (std::uint32_t k = 3; k <= 5; ++k) {
+    std::vector<cudaee::KOptCostTask> tasks(3);
+    for (std::uint32_t port = 0; port < 2U * k; ++port) {
+      tasks[0].port_nodes[port] = static_cast<std::int32_t>(port);
+      tasks[2].port_nodes[port] = static_cast<std::int32_t>((3U * port + 2U) % 17U);
+    }
+    const std::array<std::int32_t, 10> adjacent_ports = {0, 1, 1, 2, 3, 4, 5, 6, 7, 8};
+    tasks[1].port_nodes = adjacent_ports;
+    for (cudaee::KOptCostTask& task : tasks) {
+      for (std::uint32_t edge = 0; edge < k; ++edge) {
+        const std::size_t first_port = std::size_t{2} * edge;
+        task.deleted_cost +=
+            graph.Distance(task.port_nodes[first_port], task.port_nodes[first_port + 1]);
+      }
+    }
+
+    const cudaee::KOptCostBatchResult cpu =
+        cudaee::EvaluateKOptTemplateCosts(graph, k, tasks, cudaee::PathCompatibilityBackend::kCpu);
+    Check(cpu.backend == "cpu", "CPU k-opt cost backend");
+    Check(cpu.template_count == kExpectedTemplateCounts[static_cast<std::size_t>(k - 3U)],
+          "k-opt cost template count");
+    Check(cpu.added_costs.size() == tasks.size() * cpu.template_count,
+          "CPU k-opt cost matrix shape");
+
+#ifdef CUDAEE_HAS_CUDA
+    std::string unavailable_reason;
+    if (cudaee::detail::KOptCostCudaAvailable(&unavailable_reason)) {
+      const cudaee::KOptCostBatchResult gpu = cudaee::EvaluateKOptTemplateCosts(
+          graph, k, tasks, cudaee::PathCompatibilityBackend::kCuda);
+      Check(gpu.backend == "cuda", "CUDA k-opt cost backend");
+      Check(gpu.selected_device >= 0, "CUDA k-opt cost selected device");
+      Check(gpu.added_costs == cpu.added_costs, "CPU/CUDA k-opt cost matrices are exact");
+    } else {
+      std::cout << "CUDA k-opt cost skipped: " << unavailable_reason << '\n';
+    }
+#endif
+  }
+
+  cudaee::GraphSnapshot ceil_graph = graph;
+  ceil_graph.distance_type = cudaee::DistanceType::kCeil2D;
+  cudaee::KOptCostTask ceil_task;
+  for (std::uint32_t port = 0; port < 10; ++port) {
+    ceil_task.port_nodes[port] = static_cast<std::int32_t>(port);
+  }
+  const std::vector<cudaee::KOptCostTask> ceil_tasks = {ceil_task};
+  const cudaee::KOptCostBatchResult ceil_cpu = cudaee::EvaluateKOptTemplateCosts(
+      ceil_graph, 5, ceil_tasks, cudaee::PathCompatibilityBackend::kCpu);
+#ifdef CUDAEE_HAS_CUDA
+  std::string ceil_unavailable_reason;
+  if (cudaee::detail::KOptCostCudaAvailable(&ceil_unavailable_reason)) {
+    const cudaee::KOptCostBatchResult ceil_gpu = cudaee::EvaluateKOptTemplateCosts(
+        ceil_graph, 5, ceil_tasks, cudaee::PathCompatibilityBackend::kCuda);
+    Check(ceil_gpu.added_costs == ceil_cpu.added_costs,
+          "CPU/CUDA CEIL_2D k-opt cost matrices are exact");
+  }
+#endif
+}
+
 void TestReconnectTemplateGeneration() {
   constexpr std::array<std::size_t, 3> kExpectedCounts = {4, 25, 208};
   constexpr std::array<std::uint64_t, 3> kExpectedHashes = {
@@ -166,6 +234,29 @@ void TestImprovingWitnessAndProof() {
   Check(cudaee::VerifyKOptWitness(graph, paths, outside, required, search.witness, &reason),
         reason);
 
+  const cudaee::KOptSearchResult batched = cudaee::FindKOptWitness(
+      graph, paths, outside, required,
+      {.max_k = 3, .cost_backend = cudaee::PathCompatibilityBackend::kAuto, .cost_batch_size = 2});
+  Check(batched.status == cudaee::KOptSearchStatus::kImproved,
+        "batched cost oracle finds a CPU-verifiable witness");
+  Check(cudaee::VerifyKOptWitness(graph, paths, outside, required, batched.witness, &reason),
+        reason);
+
+#ifdef CUDAEE_HAS_CUDA
+  std::string cuda_reason;
+  if (cudaee::detail::KOptCostCudaAvailable(&cuda_reason)) {
+    const cudaee::KOptSearchResult cuda_search =
+        cudaee::FindKOptWitness(graph, paths, outside, required,
+                                {.max_k = 3,
+                                 .cost_backend = cudaee::PathCompatibilityBackend::kCuda,
+                                 .cost_batch_size = 2});
+    Check(cuda_search.status == cudaee::KOptSearchStatus::kImproved,
+          "CUDA cost oracle finds a CPU-verifiable witness");
+    Check(cudaee::VerifyKOptWitness(graph, paths, outside, required, cuda_search.witness, &reason),
+          reason);
+  }
+#endif
+
   cudaee::KOptWitness tampered = search.witness;
   ++tampered.added_cost;
   Check(!cudaee::VerifyKOptWitness(graph, paths, outside, required, tampered, &reason),
@@ -201,6 +292,11 @@ void TestNoImprovementAndBudget() {
       cudaee::FindKOptWitness(graph, paths, outside, cudaee::NodeEdge{0, 1}, {.max_k = 3});
   Check(no_improvement.status == cudaee::KOptSearchStatus::kNoImprovement,
         "optimal collinear tour has no strict 3-opt improvement");
+  const cudaee::KOptSearchResult batched_no_improvement = cudaee::FindKOptWitness(
+      graph, paths, outside, cudaee::NodeEdge{0, 1},
+      {.max_k = 3, .cost_backend = cudaee::PathCompatibilityBackend::kAuto, .cost_batch_size = 2});
+  Check(batched_no_improvement.status == cudaee::KOptSearchStatus::kNoImprovement,
+        "batched candidate oracle falls back before concluding no improvement");
 
   const cudaee::KOptSearchResult unresolved = cudaee::FindKOptWitness(
       graph, paths, outside, cudaee::NodeEdge{0, 1}, {.max_k = 3, .max_deletion_sets = 1});
@@ -253,6 +349,7 @@ void TestTwoPathCoverageProof() {
 
 int main() {
   try {
+    TestKOptCostMatrixCpuCuda();
     TestReconnectTemplateGeneration();
     TestReconnectTemplatesAgainstElimTspOracle();
     TestImprovingWitnessAndProof();

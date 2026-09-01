@@ -409,6 +409,25 @@ struct ReconnectAttempt {
   std::uint64_t matchings_tested{};
 };
 
+KOptCostTask BuildKOptCostTask(const GraphSnapshot& graph, const TourContext& context,
+                               const std::vector<std::size_t>& deleted_positions) {
+  KOptCostTask task;
+  std::vector<NodeEdge> deleted_edges;
+  deleted_edges.reserve(deleted_positions.size());
+  for (std::size_t edge = 0; edge < deleted_positions.size(); ++edge) {
+    const std::size_t position = deleted_positions[edge];
+    task.port_nodes[2U * edge] = context.tour[position];
+    task.port_nodes[2U * edge + 1U] = context.tour[(position + 1) % context.tour.size()];
+    deleted_edges.push_back(
+        CanonicalEdge(task.port_nodes[2U * edge], task.port_nodes[2U * edge + 1U]));
+  }
+  std::string reason;
+  if (!SumEdgeCosts(graph, deleted_edges, &task.deleted_cost, &reason)) {
+    throw std::runtime_error("无法构造 k-opt cost task: " + reason);
+  }
+  return task;
+}
+
 ReconnectAttempt TryReconnect(const GraphSnapshot& graph, const TourContext& context,
                               const EndpointMatching& outside,
                               const std::vector<std::size_t>& deleted_positions,
@@ -527,6 +546,60 @@ bool AddWithoutOverflow(std::uint64_t* const total, const std::uint64_t value) {
   return true;
 }
 
+void ValidateKOptCostTask(const GraphSnapshot& graph, const std::uint32_t k,
+                          const KOptCostTask& task) {
+  if (task.deleted_cost < 0) {
+    throw std::invalid_argument("k-opt cost task 的 deleted_cost 为负");
+  }
+  EdgeSet deleted_edges;
+  for (std::uint32_t edge = 0; edge < k; ++edge) {
+    const std::size_t first_port = std::size_t{2} * edge;
+    const std::int32_t first = task.port_nodes[first_port];
+    const std::int32_t second = task.port_nodes[first_port + 1];
+    if (first < 0 || second < 0 || first >= graph.dimension || second >= graph.dimension ||
+        first == second || !deleted_edges.insert(CanonicalEdge(first, second)).second) {
+      throw std::invalid_argument("k-opt cost task 包含非法或重复删除边");
+    }
+  }
+}
+
+std::int64_t ScoreKOptTemplateCpu(const GraphSnapshot& graph, const std::uint32_t k,
+                                  const KOptCostTask& task,
+                                  const EndpointMatching& reconnect_template) {
+  EdgeSet deleted_edges;
+  for (std::uint32_t edge = 0; edge < k; ++edge) {
+    const std::size_t first_port = std::size_t{2} * edge;
+    deleted_edges.insert(
+        CanonicalEdge(task.port_nodes[first_port], task.port_nodes[first_port + 1]));
+  }
+  EdgeSet added_edges;
+  for (std::uint32_t port = 0; port < reconnect_template.endpoint_count; ++port) {
+    const std::uint32_t partner = reconnect_template.mate[port];
+    if (port >= partner) {
+      continue;
+    }
+    const NodeEdge edge = CanonicalEdge(task.port_nodes[port], task.port_nodes[partner]);
+    if (edge.u == edge.v || deleted_edges.contains(edge) || !added_edges.insert(edge).second) {
+      return kInvalidKOptTemplateCost;
+    }
+  }
+  if (added_edges.size() != k) {
+    return kInvalidKOptTemplateCost;
+  }
+  __int128 total = 0;
+  for (const NodeEdge& edge : added_edges) {
+    const std::int64_t distance = graph.Distance(edge.u, edge.v);
+    if (distance < 0) {
+      return kInvalidKOptTemplateCost;
+    }
+    total += distance;
+  }
+  if (total > std::numeric_limits<std::int64_t>::max()) {
+    return kInvalidKOptTemplateCost;
+  }
+  return static_cast<std::int64_t>(total);
+}
+
 void ExpectToken(std::istream* const input, const std::string_view expected) {
   std::string token;
   if (!(*input >> token) || token != expected) {
@@ -609,6 +682,60 @@ KOptReconnectTable BuildKOptReconnectTable(const std::uint32_t k) {
   return table;
 }
 
+KOptCostBatchResult EvaluateKOptTemplateCosts(const GraphSnapshot& graph, const std::uint32_t k,
+                                              const std::vector<KOptCostTask>& tasks,
+                                              const PathCompatibilityBackend backend) {
+  if (k < 3 || k > 5) {
+    throw std::invalid_argument("k-opt cost 的 k 必须位于 [3,5]");
+  }
+  if (!graph.integer_coordinates || !graph.integer_distance_safe || graph.dimension <= 0 ||
+      graph.points.size() != static_cast<std::size_t>(graph.dimension)) {
+    throw std::invalid_argument("k-opt cost 只支持平方距离安全的整数坐标图");
+  }
+  for (const KOptCostTask& task : tasks) {
+    ValidateKOptCostTask(graph, k, task);
+  }
+  const KOptReconnectTable table = BuildKOptReconnectTable(k);
+  if (!tasks.empty() &&
+      table.templates.size() > std::numeric_limits<std::size_t>::max() / tasks.size()) {
+    throw std::overflow_error("k-opt cost 矩阵规模溢出");
+  }
+
+  bool use_cuda = backend == PathCompatibilityBackend::kCuda;
+  if (backend == PathCompatibilityBackend::kAuto) {
+    std::string reason;
+    use_cuda = detail::KOptCostCudaAvailable(&reason);
+  } else if (backend != PathCompatibilityBackend::kCpu &&
+             backend != PathCompatibilityBackend::kCuda) {
+    throw std::invalid_argument("未知 k-opt cost 后端");
+  }
+
+  KOptCostBatchResult result;
+  result.k = k;
+  result.template_count = static_cast<std::uint32_t>(table.templates.size());
+  if (use_cuda) {
+    std::string reason;
+    if (!detail::KOptCostCudaAvailable(&reason)) {
+      throw std::runtime_error("CUDA k-opt cost 后端不可用: " + reason);
+    }
+    result.added_costs =
+        detail::EvaluateKOptTemplateCostsCuda(graph, table, tasks, &result.selected_device);
+    result.backend = "cuda";
+  } else {
+    result.added_costs.reserve(tasks.size() * table.templates.size());
+    for (const KOptCostTask& task : tasks) {
+      for (const EndpointMatching& reconnect_template : table.templates) {
+        result.added_costs.push_back(ScoreKOptTemplateCpu(graph, k, task, reconnect_template));
+      }
+    }
+    result.backend = "cpu";
+  }
+  if (result.added_costs.size() != tasks.size() * table.templates.size()) {
+    throw std::logic_error("k-opt cost 后端返回矩阵规模错误");
+  }
+  return result;
+}
+
 std::uint64_t ComputePathSystemHash(const NormalizedPathSystem& paths) {
   std::uint64_t hash = 14695981039346656037ULL;
   constexpr std::string_view kDomain = "CUDAEE_NORMALIZED_PATH_SYSTEM_V1";
@@ -631,14 +758,45 @@ KOptSearchResult FindKOptWitness(const GraphSnapshot& graph, const NormalizedPat
                                  const std::optional<NodeEdge>& required_edge,
                                  const KOptSearchOptions& options) {
   KOptSearchResult result;
-  if (options.max_k < 3 || options.max_k > 5) {
-    result.reason = "max_k 必须位于 [3,5]";
+  if (options.max_k < 3 || options.max_k > 5 || options.cost_batch_size == 0) {
+    result.reason = "max_k 必须位于 [3,5] 且 cost_batch_size 必须为正数";
+    return result;
+  }
+  if (options.cost_backend != PathCompatibilityBackend::kAuto &&
+      options.cost_backend != PathCompatibilityBackend::kCpu &&
+      options.cost_backend != PathCompatibilityBackend::kCuda) {
+    result.reason = "未知 k-opt cost 后端";
     return result;
   }
   TourContext context;
   if (!BuildTourContext(graph, paths, outside, required_edge, &context, &result.reason)) {
     return result;
   }
+
+  const auto consume_attempt = [&](ReconnectAttempt attempt) {
+    if (!AddWithoutOverflow(&result.reconnect_matchings_tested, attempt.matchings_tested)) {
+      result.status = KOptSearchStatus::kUnresolved;
+      result.reason = "k-opt 重连计数溢出";
+      return true;
+    }
+    if (attempt.fatal) {
+      result.status = KOptSearchStatus::kInvalid;
+      result.reason = attempt.reason;
+      return true;
+    }
+    if (!attempt.witness.has_value()) {
+      return false;
+    }
+    result.status = KOptSearchStatus::kImproved;
+    result.reason = "找到严格改善的 k-opt witness";
+    result.witness = std::move(*attempt.witness);
+    std::string verify_reason;
+    if (!VerifyKOptWitness(graph, paths, outside, required_edge, result.witness, &verify_reason)) {
+      result.status = KOptSearchStatus::kInvalid;
+      result.reason = "内部 witness 复核失败: " + verify_reason;
+    }
+    return true;
+  };
 
   const std::size_t selectable_count = context.selectable_positions.size();
   for (std::uint32_t k = 3; k <= options.max_k && k < selectable_count; ++k) {
@@ -647,45 +805,111 @@ KOptSearchResult FindKOptWitness(const GraphSnapshot& graph, const NormalizedPat
     for (std::size_t index = 0; index < combination.size(); ++index) {
       combination[index] = index;
     }
-    do {
-      if (options.max_deletion_sets != 0 &&
-          result.deletion_sets_tested >= options.max_deletion_sets) {
+    if (options.cost_backend == PathCompatibilityBackend::kCpu) {
+      do {
+        if (options.max_deletion_sets != 0 &&
+            result.deletion_sets_tested >= options.max_deletion_sets) {
+          result.status = KOptSearchStatus::kUnresolved;
+          result.reason = "k-opt 删除集合预算耗尽";
+          return result;
+        }
+        ++result.deletion_sets_tested;
+        std::vector<std::size_t> deleted_positions;
+        deleted_positions.reserve(k);
+        for (const std::size_t selected : combination) {
+          deleted_positions.push_back(context.selectable_positions[selected]);
+        }
+        // 端口编号必须按原巡回次序，才能直接使用固定的 proper reconnect templates。
+        std::sort(deleted_positions.begin(), deleted_positions.end());
+        if (consume_attempt(TryReconnect(graph, context, outside, deleted_positions,
+                                         reconnect_table.templates))) {
+          return result;
+        }
+      } while (AdvanceCombination(&combination, selectable_count));
+      continue;
+    }
+
+    struct CostWork {
+      std::vector<std::size_t> deleted_positions;
+      KOptCostTask task;
+    };
+    bool has_combination = true;
+    while (has_combination) {
+      std::vector<CostWork> works;
+      works.reserve(options.cost_batch_size);
+      bool budget_blocked = false;
+      while (has_combination && works.size() < options.cost_batch_size) {
+        if (options.max_deletion_sets != 0 &&
+            result.deletion_sets_tested >= options.max_deletion_sets) {
+          budget_blocked = true;
+          break;
+        }
+        ++result.deletion_sets_tested;
+        CostWork work;
+        work.deleted_positions.reserve(k);
+        for (const std::size_t selected : combination) {
+          work.deleted_positions.push_back(context.selectable_positions[selected]);
+        }
+        std::sort(work.deleted_positions.begin(), work.deleted_positions.end());
+        work.task = BuildKOptCostTask(graph, context, work.deleted_positions);
+        works.push_back(std::move(work));
+        has_combination = AdvanceCombination(&combination, selectable_count);
+      }
+
+      if (!works.empty()) {
+        std::vector<KOptCostTask> tasks;
+        tasks.reserve(works.size());
+        for (const CostWork& work : works) {
+          tasks.push_back(work.task);
+        }
+        KOptCostBatchResult costs;
+        try {
+          costs = EvaluateKOptTemplateCosts(graph, k, tasks, options.cost_backend);
+        } catch (const std::exception& error) {
+          if (options.cost_backend != PathCompatibilityBackend::kAuto) {
+            result.status = KOptSearchStatus::kUnresolved;
+            result.reason = std::string("CUDA k-opt cost 失败: ") + error.what();
+            return result;
+          }
+          costs = EvaluateKOptTemplateCosts(graph, k, tasks, PathCompatibilityBackend::kCpu);
+        }
+        if (!AddWithoutOverflow(&result.reconnect_matchings_tested,
+                                static_cast<std::uint64_t>(costs.added_costs.size()))) {
+          result.status = KOptSearchStatus::kUnresolved;
+          result.reason = "k-opt cost 单元计数溢出";
+          return result;
+        }
+
+        for (std::size_t work_index = 0; work_index < works.size(); ++work_index) {
+          const std::size_t row_offset = work_index * reconnect_table.templates.size();
+          for (std::size_t template_index = 0; template_index < reconnect_table.templates.size();
+               ++template_index) {
+            if (costs.added_costs[row_offset + template_index] >=
+                works[work_index].task.deleted_cost) {
+              continue;
+            }
+            const std::vector<EndpointMatching> preferred = {
+                reconnect_table.templates[template_index]};
+            if (consume_attempt(TryReconnect(graph, context, outside,
+                                             works[work_index].deleted_positions, preferred))) {
+              return result;
+            }
+          }
+          // GPU 是候选器：任何未命中或坏候选都必须由 CPU 全模板穷举兜底。
+          if (costs.backend == "cuda" &&
+              consume_attempt(TryReconnect(graph, context, outside,
+                                           works[work_index].deleted_positions,
+                                           reconnect_table.templates))) {
+            return result;
+          }
+        }
+      }
+      if (budget_blocked) {
         result.status = KOptSearchStatus::kUnresolved;
         result.reason = "k-opt 删除集合预算耗尽";
         return result;
       }
-      ++result.deletion_sets_tested;
-      std::vector<std::size_t> deleted_positions;
-      deleted_positions.reserve(k);
-      for (const std::size_t selected : combination) {
-        deleted_positions.push_back(context.selectable_positions[selected]);
-      }
-      // 端口编号必须按原巡回次序，才能直接使用固定的 proper reconnect templates。
-      std::sort(deleted_positions.begin(), deleted_positions.end());
-      ReconnectAttempt attempt =
-          TryReconnect(graph, context, outside, deleted_positions, reconnect_table.templates);
-      if (!AddWithoutOverflow(&result.reconnect_matchings_tested, attempt.matchings_tested)) {
-        result.status = KOptSearchStatus::kUnresolved;
-        result.reason = "k-opt 重连计数溢出";
-        return result;
-      }
-      if (attempt.fatal) {
-        result.reason = attempt.reason;
-        return result;
-      }
-      if (attempt.witness.has_value()) {
-        result.status = KOptSearchStatus::kImproved;
-        result.reason = "找到严格改善的 k-opt witness";
-        result.witness = std::move(*attempt.witness);
-        std::string verify_reason;
-        if (!VerifyKOptWitness(graph, paths, outside, required_edge, result.witness,
-                               &verify_reason)) {
-          result.status = KOptSearchStatus::kInvalid;
-          result.reason = "内部 witness 复核失败: " + verify_reason;
-        }
-        return result;
-      }
-    } while (AdvanceCombination(&combination, selectable_count));
+    }
   }
   result.status = KOptSearchStatus::kNoImprovement;
   result.reason = "已穷举允许的 k-opt 重连但未找到严格改善";

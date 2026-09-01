@@ -20,7 +20,11 @@ target_compile_definitions(cudaee_kopt_unit PRIVATE
 target_compile_options(cudaee_kopt_unit PRIVATE
   -Wall -Wextra -Wconversion -Wshadow -Wformat=2)
 add_test(NAME unit.kopt COMMAND cudaee_kopt_unit)
-set_tests_properties(unit.kopt PROPERTIES LABELS "correctness;path-system")
+if(CUDAEE_ENABLE_CUDA)
+  set_tests_properties(unit.kopt PROPERTIES LABELS "correctness;path-system;gpu")
+else()
+  set_tests_properties(unit.kopt PROPERTIES LABELS "correctness;path-system")
+endif()
 
 add_executable(cudaee_path_system_unit unit/test_path_system.cpp)
 target_link_libraries(cudaee_path_system_unit PRIVATE cudaee_core)

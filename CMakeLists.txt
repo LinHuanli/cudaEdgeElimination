@@ -32,10 +32,12 @@ if(CUDAEE_ENABLE_CUDA)
   enable_language(CUDA)
   list(APPEND CUDAEE_SOURCES
       src/cuda/jv_cuda.cu
+      src/cuda/kopt_cost.cu
       src/cuda/path_compatibility.cu)
 else()
   list(APPEND CUDAEE_SOURCES
       src/cuda/jv_cuda_stub.cpp
+      src/cuda/kopt_cost_stub.cpp
       src/cuda/path_compatibility_stub.cpp)
 endif()
 

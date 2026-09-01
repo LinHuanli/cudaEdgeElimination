@@ -3,6 +3,7 @@
 #include "cuda_edge_elimination/graph.hpp"
 #include "cuda_edge_elimination/path_system.hpp"
 
+#include <array>
 #include <compare>
 #include <cstdint>
 #include <filesystem>
@@ -30,6 +31,8 @@ struct KOptSearchOptions {
   std::uint32_t max_k{5};
   // 0 表示穷举；非零预算耗尽时返回 unresolved，不能解释为“无改善”。
   std::uint64_t max_deletion_sets{};
+  PathCompatibilityBackend cost_backend{PathCompatibilityBackend::kCpu};
+  std::uint32_t cost_batch_size{4096};
 };
 
 struct KOptReconnectTable {
@@ -40,6 +43,27 @@ struct KOptReconnectTable {
 
 // 生成 proper k-opt 模板：单巡回重连，且不重新加入任一被删除的抽象边。
 [[nodiscard]] KOptReconnectTable BuildKOptReconnectTable(std::uint32_t k);
+
+constexpr std::int64_t kInvalidKOptTemplateCost = INT64_MAX;
+
+struct KOptCostTask {
+  std::array<std::int32_t, 10> port_nodes{};
+  std::int64_t deleted_cost{};
+};
+
+struct KOptCostBatchResult {
+  std::uint32_t k{};
+  std::uint32_t template_count{};
+  std::vector<std::int64_t> added_costs;
+  std::string backend;
+  int selected_device{-1};
+};
+
+// 返回 [task][template] 精确成本矩阵。它只是候选 oracle，不能用“无命中”授权证明。
+[[nodiscard]] KOptCostBatchResult EvaluateKOptTemplateCosts(const GraphSnapshot& graph,
+                                                            std::uint32_t k,
+                                                            const std::vector<KOptCostTask>& tasks,
+                                                            PathCompatibilityBackend backend);
 
 struct KOptWitness {
   std::uint32_t k{};
@@ -104,5 +128,14 @@ ProvePathSystemByKOpt(const GraphSnapshot& graph, const NormalizedPathSystem& pa
 
 void WritePathSystemKOptProof(const std::filesystem::path& path, const PathSystemKOptProof& proof);
 [[nodiscard]] PathSystemKOptProof ReadPathSystemKOptProof(const std::filesystem::path& path);
+
+namespace detail {
+
+[[nodiscard]] bool KOptCostCudaAvailable(std::string* reason);
+[[nodiscard]] std::vector<std::int64_t>
+EvaluateKOptTemplateCostsCuda(const GraphSnapshot& graph, const KOptReconnectTable& table,
+                              const std::vector<KOptCostTask>& tasks, int* selected_device);
+
+} // namespace detail
 
 } // namespace cudaee
