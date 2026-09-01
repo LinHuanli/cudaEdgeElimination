@@ -136,6 +136,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.peak_leaf_cpu_cost_threads = wavefront.peak_leaf_cpu_cost_threads;
     attempt.peak_leaf_device_cache_bytes = wavefront.peak_leaf_device_cache_bytes;
     attempt.path_append_tasks = wavefront.path_append_tasks;
+    attempt.root_child_normalizations = wavefront.root_child_normalizations;
     attempt.hamilton_reply_batches = wavefront.hamilton_reply_batches;
     attempt.hamilton_reply_centers = wavefront.hamilton_reply_centers;
     attempt.hamilton_reply_unique_centers = wavefront.hamilton_reply_unique_centers;
@@ -144,6 +145,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.end_replies_generated = wavefront.end_replies_generated;
     attempt.candidate_ms = wavefront.candidate_ms;
     attempt.work_graph_ms = wavefront.work_graph_ms;
+    attempt.root_child_normalize_ms = wavefront.root_child_normalize_ms;
     attempt.leaf_ms = wavefront.leaf_ms;
     attempt.leaf_setup_ms = wavefront.leaf_setup_ms;
     attempt.leaf_proof_initialize_ms = wavefront.leaf_proof_initialize_ms;
@@ -202,6 +204,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
         std::max(scan.peak_leaf_cpu_cost_threads, attempt.peak_leaf_cpu_cost_threads);
     scan.peak_leaf_device_cache_bytes =
         std::max(scan.peak_leaf_device_cache_bytes, attempt.peak_leaf_device_cache_bytes);
+    scan.root_child_normalizations += attempt.root_child_normalizations;
     scan.hamilton_reply_batches += attempt.hamilton_reply_batches;
     scan.hamilton_reply_centers += attempt.hamilton_reply_centers;
     scan.hamilton_reply_unique_centers += attempt.hamilton_reply_unique_centers;
@@ -209,6 +212,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.hamilton_replies_generated += attempt.hamilton_replies_generated;
     scan.candidate_ms += attempt.candidate_ms;
     scan.work_graph_ms += attempt.work_graph_ms;
+    scan.root_child_normalize_ms += attempt.root_child_normalize_ms;
     scan.leaf_ms += attempt.leaf_ms;
     scan.leaf_setup_ms += attempt.leaf_setup_ms;
     scan.leaf_proof_initialize_ms += attempt.leaf_proof_initialize_ms;

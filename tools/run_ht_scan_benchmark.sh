@@ -234,6 +234,24 @@ cpu_work_graph_ms="$(read_field "${run_dir}/cpu.report" work_graph_ms)"
 cpu_fused_work_graph_ms="$(read_field "${run_dir}/cpu-fused.report" work_graph_ms)"
 cuda_work_graph_ms="$(read_field "${run_dir}/cuda.report" work_graph_ms)"
 hybrid_work_graph_ms="$(read_field "${run_dir}/hybrid.report" work_graph_ms)"
+fused_work_graph_ms="$(read_field "${run_dir}/fused.report" work_graph_ms)"
+cpu_root_child_normalizations="$(read_field "${run_dir}/cpu.report" root_child_normalizations)"
+cpu_fused_root_child_normalizations="$(read_field "${run_dir}/cpu-fused.report" root_child_normalizations)"
+cuda_root_child_normalizations="$(read_field "${run_dir}/cuda.report" root_child_normalizations)"
+hybrid_root_child_normalizations="$(read_field "${run_dir}/hybrid.report" root_child_normalizations)"
+fused_root_child_normalizations="$(read_field "${run_dir}/fused.report" root_child_normalizations)"
+if [[ "${cpu_root_child_normalizations}" != "${cpu_fused_root_child_normalizations}" ||
+      "${cpu_root_child_normalizations}" != "${cuda_root_child_normalizations}" ||
+      "${cpu_root_child_normalizations}" != "${hybrid_root_child_normalizations}" ||
+      "${cpu_root_child_normalizations}" != "${fused_root_child_normalizations}" ]]; then
+  echo "五路根 child 规范化次数不一致" >&2
+  exit 1
+fi
+cpu_root_child_normalize_ms="$(read_field "${run_dir}/cpu.report" root_child_normalize_ms)"
+cpu_fused_root_child_normalize_ms="$(read_field "${run_dir}/cpu-fused.report" root_child_normalize_ms)"
+cuda_root_child_normalize_ms="$(read_field "${run_dir}/cuda.report" root_child_normalize_ms)"
+hybrid_root_child_normalize_ms="$(read_field "${run_dir}/hybrid.report" root_child_normalize_ms)"
+fused_root_child_normalize_ms="$(read_field "${run_dir}/fused.report" root_child_normalize_ms)"
 cpu_leaf_ms="$(read_field "${run_dir}/cpu.report" leaf_ms)"
 cpu_fused_leaf_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_ms)"
 cuda_leaf_ms="$(read_field "${run_dir}/cuda.report" leaf_ms)"
@@ -512,6 +530,7 @@ cpu_end_reply_ms="$(read_field "${run_dir}/cpu.report" end_reply_ms)"
 cpu_fused_end_reply_ms="$(read_field "${run_dir}/cpu-fused.report" end_reply_ms)"
 cuda_end_reply_ms="$(read_field "${run_dir}/cuda.report" end_reply_ms)"
 hybrid_end_reply_ms="$(read_field "${run_dir}/hybrid.report" end_reply_ms)"
+fused_end_reply_ms="$(read_field "${run_dir}/fused.report" end_reply_ms)"
 cpu_propagation_ms="$(read_field "${run_dir}/cpu.report" propagation_ms)"
 cuda_propagation_ms="$(read_field "${run_dir}/cuda.report" propagation_ms)"
 hybrid_propagation_ms="$(read_field "${run_dir}/hybrid.report" propagation_ms)"
@@ -690,6 +709,19 @@ cuda_host_build_ms="$(awk -v work="${cuda_work_graph_ms}" -v leaf="${cuda_leaf_m
 hybrid_host_build_ms="$(awk -v work="${hybrid_work_graph_ms}" -v leaf="${hybrid_leaf_ms}" \
   -v path="${hybrid_path_append_ms}" -v hamilton="${hybrid_hamilton_reply_ms}" \
   -v end="${hybrid_end_reply_ms}" 'BEGIN { printf "%.6f", work-leaf-path-hamilton-end }')"
+fused_host_build_ms="$(awk -v work="${fused_work_graph_ms}" -v leaf="${fused_leaf_ms}" \
+  -v path="${fused_path_append_ms}" -v hamilton="${fused_hamilton_reply_ms}" \
+  -v end="${fused_end_reply_ms}" 'BEGIN { printf "%.6f", work-leaf-path-hamilton-end }')"
+cpu_host_build_unprofiled_ms="$(awk -v total="${cpu_host_build_ms}" \
+  -v root="${cpu_root_child_normalize_ms}" 'BEGIN { printf "%.6f", total-root }')"
+cpu_fused_host_build_unprofiled_ms="$(awk -v total="${cpu_fused_host_build_ms}" \
+  -v root="${cpu_fused_root_child_normalize_ms}" 'BEGIN { printf "%.6f", total-root }')"
+cuda_host_build_unprofiled_ms="$(awk -v total="${cuda_host_build_ms}" \
+  -v root="${cuda_root_child_normalize_ms}" 'BEGIN { printf "%.6f", total-root }')"
+hybrid_host_build_unprofiled_ms="$(awk -v total="${hybrid_host_build_ms}" \
+  -v root="${hybrid_root_child_normalize_ms}" 'BEGIN { printf "%.6f", total-root }')"
+fused_host_build_unprofiled_ms="$(awk -v total="${fused_host_build_ms}" \
+  -v root="${fused_root_child_normalize_ms}" 'BEGIN { printf "%.6f", total-root }')"
 
 manifest="${run_dir}/run-manifest-v1"
 {
@@ -743,7 +775,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V13"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V14"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -762,10 +794,23 @@ summary="${run_dir}/summary.txt"
   echo "cpu_fused_work_graph_ms ${cpu_fused_work_graph_ms}"
   echo "cuda_work_graph_ms ${cuda_work_graph_ms}"
   echo "hybrid_work_graph_ms ${hybrid_work_graph_ms}"
+  echo "fused_work_graph_ms ${fused_work_graph_ms}"
   echo "cpu_host_build_residual_ms ${cpu_host_build_ms}"
   echo "cpu_fused_host_build_residual_ms ${cpu_fused_host_build_ms}"
   echo "cuda_host_build_residual_ms ${cuda_host_build_ms}"
   echo "hybrid_host_build_residual_ms ${hybrid_host_build_ms}"
+  echo "fused_host_build_residual_ms ${fused_host_build_ms}"
+  echo "root_child_normalizations ${cpu_root_child_normalizations}"
+  echo "cpu_root_child_normalize_ms ${cpu_root_child_normalize_ms}"
+  echo "cpu_fused_root_child_normalize_ms ${cpu_fused_root_child_normalize_ms}"
+  echo "cuda_root_child_normalize_ms ${cuda_root_child_normalize_ms}"
+  echo "hybrid_root_child_normalize_ms ${hybrid_root_child_normalize_ms}"
+  echo "fused_root_child_normalize_ms ${fused_root_child_normalize_ms}"
+  echo "cpu_host_build_unprofiled_ms ${cpu_host_build_unprofiled_ms}"
+  echo "cpu_fused_host_build_unprofiled_ms ${cpu_fused_host_build_unprofiled_ms}"
+  echo "cuda_host_build_unprofiled_ms ${cuda_host_build_unprofiled_ms}"
+  echo "hybrid_host_build_unprofiled_ms ${hybrid_host_build_unprofiled_ms}"
+  echo "fused_host_build_unprofiled_ms ${fused_host_build_unprofiled_ms}"
   echo "cpu_leaf_ms ${cpu_leaf_ms}"
   echo "cpu_fused_leaf_ms ${cpu_fused_leaf_ms}"
   echo "cuda_leaf_ms ${cuda_leaf_ms}"
@@ -956,6 +1001,7 @@ summary="${run_dir}/summary.txt"
   echo "cpu_fused_end_reply_ms ${cpu_fused_end_reply_ms}"
   echo "cuda_end_reply_ms ${cuda_end_reply_ms}"
   echo "hybrid_end_reply_ms ${hybrid_end_reply_ms}"
+  echo "fused_end_reply_ms ${fused_end_reply_ms}"
   echo "cpu_propagation_ms ${cpu_propagation_ms}"
   echo "cuda_propagation_ms ${cuda_propagation_ms}"
   echo "hybrid_propagation_ms ${hybrid_propagation_ms}"

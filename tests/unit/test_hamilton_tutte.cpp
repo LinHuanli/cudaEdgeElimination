@@ -634,6 +634,8 @@ void TestRecursivePointProof() {
   Check(wavefront.status == cudaee::HtSearchStatus::kProven, wavefront.proof.reason);
   Check(wavefront.moves_generated > 0U && wavefront.peak_frontier > 0U,
         "wavefront records generated moves and frontier width");
+  Check(wavefront.root_child_normalizations > 0U && wavefront.root_child_normalize_ms > 0.0,
+        "wavefront records dense root-child normalization work");
   Check(wavefront.path_append_backend == "cpu" && wavefront.path_append_cpu_verified &&
             !wavefront.path_append_device_children_verified && wavefront.path_append_batches > 0U &&
             wavefront.path_append_tasks > 0U && wavefront.path_append_child_edges > 0U &&
@@ -735,9 +737,9 @@ void TestRecursivePointProof() {
             scan.moves_generated > 0U && scan.search_ms >= 0.0,
         "HT scan deterministically searches the requested bounded slice");
   const cudaee::HtScanAttempt& timed_attempt = scan.attempts.front();
-  const double measured_build_subphases = timed_attempt.leaf_ms + timed_attempt.path_append_ms +
-                                          timed_attempt.hamilton_reply_ms +
-                                          timed_attempt.end_reply_ms;
+  const double measured_build_subphases =
+      timed_attempt.root_child_normalize_ms + timed_attempt.leaf_ms + timed_attempt.path_append_ms +
+      timed_attempt.hamilton_reply_ms + timed_attempt.end_reply_ms;
   const double measured_leaf_subphases =
       timed_attempt.leaf_setup_ms + timed_attempt.leaf_cursor_prepare_ms +
       timed_attempt.leaf_cost_evaluate_ms + timed_attempt.leaf_cost_scatter_ms +
@@ -778,6 +780,8 @@ void TestRecursivePointProof() {
             scan.path_append_parent_prepare_ms == timed_attempt.path_append_parent_prepare_ms &&
             scan.path_append_child_normalize_ms == timed_attempt.path_append_child_normalize_ms &&
             scan.path_append_child_edges_ms == timed_attempt.path_append_child_edges_ms &&
+            scan.root_child_normalizations == timed_attempt.root_child_normalizations &&
+            scan.root_child_normalize_ms == timed_attempt.root_child_normalize_ms &&
             scan.hamilton_reply_batches == timed_attempt.hamilton_reply_batches &&
             scan.hamilton_reply_centers == timed_attempt.hamilton_reply_centers &&
             scan.hamilton_reply_unique_centers == timed_attempt.hamilton_reply_unique_centers &&

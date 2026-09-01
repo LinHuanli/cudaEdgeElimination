@@ -108,6 +108,7 @@ struct HtScanAttempt {
   std::uint32_t peak_leaf_cpu_cost_threads{1U};
   std::uint64_t peak_leaf_device_cache_bytes{};
   std::uint64_t path_append_tasks{};
+  std::uint64_t root_child_normalizations{};
   std::uint64_t hamilton_reply_batches{};
   std::uint64_t hamilton_reply_centers{};
   std::uint64_t hamilton_reply_unique_centers{};
@@ -116,6 +117,7 @@ struct HtScanAttempt {
   std::uint64_t end_replies_generated{};
   double candidate_ms{};
   double work_graph_ms{};
+  double root_child_normalize_ms{};
   double leaf_ms{};
   double leaf_setup_ms{};
   double leaf_proof_initialize_ms{};
@@ -180,6 +182,7 @@ struct HtScanResult {
   std::uint64_t leaf_cpu_parallel_cost_cells{};
   std::uint32_t peak_leaf_cpu_cost_threads{1U};
   std::uint64_t peak_leaf_device_cache_bytes{};
+  std::uint64_t root_child_normalizations{};
   std::uint64_t hamilton_reply_batches{};
   std::uint64_t hamilton_reply_centers{};
   std::uint64_t hamilton_reply_unique_centers{};
@@ -188,6 +191,7 @@ struct HtScanResult {
   double target_selection_ms{};
   double candidate_ms{};
   double work_graph_ms{};
+  double root_child_normalize_ms{};
   double leaf_ms{};
   double leaf_setup_ms{};
   double leaf_proof_initialize_ms{};

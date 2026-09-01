@@ -530,6 +530,7 @@ bool HtProveCommand(const Arguments& arguments) {
   std::uint64_t path_append_batches = 0;
   std::uint64_t path_append_tasks = 0;
   std::uint64_t path_append_child_edges = 0;
+  std::uint64_t root_child_normalizations = 0;
   std::string leaf_cost_backend = "none";
   int leaf_cost_selected_device = -1;
   bool leaf_cpu_verified = false;
@@ -577,6 +578,7 @@ bool HtProveCommand(const Arguments& arguments) {
   std::uint64_t peak_frontier = 0;
   double candidate_ms = 0.0;
   double work_graph_ms = 0.0;
+  double root_child_normalize_ms = 0.0;
   double leaf_ms = 0.0;
   double leaf_setup_ms = 0.0;
   double leaf_proof_initialize_ms = 0.0;
@@ -633,6 +635,7 @@ bool HtProveCommand(const Arguments& arguments) {
     path_append_batches = result.path_append_batches;
     path_append_tasks = result.path_append_tasks;
     path_append_child_edges = result.path_append_child_edges;
+    root_child_normalizations = result.root_child_normalizations;
     leaf_cost_backend = std::move(result.leaf_cost_backend);
     leaf_cost_selected_device = result.leaf_cost_selected_device;
     leaf_cpu_verified = result.leaf_cpu_verified;
@@ -679,6 +682,7 @@ bool HtProveCommand(const Arguments& arguments) {
     peak_frontier = result.peak_frontier;
     candidate_ms = result.candidate_ms;
     work_graph_ms = result.work_graph_ms;
+    root_child_normalize_ms = result.root_child_normalize_ms;
     leaf_ms = result.leaf_ms;
     leaf_setup_ms = result.leaf_setup_ms;
     leaf_proof_initialize_ms = result.leaf_proof_initialize_ms;
@@ -729,6 +733,7 @@ bool HtProveCommand(const Arguments& arguments) {
               << " path_append_batches=" << path_append_batches
               << " path_append_tasks=" << path_append_tasks
               << " path_append_child_edges=" << path_append_child_edges
+              << " root_child_normalizations=" << root_child_normalizations
               << " path_append_cpu_verified=" << (path_append_cpu_verified ? 1 : 0)
               << " path_append_device_children_verified="
               << (path_append_device_children_verified ? 1 : 0)
@@ -778,7 +783,8 @@ bool HtProveCommand(const Arguments& arguments) {
               << " reply_frontier_states=" << reply_frontier_states
               << " peak_reply_frontier_batch=" << peak_reply_frontier_batch
               << " candidate_ms=" << candidate_ms << " work_graph_ms=" << work_graph_ms
-              << " leaf_ms=" << leaf_ms << " leaf_setup_ms=" << leaf_setup_ms
+              << " root_child_normalize_ms=" << root_child_normalize_ms << " leaf_ms=" << leaf_ms
+              << " leaf_setup_ms=" << leaf_setup_ms
               << " leaf_proof_initialize_ms=" << leaf_proof_initialize_ms
               << " leaf_coverage_scan_ms=" << leaf_coverage_scan_ms
               << " leaf_cursor_construct_ms=" << leaf_cursor_construct_ms
@@ -830,7 +836,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V10\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V11\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
@@ -866,6 +872,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "leaf_cpu_parallel_cost_cells " << scan.leaf_cpu_parallel_cost_cells << '\n';
   output << "peak_leaf_cpu_cost_threads " << scan.peak_leaf_cpu_cost_threads << '\n';
   output << "peak_leaf_device_cache_bytes " << scan.peak_leaf_device_cache_bytes << '\n';
+  output << "root_child_normalizations " << scan.root_child_normalizations << '\n';
   output << "hamilton_reply_batches " << scan.hamilton_reply_batches << '\n';
   output << "hamilton_reply_centers " << scan.hamilton_reply_centers << '\n';
   output << "hamilton_reply_unique_centers " << scan.hamilton_reply_unique_centers << '\n';
@@ -881,6 +888,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "target_selection_ms " << scan.target_selection_ms << '\n';
   output << "candidate_ms " << scan.candidate_ms << '\n';
   output << "work_graph_ms " << scan.work_graph_ms << '\n';
+  output << "root_child_normalize_ms " << scan.root_child_normalize_ms << '\n';
   output << "leaf_ms " << scan.leaf_ms << '\n';
   output << "leaf_setup_ms " << scan.leaf_setup_ms << '\n';
   output << "leaf_proof_initialize_ms " << scan.leaf_proof_initialize_ms << '\n';
@@ -923,10 +931,10 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
             "leaf_cpu_long_tail_cells leaf_cost_rows leaf_candidate_rechecks "
             "leaf_completeness_rows leaf_completeness_templates leaf_cpu_certified_cells "
             "leaf_cpu_parallel_batches leaf_cpu_parallel_cells peak_leaf_cpu_threads "
-            "peak_leaf_cache_bytes "
-            "path_append_tasks hamilton_reply_batches hamilton_reply_centers "
+            "peak_leaf_cache_bytes path_append_tasks root_child_normalizations "
+            "hamilton_reply_batches hamilton_reply_centers "
             "hamilton_reply_unique_centers hamilton_reply_neighbor_pairs hamilton_replies "
-            "end_replies candidate_ms work_graph_ms leaf_ms leaf_setup_ms "
+            "end_replies candidate_ms work_graph_ms root_child_normalize_ms leaf_ms leaf_setup_ms "
             "leaf_proof_initialize_ms leaf_coverage_scan_ms leaf_cursor_construct_ms "
             "leaf_cursor_prepare_ms leaf_cost_evaluate_ms leaf_cost_cpu_certify_ms "
             "leaf_cost_scatter_ms "
@@ -961,11 +969,12 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << attempt.leaf_cpu_parallel_cost_batches << ' ' << attempt.leaf_cpu_parallel_cost_cells
            << ' ' << attempt.peak_leaf_cpu_cost_threads << ' '
            << attempt.peak_leaf_device_cache_bytes << ' ' << attempt.path_append_tasks << ' '
-           << attempt.hamilton_reply_batches << ' ' << attempt.hamilton_reply_centers << ' '
-           << attempt.hamilton_reply_unique_centers << ' '
+           << attempt.root_child_normalizations << ' ' << attempt.hamilton_reply_batches << ' '
+           << attempt.hamilton_reply_centers << ' ' << attempt.hamilton_reply_unique_centers << ' '
            << attempt.hamilton_reply_neighbor_pairs_tested << ' '
            << attempt.hamilton_replies_generated << ' ' << attempt.end_replies_generated << ' '
-           << attempt.candidate_ms << ' ' << attempt.work_graph_ms << ' ' << attempt.leaf_ms << ' '
+           << attempt.candidate_ms << ' ' << attempt.work_graph_ms << ' '
+           << attempt.root_child_normalize_ms << ' ' << attempt.leaf_ms << ' '
            << attempt.leaf_setup_ms << ' ' << attempt.leaf_proof_initialize_ms << ' '
            << attempt.leaf_coverage_scan_ms << ' ' << attempt.leaf_cursor_construct_ms << ' '
            << attempt.leaf_cursor_prepare_ms << ' ' << attempt.leaf_cost_evaluate_ms << ' '

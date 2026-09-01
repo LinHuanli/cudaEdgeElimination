@@ -645,8 +645,15 @@ bool AppendChild(WaveBuildContext* const context, const NormalizedPathSystem& pa
                  const std::vector<Path>& additions, const std::uint32_t child_depth,
                  const std::uint64_t incoming_reply_count, HtTreeReply* const reply,
                  std::vector<WaveState>* const states) {
-  return AppendNormalizedChild(context, AddPaths(parent, additions, context->graph->dimension),
-                               child_depth, incoming_reply_count, reply, states);
+  if (context->result->root_child_normalizations == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("HT 根 child 规范化计数溢出");
+  }
+  const auto normalize_begin = SteadyClock::now();
+  NormalizedPathSystem child = AddPaths(parent, additions, context->graph->dimension);
+  context->result->root_child_normalize_ms += ElapsedMilliseconds(normalize_begin);
+  ++context->result->root_child_normalizations;
+  return AppendNormalizedChild(context, std::move(child), child_depth, incoming_reply_count, reply,
+                               states);
 }
 
 bool RecordMove(WaveBuildContext* const context, const std::uint32_t state_index, WaveMove move,
