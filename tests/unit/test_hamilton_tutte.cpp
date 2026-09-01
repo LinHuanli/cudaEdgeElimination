@@ -636,6 +636,12 @@ void TestRecursivePointProof() {
         "wavefront records generated moves and frontier width");
   Check(wavefront.root_child_normalizations > 0U && wavefront.root_child_normalize_ms > 0.0,
         "wavefront records dense root-child normalization work");
+  Check(wavefront.point_candidate_scans > 0U &&
+            wavefront.point_candidate_nodes_checked == 8U * wavefront.point_candidate_scans &&
+            wavefront.point_candidate_nodes_ranked >= wavefront.point_candidate_nodes_selected &&
+            wavefront.point_candidate_nodes_selected > 0U &&
+            wavefront.point_candidate_scan_ms > 0.0 && wavefront.point_candidate_sort_ms > 0.0,
+        "wavefront records deterministic full-dimension point-candidate selection work");
   Check(wavefront.path_append_backend == "cpu" && wavefront.path_append_cpu_verified &&
             !wavefront.path_append_device_children_verified && wavefront.path_append_batches > 0U &&
             wavefront.path_append_tasks > 0U && wavefront.path_append_child_edges > 0U &&
@@ -738,7 +744,8 @@ void TestRecursivePointProof() {
         "HT scan deterministically searches the requested bounded slice");
   const cudaee::HtScanAttempt& timed_attempt = scan.attempts.front();
   const double measured_build_subphases =
-      timed_attempt.root_child_normalize_ms + timed_attempt.leaf_ms + timed_attempt.path_append_ms +
+      timed_attempt.root_child_normalize_ms + timed_attempt.point_candidate_scan_ms +
+      timed_attempt.point_candidate_sort_ms + timed_attempt.leaf_ms + timed_attempt.path_append_ms +
       timed_attempt.hamilton_reply_ms + timed_attempt.end_reply_ms;
   const double measured_leaf_subphases =
       timed_attempt.leaf_setup_ms + timed_attempt.leaf_cursor_prepare_ms +
@@ -782,6 +789,12 @@ void TestRecursivePointProof() {
             scan.path_append_child_edges_ms == timed_attempt.path_append_child_edges_ms &&
             scan.root_child_normalizations == timed_attempt.root_child_normalizations &&
             scan.root_child_normalize_ms == timed_attempt.root_child_normalize_ms &&
+            scan.point_candidate_scans == timed_attempt.point_candidate_scans &&
+            scan.point_candidate_nodes_checked == timed_attempt.point_candidate_nodes_checked &&
+            scan.point_candidate_nodes_ranked == timed_attempt.point_candidate_nodes_ranked &&
+            scan.point_candidate_nodes_selected == timed_attempt.point_candidate_nodes_selected &&
+            scan.point_candidate_scan_ms == timed_attempt.point_candidate_scan_ms &&
+            scan.point_candidate_sort_ms == timed_attempt.point_candidate_sort_ms &&
             scan.hamilton_reply_batches == timed_attempt.hamilton_reply_batches &&
             scan.hamilton_reply_centers == timed_attempt.hamilton_reply_centers &&
             scan.hamilton_reply_unique_centers == timed_attempt.hamilton_reply_unique_centers &&

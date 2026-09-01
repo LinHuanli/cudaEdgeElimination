@@ -252,6 +252,55 @@ cpu_fused_root_child_normalize_ms="$(read_field "${run_dir}/cpu-fused.report" ro
 cuda_root_child_normalize_ms="$(read_field "${run_dir}/cuda.report" root_child_normalize_ms)"
 hybrid_root_child_normalize_ms="$(read_field "${run_dir}/hybrid.report" root_child_normalize_ms)"
 fused_root_child_normalize_ms="$(read_field "${run_dir}/fused.report" root_child_normalize_ms)"
+cpu_point_candidate_scans="$(read_field "${run_dir}/cpu.report" point_candidate_scans)"
+cpu_fused_point_candidate_scans="$(read_field "${run_dir}/cpu-fused.report" point_candidate_scans)"
+cuda_point_candidate_scans="$(read_field "${run_dir}/cuda.report" point_candidate_scans)"
+hybrid_point_candidate_scans="$(read_field "${run_dir}/hybrid.report" point_candidate_scans)"
+fused_point_candidate_scans="$(read_field "${run_dir}/fused.report" point_candidate_scans)"
+cpu_point_candidate_nodes_checked="$(read_field "${run_dir}/cpu.report" point_candidate_nodes_checked)"
+cpu_fused_point_candidate_nodes_checked="$(read_field "${run_dir}/cpu-fused.report" point_candidate_nodes_checked)"
+cuda_point_candidate_nodes_checked="$(read_field "${run_dir}/cuda.report" point_candidate_nodes_checked)"
+hybrid_point_candidate_nodes_checked="$(read_field "${run_dir}/hybrid.report" point_candidate_nodes_checked)"
+fused_point_candidate_nodes_checked="$(read_field "${run_dir}/fused.report" point_candidate_nodes_checked)"
+cpu_point_candidate_nodes_ranked="$(read_field "${run_dir}/cpu.report" point_candidate_nodes_ranked)"
+cpu_fused_point_candidate_nodes_ranked="$(read_field "${run_dir}/cpu-fused.report" point_candidate_nodes_ranked)"
+cuda_point_candidate_nodes_ranked="$(read_field "${run_dir}/cuda.report" point_candidate_nodes_ranked)"
+hybrid_point_candidate_nodes_ranked="$(read_field "${run_dir}/hybrid.report" point_candidate_nodes_ranked)"
+fused_point_candidate_nodes_ranked="$(read_field "${run_dir}/fused.report" point_candidate_nodes_ranked)"
+cpu_point_candidate_nodes_selected="$(read_field "${run_dir}/cpu.report" point_candidate_nodes_selected)"
+cpu_fused_point_candidate_nodes_selected="$(read_field "${run_dir}/cpu-fused.report" point_candidate_nodes_selected)"
+cuda_point_candidate_nodes_selected="$(read_field "${run_dir}/cuda.report" point_candidate_nodes_selected)"
+hybrid_point_candidate_nodes_selected="$(read_field "${run_dir}/hybrid.report" point_candidate_nodes_selected)"
+fused_point_candidate_nodes_selected="$(read_field "${run_dir}/fused.report" point_candidate_nodes_selected)"
+if [[ "${cpu_point_candidate_scans}" != "${cpu_fused_point_candidate_scans}" ||
+      "${cpu_point_candidate_scans}" != "${cuda_point_candidate_scans}" ||
+      "${cpu_point_candidate_scans}" != "${hybrid_point_candidate_scans}" ||
+      "${cpu_point_candidate_scans}" != "${fused_point_candidate_scans}" ||
+      "${cpu_point_candidate_nodes_checked}" != "${cpu_fused_point_candidate_nodes_checked}" ||
+      "${cpu_point_candidate_nodes_checked}" != "${cuda_point_candidate_nodes_checked}" ||
+      "${cpu_point_candidate_nodes_checked}" != "${hybrid_point_candidate_nodes_checked}" ||
+      "${cpu_point_candidate_nodes_checked}" != "${fused_point_candidate_nodes_checked}" ||
+      "${cpu_point_candidate_nodes_ranked}" != "${cpu_fused_point_candidate_nodes_ranked}" ||
+      "${cpu_point_candidate_nodes_ranked}" != "${cuda_point_candidate_nodes_ranked}" ||
+      "${cpu_point_candidate_nodes_ranked}" != "${hybrid_point_candidate_nodes_ranked}" ||
+      "${cpu_point_candidate_nodes_ranked}" != "${fused_point_candidate_nodes_ranked}" ||
+      "${cpu_point_candidate_nodes_selected}" != "${cpu_fused_point_candidate_nodes_selected}" ||
+      "${cpu_point_candidate_nodes_selected}" != "${cuda_point_candidate_nodes_selected}" ||
+      "${cpu_point_candidate_nodes_selected}" != "${hybrid_point_candidate_nodes_selected}" ||
+      "${cpu_point_candidate_nodes_selected}" != "${fused_point_candidate_nodes_selected}" ]]; then
+  echo "五路 point candidate 的规范工作计数不一致" >&2
+  exit 1
+fi
+cpu_point_candidate_scan_ms="$(read_field "${run_dir}/cpu.report" point_candidate_scan_ms)"
+cpu_fused_point_candidate_scan_ms="$(read_field "${run_dir}/cpu-fused.report" point_candidate_scan_ms)"
+cuda_point_candidate_scan_ms="$(read_field "${run_dir}/cuda.report" point_candidate_scan_ms)"
+hybrid_point_candidate_scan_ms="$(read_field "${run_dir}/hybrid.report" point_candidate_scan_ms)"
+fused_point_candidate_scan_ms="$(read_field "${run_dir}/fused.report" point_candidate_scan_ms)"
+cpu_point_candidate_sort_ms="$(read_field "${run_dir}/cpu.report" point_candidate_sort_ms)"
+cpu_fused_point_candidate_sort_ms="$(read_field "${run_dir}/cpu-fused.report" point_candidate_sort_ms)"
+cuda_point_candidate_sort_ms="$(read_field "${run_dir}/cuda.report" point_candidate_sort_ms)"
+hybrid_point_candidate_sort_ms="$(read_field "${run_dir}/hybrid.report" point_candidate_sort_ms)"
+fused_point_candidate_sort_ms="$(read_field "${run_dir}/fused.report" point_candidate_sort_ms)"
 cpu_leaf_ms="$(read_field "${run_dir}/cpu.report" leaf_ms)"
 cpu_fused_leaf_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_ms)"
 cuda_leaf_ms="$(read_field "${run_dir}/cuda.report" leaf_ms)"
@@ -713,15 +762,26 @@ fused_host_build_ms="$(awk -v work="${fused_work_graph_ms}" -v leaf="${fused_lea
   -v path="${fused_path_append_ms}" -v hamilton="${fused_hamilton_reply_ms}" \
   -v end="${fused_end_reply_ms}" 'BEGIN { printf "%.6f", work-leaf-path-hamilton-end }')"
 cpu_host_build_unprofiled_ms="$(awk -v total="${cpu_host_build_ms}" \
-  -v root="${cpu_root_child_normalize_ms}" 'BEGIN { printf "%.6f", total-root }')"
+  -v root="${cpu_root_child_normalize_ms}" -v scan="${cpu_point_candidate_scan_ms}" \
+  -v sort="${cpu_point_candidate_sort_ms}" \
+  'BEGIN { printf "%.6f", total-root-scan-sort }')"
 cpu_fused_host_build_unprofiled_ms="$(awk -v total="${cpu_fused_host_build_ms}" \
-  -v root="${cpu_fused_root_child_normalize_ms}" 'BEGIN { printf "%.6f", total-root }')"
+  -v root="${cpu_fused_root_child_normalize_ms}" \
+  -v scan="${cpu_fused_point_candidate_scan_ms}" \
+  -v sort="${cpu_fused_point_candidate_sort_ms}" \
+  'BEGIN { printf "%.6f", total-root-scan-sort }')"
 cuda_host_build_unprofiled_ms="$(awk -v total="${cuda_host_build_ms}" \
-  -v root="${cuda_root_child_normalize_ms}" 'BEGIN { printf "%.6f", total-root }')"
+  -v root="${cuda_root_child_normalize_ms}" -v scan="${cuda_point_candidate_scan_ms}" \
+  -v sort="${cuda_point_candidate_sort_ms}" \
+  'BEGIN { printf "%.6f", total-root-scan-sort }')"
 hybrid_host_build_unprofiled_ms="$(awk -v total="${hybrid_host_build_ms}" \
-  -v root="${hybrid_root_child_normalize_ms}" 'BEGIN { printf "%.6f", total-root }')"
+  -v root="${hybrid_root_child_normalize_ms}" -v scan="${hybrid_point_candidate_scan_ms}" \
+  -v sort="${hybrid_point_candidate_sort_ms}" \
+  'BEGIN { printf "%.6f", total-root-scan-sort }')"
 fused_host_build_unprofiled_ms="$(awk -v total="${fused_host_build_ms}" \
-  -v root="${fused_root_child_normalize_ms}" 'BEGIN { printf "%.6f", total-root }')"
+  -v root="${fused_root_child_normalize_ms}" -v scan="${fused_point_candidate_scan_ms}" \
+  -v sort="${fused_point_candidate_sort_ms}" \
+  'BEGIN { printf "%.6f", total-root-scan-sort }')"
 
 manifest="${run_dir}/run-manifest-v1"
 {
@@ -775,7 +835,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V14"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V15"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -806,6 +866,20 @@ summary="${run_dir}/summary.txt"
   echo "cuda_root_child_normalize_ms ${cuda_root_child_normalize_ms}"
   echo "hybrid_root_child_normalize_ms ${hybrid_root_child_normalize_ms}"
   echo "fused_root_child_normalize_ms ${fused_root_child_normalize_ms}"
+  echo "point_candidate_scans ${cpu_point_candidate_scans}"
+  echo "point_candidate_nodes_checked ${cpu_point_candidate_nodes_checked}"
+  echo "point_candidate_nodes_ranked ${cpu_point_candidate_nodes_ranked}"
+  echo "point_candidate_nodes_selected ${cpu_point_candidate_nodes_selected}"
+  echo "cpu_point_candidate_scan_ms ${cpu_point_candidate_scan_ms}"
+  echo "cpu_fused_point_candidate_scan_ms ${cpu_fused_point_candidate_scan_ms}"
+  echo "cuda_point_candidate_scan_ms ${cuda_point_candidate_scan_ms}"
+  echo "hybrid_point_candidate_scan_ms ${hybrid_point_candidate_scan_ms}"
+  echo "fused_point_candidate_scan_ms ${fused_point_candidate_scan_ms}"
+  echo "cpu_point_candidate_sort_ms ${cpu_point_candidate_sort_ms}"
+  echo "cpu_fused_point_candidate_sort_ms ${cpu_fused_point_candidate_sort_ms}"
+  echo "cuda_point_candidate_sort_ms ${cuda_point_candidate_sort_ms}"
+  echo "hybrid_point_candidate_sort_ms ${hybrid_point_candidate_sort_ms}"
+  echo "fused_point_candidate_sort_ms ${fused_point_candidate_sort_ms}"
   echo "cpu_host_build_unprofiled_ms ${cpu_host_build_unprofiled_ms}"
   echo "cpu_fused_host_build_unprofiled_ms ${cpu_fused_host_build_unprofiled_ms}"
   echo "cuda_host_build_unprofiled_ms ${cuda_host_build_unprofiled_ms}"

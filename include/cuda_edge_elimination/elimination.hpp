@@ -109,6 +109,10 @@ struct HtScanAttempt {
   std::uint64_t peak_leaf_device_cache_bytes{};
   std::uint64_t path_append_tasks{};
   std::uint64_t root_child_normalizations{};
+  std::uint64_t point_candidate_scans{};
+  std::uint64_t point_candidate_nodes_checked{};
+  std::uint64_t point_candidate_nodes_ranked{};
+  std::uint64_t point_candidate_nodes_selected{};
   std::uint64_t hamilton_reply_batches{};
   std::uint64_t hamilton_reply_centers{};
   std::uint64_t hamilton_reply_unique_centers{};
@@ -118,6 +122,8 @@ struct HtScanAttempt {
   double candidate_ms{};
   double work_graph_ms{};
   double root_child_normalize_ms{};
+  double point_candidate_scan_ms{};
+  double point_candidate_sort_ms{};
   double leaf_ms{};
   double leaf_setup_ms{};
   double leaf_proof_initialize_ms{};
@@ -183,6 +189,10 @@ struct HtScanResult {
   std::uint32_t peak_leaf_cpu_cost_threads{1U};
   std::uint64_t peak_leaf_device_cache_bytes{};
   std::uint64_t root_child_normalizations{};
+  std::uint64_t point_candidate_scans{};
+  std::uint64_t point_candidate_nodes_checked{};
+  std::uint64_t point_candidate_nodes_ranked{};
+  std::uint64_t point_candidate_nodes_selected{};
   std::uint64_t hamilton_reply_batches{};
   std::uint64_t hamilton_reply_centers{};
   std::uint64_t hamilton_reply_unique_centers{};
@@ -192,6 +202,8 @@ struct HtScanResult {
   double candidate_ms{};
   double work_graph_ms{};
   double root_child_normalize_ms{};
+  double point_candidate_scan_ms{};
+  double point_candidate_sort_ms{};
   double leaf_ms{};
   double leaf_setup_ms{};
   double leaf_proof_initialize_ms{};

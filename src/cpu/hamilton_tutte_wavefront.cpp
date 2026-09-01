@@ -86,15 +86,24 @@ struct PreparedFrontierChunk {
   HtPathAppendBatchResult end_appends;
 };
 
-std::vector<std::int32_t> BuildPointCandidateNodes(const GraphSnapshot& graph,
-                                                   const NodeEdge target,
-                                                   const NormalizedPathSystem& state,
-                                                   const HtRecursiveOptions& options) {
+struct PointCandidateSelection {
+  std::vector<std::int32_t> nodes;
+  std::uint64_t nodes_checked{};
+  std::uint64_t nodes_ranked{};
+  double scan_ms{};
+  double sort_ms{};
+};
+
+PointCandidateSelection BuildPointCandidateNodes(const GraphSnapshot& graph, const NodeEdge target,
+                                                 const NormalizedPathSystem& state,
+                                                 const HtRecursiveOptions& options) {
   struct RankedNode {
     std::int32_t node{};
     __int128 midpoint_score{};
   };
+  PointCandidateSelection selection;
   std::vector<RankedNode> neighborhood;
+  const auto scan_begin = SteadyClock::now();
   for (std::int32_t node = 0; node < graph.dimension; ++node) {
     if (node == target.u || node == target.v || ContainsNode(state, node) ||
         (options.root_options.max_candidate_degree != 0U &&
@@ -112,6 +121,11 @@ std::vector<std::int32_t> BuildPointCandidateNodes(const GraphSnapshot& graph,
         graph.points[static_cast<std::size_t>(target.v)].integer_y;
     neighborhood.push_back({node, dx * dx + dy * dy});
   }
+  selection.scan_ms = ElapsedMilliseconds(scan_begin);
+  selection.nodes_checked = static_cast<std::uint64_t>(graph.dimension);
+  selection.nodes_ranked = static_cast<std::uint64_t>(neighborhood.size());
+
+  const auto sort_begin = SteadyClock::now();
   std::sort(
       neighborhood.begin(), neighborhood.end(), [](const RankedNode& lhs, const RankedNode& rhs) {
         return std::tie(lhs.midpoint_score, lhs.node) < std::tie(rhs.midpoint_score, rhs.node);
@@ -121,12 +135,20 @@ std::vector<std::int32_t> BuildPointCandidateNodes(const GraphSnapshot& graph,
     neighborhood.resize(options.root_options.max_neighborhood);
   }
 
-  std::vector<std::int32_t> nodes;
-  nodes.reserve(neighborhood.size());
+  selection.nodes.reserve(neighborhood.size());
   for (const RankedNode& ranked : neighborhood) {
-    nodes.push_back(ranked.node);
+    selection.nodes.push_back(ranked.node);
   }
-  return nodes;
+  selection.sort_ms = ElapsedMilliseconds(sort_begin);
+  return selection;
+}
+
+void AddPointCandidateMetric(std::uint64_t* const total, const std::uint64_t value,
+                             const char* const name) {
+  if (value > std::numeric_limits<std::uint64_t>::max() - *total) {
+    throw std::overflow_error(std::string("HT point candidate 指标溢出: ") + name);
+  }
+  *total += value;
 }
 
 std::vector<HtEndReplyTask> BuildEndReplyTasks(const NormalizedPathSystem& state) {
@@ -449,8 +471,19 @@ std::optional<PreparedFrontierChunk> PrepareFrontierCandidates(WaveBuildContext*
     input.state_index = state_index;
     input.point_begin = centers.size();
     if (context->options->enable_point_moves) {
-      input.point_nodes = BuildPointCandidateNodes(*context->graph, context->target, state.paths,
-                                                   *context->options);
+      PointCandidateSelection selection = BuildPointCandidateNodes(*context->graph, context->target,
+                                                                   state.paths, *context->options);
+      HtWavefrontResult& result = *context->result;
+      AddPointCandidateMetric(&result.point_candidate_scans, 1U, "scans");
+      AddPointCandidateMetric(&result.point_candidate_nodes_checked, selection.nodes_checked,
+                              "nodes checked");
+      AddPointCandidateMetric(&result.point_candidate_nodes_ranked, selection.nodes_ranked,
+                              "nodes ranked");
+      AddPointCandidateMetric(&result.point_candidate_nodes_selected, selection.nodes.size(),
+                              "nodes selected");
+      result.point_candidate_scan_ms += selection.scan_ms;
+      result.point_candidate_sort_ms += selection.sort_ms;
+      input.point_nodes = std::move(selection.nodes);
       centers.insert(centers.end(), input.point_nodes.begin(), input.point_nodes.end());
     }
     inputs.push_back(std::move(input));

@@ -217,6 +217,10 @@ struct HtWavefrontResult {
   std::uint64_t path_append_tasks{};
   std::uint64_t path_append_child_edges{};
   std::uint64_t root_child_normalizations{};
+  std::uint64_t point_candidate_scans{};
+  std::uint64_t point_candidate_nodes_checked{};
+  std::uint64_t point_candidate_nodes_ranked{};
+  std::uint64_t point_candidate_nodes_selected{};
   std::string leaf_cost_backend{"none"};
   int leaf_cost_selected_device{-1};
   bool leaf_cpu_verified{false};
@@ -268,6 +272,8 @@ struct HtWavefrontResult {
   double candidate_ms{};
   double work_graph_ms{};
   double root_child_normalize_ms{};
+  double point_candidate_scan_ms{};
+  double point_candidate_sort_ms{};
   double leaf_ms{};
   double leaf_setup_ms{};
   double leaf_proof_initialize_ms{};

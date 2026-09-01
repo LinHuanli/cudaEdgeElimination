@@ -137,6 +137,10 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.peak_leaf_device_cache_bytes = wavefront.peak_leaf_device_cache_bytes;
     attempt.path_append_tasks = wavefront.path_append_tasks;
     attempt.root_child_normalizations = wavefront.root_child_normalizations;
+    attempt.point_candidate_scans = wavefront.point_candidate_scans;
+    attempt.point_candidate_nodes_checked = wavefront.point_candidate_nodes_checked;
+    attempt.point_candidate_nodes_ranked = wavefront.point_candidate_nodes_ranked;
+    attempt.point_candidate_nodes_selected = wavefront.point_candidate_nodes_selected;
     attempt.hamilton_reply_batches = wavefront.hamilton_reply_batches;
     attempt.hamilton_reply_centers = wavefront.hamilton_reply_centers;
     attempt.hamilton_reply_unique_centers = wavefront.hamilton_reply_unique_centers;
@@ -146,6 +150,8 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.candidate_ms = wavefront.candidate_ms;
     attempt.work_graph_ms = wavefront.work_graph_ms;
     attempt.root_child_normalize_ms = wavefront.root_child_normalize_ms;
+    attempt.point_candidate_scan_ms = wavefront.point_candidate_scan_ms;
+    attempt.point_candidate_sort_ms = wavefront.point_candidate_sort_ms;
     attempt.leaf_ms = wavefront.leaf_ms;
     attempt.leaf_setup_ms = wavefront.leaf_setup_ms;
     attempt.leaf_proof_initialize_ms = wavefront.leaf_proof_initialize_ms;
@@ -205,6 +211,10 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.peak_leaf_device_cache_bytes =
         std::max(scan.peak_leaf_device_cache_bytes, attempt.peak_leaf_device_cache_bytes);
     scan.root_child_normalizations += attempt.root_child_normalizations;
+    scan.point_candidate_scans += attempt.point_candidate_scans;
+    scan.point_candidate_nodes_checked += attempt.point_candidate_nodes_checked;
+    scan.point_candidate_nodes_ranked += attempt.point_candidate_nodes_ranked;
+    scan.point_candidate_nodes_selected += attempt.point_candidate_nodes_selected;
     scan.hamilton_reply_batches += attempt.hamilton_reply_batches;
     scan.hamilton_reply_centers += attempt.hamilton_reply_centers;
     scan.hamilton_reply_unique_centers += attempt.hamilton_reply_unique_centers;
@@ -213,6 +223,8 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.candidate_ms += attempt.candidate_ms;
     scan.work_graph_ms += attempt.work_graph_ms;
     scan.root_child_normalize_ms += attempt.root_child_normalize_ms;
+    scan.point_candidate_scan_ms += attempt.point_candidate_scan_ms;
+    scan.point_candidate_sort_ms += attempt.point_candidate_sort_ms;
     scan.leaf_ms += attempt.leaf_ms;
     scan.leaf_setup_ms += attempt.leaf_setup_ms;
     scan.leaf_proof_initialize_ms += attempt.leaf_proof_initialize_ms;
