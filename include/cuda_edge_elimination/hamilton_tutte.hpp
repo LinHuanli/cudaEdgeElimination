@@ -155,6 +155,8 @@ struct HtWavefrontOptions {
   HtRecursiveOptions search_options{};
   // 只控制 continuation 真值传播；leaf/c,d 后端仍由 search_options 分别配置。
   PathCompatibilityBackend propagation_backend{PathCompatibilityBackend::kAuto};
+  // 只控制递归 point/end reply 的批量路径冲突标记；CPU 始终规范化并逐项认证。
+  PathCompatibilityBackend path_append_backend{PathCompatibilityBackend::kAuto};
 };
 
 struct HtWavefrontResult {
@@ -163,6 +165,11 @@ struct HtWavefrontResult {
   std::string propagation_backend{"none"};
   int selected_device{-1};
   bool cpu_verified{false};
+  std::string path_append_backend{"none"};
+  int path_append_selected_device{-1};
+  bool path_append_cpu_verified{false};
+  std::uint64_t path_append_batches{};
+  std::uint64_t path_append_tasks{};
   std::uint64_t moves_generated{};
   std::uint64_t peak_frontier{};
 };
@@ -186,6 +193,35 @@ struct HtWavefrontReplyTask {
   std::uint32_t child_index{kNoHtChild};
   std::uint8_t path_infeasible{};
 };
+
+enum class HtPathAppendKind : std::uint8_t {
+  kPoint,
+  kEnd,
+};
+
+// point 表示加入 first-center-second；end 表示加入 first-second，且 center 必须为 -1。
+struct HtPathAppendTask {
+  std::uint32_t parent_index{};
+  HtPathAppendKind kind{HtPathAppendKind::kPoint};
+  std::int32_t first{-1};
+  std::int32_t center{-1};
+  std::int32_t second{-1};
+};
+
+struct HtPathAppendBatchResult {
+  std::vector<std::uint8_t> feasible;
+  // 与 task 一一对应；不可行项保留 NormalizePathSystem 给出的失败原因。
+  std::vector<NormalizedPathSystem> children;
+  std::string backend;
+  int selected_device{-1};
+  bool cpu_verified{false};
+};
+
+// 批量检查递归 HT point/end reply，并始终用 CPU 规范化结果逐项认证 GPU flags。
+[[nodiscard]] HtPathAppendBatchResult
+EvaluateHtPathAppends(std::int32_t dimension, const std::vector<NormalizedPathSystem>& parents,
+                      const std::vector<HtPathAppendTask>& tasks,
+                      PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto);
 
 // 生成确定性排序的 OR 候选；reply_product 越小越优先。
 [[nodiscard]] std::vector<HtCdCandidate>
@@ -231,6 +267,17 @@ void WriteHtRecursiveProof(const std::filesystem::path& path, const HtRecursiveP
 
 namespace detail {
 
+struct HtPathStateSpan {
+  std::uint32_t node_begin{};
+  std::uint32_t node_count{};
+};
+
+struct HtPathNodeRecord {
+  std::int32_t node{-1};
+  std::uint32_t component{};
+  std::uint8_t degree{};
+};
+
 [[nodiscard]] bool HtCdCudaAvailable(std::string* reason);
 [[nodiscard]] std::vector<std::uint8_t>
 ScreenHtCdCandidatesCuda(const GraphSnapshot& graph, NodeEdge target_edge,
@@ -243,6 +290,12 @@ EvaluateHtWavefrontCuda(const std::vector<HtWavefrontStateTask>& states,
                         const std::vector<HtWavefrontMoveTask>& moves,
                         const std::vector<HtWavefrontReplyTask>& replies,
                         const std::vector<std::uint32_t>& level_offsets, int* selected_device);
+
+[[nodiscard]] bool HtPathAppendCudaAvailable(std::string* reason);
+[[nodiscard]] std::vector<std::uint8_t>
+EvaluateHtPathAppendsCuda(std::int32_t dimension, const std::vector<HtPathStateSpan>& states,
+                          const std::vector<HtPathNodeRecord>& nodes,
+                          const std::vector<HtPathAppendTask>& tasks, int* selected_device);
 
 } // namespace detail
 

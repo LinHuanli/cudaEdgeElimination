@@ -72,4 +72,4 @@ V1 是确定性文本格式，固定记录：
 
 ## M4.3b3 衔接
 
-M4.3b3a 已在不改变 verifier 和文件格式的前提下加入主机 BFS 工作图与 CUDA 原子 continuation counters，详见 [GPU wavefront](09_Hamilton_Tutte_GPU_Wavefront.md)。M4.3b3b 仍需 GPU 状态 SoA 生成、按深度/路径数/reply 数分桶、device-persistent queue、批量叶调用和 CPU long-tail 队列；完成后才能把 HT 删除接入不可变 epoch 的确定性 commit。
+M4.3b3a 已在不改变 verifier 和文件格式的前提下加入主机 BFS 工作图、CUDA 原子 continuation counters 与单-block device-persistent queue，详见 [GPU wavefront](09_Hamilton_Tutte_GPU_Wavefront.md)。M4.3b3b1 又加入经 CPU 全量认证的 point/end [GPU path append](10_Hamilton_Tutte_GPU_Path_Append.md)。仍需 GPU 规范子状态/reply 写出、按深度/路径数/reply 数分桶、批量叶调用和 CPU long-tail 队列；完成后才能把 HT 删除接入不可变 epoch 的确定性 commit。

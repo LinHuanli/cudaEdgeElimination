@@ -39,6 +39,7 @@ void PrintHelp() {
       << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
       << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
       << "                [--scheduler dfs|wavefront] [--backend auto|cpu|cuda]\n"
+      << "                [--path-append-backend auto|cpu|cuda]\n"
       << "                [--propagation-backend auto|cpu|cuda] [--max-depth N] [HT budgets]\n"
       << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
       << "  pipeline      与 gpu-eliminate 相同，可附加 --lp-epoch FILE\n"
@@ -378,7 +379,12 @@ bool HtProveCommand(const Arguments& arguments) {
   cudaee::HtSearchStatus search_status = cudaee::HtSearchStatus::kInvalid;
   cudaee::HtRecursiveProof proof;
   std::string propagation_backend = "none";
+  std::string path_append_backend = "none";
   int selected_device = -1;
+  int path_append_selected_device = -1;
+  bool path_append_cpu_verified = false;
+  std::uint64_t path_append_batches = 0;
+  std::uint64_t path_append_tasks = 0;
   std::uint64_t moves_generated = 0;
   std::uint64_t peak_frontier = 0;
   if (scheduler == "dfs") {
@@ -386,15 +392,22 @@ bool HtProveCommand(const Arguments& arguments) {
     search_status = result.status;
     proof = std::move(result.proof);
   } else if (scheduler == "wavefront") {
-    cudaee::HtWavefrontResult result =
-        cudaee::ProveEdgeByWavefrontHt(graph, target,
-                                       {.search_options = options,
-                                        .propagation_backend = ParsePathCompatibilityBackend(
-                                            Optional(arguments, "propagation-backend", "auto"))});
+    cudaee::HtWavefrontResult result = cudaee::ProveEdgeByWavefrontHt(
+        graph, target,
+        {.search_options = options,
+         .propagation_backend =
+             ParsePathCompatibilityBackend(Optional(arguments, "propagation-backend", "auto")),
+         .path_append_backend =
+             ParsePathCompatibilityBackend(Optional(arguments, "path-append-backend", "auto"))});
     search_status = result.status;
     proof = std::move(result.proof);
     propagation_backend = std::move(result.propagation_backend);
+    path_append_backend = std::move(result.path_append_backend);
     selected_device = result.selected_device;
+    path_append_selected_device = result.path_append_selected_device;
+    path_append_cpu_verified = result.path_append_cpu_verified;
+    path_append_batches = result.path_append_batches;
+    path_append_tasks = result.path_append_tasks;
     moves_generated = result.moves_generated;
     peak_frontier = result.peak_frontier;
   } else {
@@ -412,7 +425,12 @@ bool HtProveCommand(const Arguments& arguments) {
   if (scheduler == "wavefront") {
     std::cout << " propagation_backend=" << propagation_backend
               << " selected_device=" << selected_device << " moves=" << moves_generated
-              << " peak_frontier=" << peak_frontier;
+              << " peak_frontier=" << peak_frontier
+              << " path_append_backend=" << path_append_backend
+              << " path_append_device=" << path_append_selected_device
+              << " path_append_batches=" << path_append_batches
+              << " path_append_tasks=" << path_append_tasks
+              << " path_append_cpu_verified=" << (path_append_cpu_verified ? 1 : 0);
   }
   std::cout << " reason=" << std::quoted(proof.reason) << '\n';
   if (search_status == cudaee::HtSearchStatus::kInvalid) {

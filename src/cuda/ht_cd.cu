@@ -157,52 +157,89 @@ __global__ void ScreenHtCdKernel(const NodeEdge target, const HtCdScreenTask* co
 }
 
 __device__ void AppendCompletedState(const std::uint32_t state_index,
-                                     std::uint32_t* const next_frontier,
-                                     std::uint32_t* const next_count,
-                                     const std::uint32_t state_count) {
-  const std::uint32_t slot = atomicAdd(next_count, 1U);
+                                     std::uint32_t* const completed_queue,
+                                     std::uint32_t* const queue_tail,
+                                     const std::uint32_t state_count,
+                                     std::uint32_t* const error_code) {
+  const std::uint32_t slot = atomicAdd(queue_tail, 1U);
   if (slot < state_count) {
-    next_frontier[slot] = state_index;
+    completed_queue[slot] = state_index;
+  } else {
+    atomicCAS(error_code, 0U, 1U);
   }
 }
 
-__global__ void PropagateHtContinuationsKernel(
+__global__ void PropagateHtContinuationsPersistentKernel(
     const HtWavefrontStateTask* const states, const HtWavefrontMoveTask* const moves,
-    const std::uint32_t* const frontier, const std::uint32_t frontier_count,
     std::int32_t* const status, std::uint32_t* const remaining_moves,
     std::uint32_t* const remaining_children, std::uint32_t* const move_failed,
-    std::uint32_t* const next_frontier, std::uint32_t* const next_count,
-    const std::uint32_t state_count) {
-  const std::size_t frontier_offset =
-      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (frontier_offset >= frontier_count) {
-    return;
+    std::uint32_t* const completed_queue, std::uint32_t* const queue_tail,
+    const std::uint32_t state_count, std::uint32_t* const error_code) {
+  // 单 block 常驻队列避免跨 block 的全局终止判定竞态。每轮只消费进入本轮前已发布的
+  // 状态；本轮产生的父状态由下一轮消费，整个循环不再经过主机同步。
+  __shared__ std::uint32_t batch_begin;
+  __shared__ std::uint32_t batch_end;
+  __shared__ std::uint32_t stop;
+  if (threadIdx.x == 0U) {
+    batch_begin = 0U;
+    batch_end = 0U;
+    stop = 0U;
   }
-  const std::uint32_t state_index = frontier[frontier_offset];
-  const std::uint32_t parent_move = states[state_index].parent_move;
-  if (parent_move == kNoHtChild) {
-    return;
-  }
-  if (status[state_index] == 0) {
-    atomicExch(&move_failed[parent_move], 1U);
-  }
-  __threadfence();
-  const std::uint32_t children_before = atomicSub(&remaining_children[parent_move], 1U);
-  if (children_before != 1U) {
-    return;
-  }
+  __syncthreads();
 
-  const std::uint32_t parent_state = moves[parent_move].parent_state;
-  if (atomicAdd(&move_failed[parent_move], 0U) == 0U) {
-    if (atomicCAS(&status[parent_state], -1, 1) == -1) {
-      AppendCompletedState(parent_state, next_frontier, next_count, state_count);
+  while (stop == 0U) {
+    if (threadIdx.x == 0U) {
+      batch_end = atomicAdd(queue_tail, 0U);
+      if (batch_end > state_count) {
+        atomicCAS(error_code, 0U, 1U);
+        stop = 1U;
+      } else if (batch_begin == batch_end) {
+        if (batch_end != state_count) {
+          // 合法有限 DAG 必须继续产生父状态；停滞说明 counter 或输入结构损坏。
+          atomicCAS(error_code, 0U, 2U);
+        }
+        stop = 1U;
+      }
     }
-    return;
-  }
+    __syncthreads();
+    if (stop != 0U) {
+      break;
+    }
 
-  const std::uint32_t moves_before = atomicSub(&remaining_moves[parent_state], 1U);
-  if (moves_before == 1U && atomicCAS(&status[parent_state], -1, 0) == -1) {
-    AppendCompletedState(parent_state, next_frontier, next_count, state_count);
+    for (std::uint32_t queue_index = batch_begin + threadIdx.x; queue_index < batch_end;
+         queue_index += blockDim.x) {
+      const std::uint32_t state_index = completed_queue[queue_index];
+      const std::uint32_t parent_move = states[state_index].parent_move;
+      if (parent_move == kNoHtChild) {
+        continue;
+      }
+      if (status[state_index] == 0) {
+        atomicExch(&move_failed[parent_move], 1U);
+      }
+      __threadfence();
+      const std::uint32_t children_before = atomicSub(&remaining_children[parent_move], 1U);
+      if (children_before != 1U) {
+        continue;
+      }
+
+      const std::uint32_t parent_state = moves[parent_move].parent_state;
+      if (atomicAdd(&move_failed[parent_move], 0U) == 0U) {
+        if (atomicCAS(&status[parent_state], -1, 1) == -1) {
+          AppendCompletedState(parent_state, completed_queue, queue_tail, state_count, error_code);
+        }
+        continue;
+      }
+
+      const std::uint32_t moves_before = atomicSub(&remaining_moves[parent_state], 1U);
+      if (moves_before == 1U && atomicCAS(&status[parent_state], -1, 0) == -1) {
+        AppendCompletedState(parent_state, completed_queue, queue_tail, state_count, error_code);
+      }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0U) {
+      batch_begin = batch_end;
+    }
+    __syncthreads();
   }
 }
 
@@ -357,9 +394,9 @@ std::vector<std::uint8_t> EvaluateHtWavefrontCuda(const std::vector<HtWavefrontS
   DeviceBuffer<std::uint32_t> device_remaining_moves(states.size());
   DeviceBuffer<std::uint32_t> device_remaining_children(moves.size());
   DeviceBuffer<std::uint32_t> device_move_failed(moves.size());
-  DeviceBuffer<std::uint32_t> device_frontier_first(states.size());
-  DeviceBuffer<std::uint32_t> device_frontier_second(states.size());
-  DeviceBuffer<std::uint32_t> device_next_count(1U);
+  DeviceBuffer<std::uint32_t> device_completed_queue(states.size());
+  DeviceBuffer<std::uint32_t> device_queue_tail(1U);
+  DeviceBuffer<std::uint32_t> device_error_code(1U);
 
   std::vector<std::int32_t> host_status(states.size(), -1);
   std::vector<std::uint32_t> host_remaining_moves(states.size());
@@ -395,35 +432,29 @@ std::vector<std::uint8_t> EvaluateHtWavefrontCuda(const std::vector<HtWavefrontS
     CheckCuda(cudaMemset(device_move_failed.get(), 0, moves.size() * sizeof(std::uint32_t)),
               "cudaMemset(HT wavefront move_failed)");
   }
-  device_frontier_first.CopyFromHost(initial_frontier.data());
+  std::vector<std::uint32_t> host_completed_queue(states.size());
+  std::copy(initial_frontier.begin(), initial_frontier.end(), host_completed_queue.begin());
+  device_completed_queue.CopyFromHost(host_completed_queue.data());
+  std::uint32_t queue_tail = static_cast<std::uint32_t>(initial_frontier.size());
+  device_queue_tail.CopyFromHost(&queue_tail);
+  CheckCuda(cudaMemset(device_error_code.get(), 0, sizeof(std::uint32_t)),
+            "cudaMemset(HT wavefront error_code)");
 
   constexpr std::uint32_t kThreads = 256U;
-  auto* current_frontier = device_frontier_first.get();
-  auto* next_frontier = device_frontier_second.get();
-  std::uint32_t current_count = static_cast<std::uint32_t>(initial_frontier.size());
-  std::size_t propagation_rounds = 0;
-  while (current_count != 0U) {
-    if (++propagation_rounds > level_offsets.size() - 1U) {
-      throw std::runtime_error("CUDA HT continuation propagation 超出层数上限");
-    }
-    CheckCuda(cudaMemset(device_next_count.get(), 0, sizeof(std::uint32_t)),
-              "cudaMemset(HT wavefront next_count)");
-    const std::uint32_t blocks = (current_count + kThreads - 1U) / kThreads;
-    PropagateHtContinuationsKernel<<<blocks, kThreads>>>(
-        device_states.get(), device_moves.get(), current_frontier, current_count,
-        device_status.get(), device_remaining_moves.get(), device_remaining_children.get(),
-        device_move_failed.get(), next_frontier, device_next_count.get(),
-        static_cast<std::uint32_t>(states.size()));
-    CheckCuda(cudaGetLastError(), "PropagateHtContinuationsKernel launch");
-    std::uint32_t next_count = 0;
-    device_next_count.CopyToHost(&next_count);
-    if (next_count > states.size()) {
-      throw std::runtime_error("CUDA HT continuation queue 溢出");
-    }
-    current_count = next_count;
-    std::swap(current_frontier, next_frontier);
-  }
+  PropagateHtContinuationsPersistentKernel<<<1U, kThreads>>>(
+      device_states.get(), device_moves.get(), device_status.get(), device_remaining_moves.get(),
+      device_remaining_children.get(), device_move_failed.get(), device_completed_queue.get(),
+      device_queue_tail.get(), static_cast<std::uint32_t>(states.size()), device_error_code.get());
+  CheckCuda(cudaGetLastError(), "PropagateHtContinuationsPersistentKernel launch");
 
+  std::uint32_t error_code = 0U;
+  device_error_code.CopyToHost(&error_code);
+  if (error_code == 1U) {
+    throw std::runtime_error("CUDA HT continuation queue 溢出");
+  }
+  if (error_code == 2U) {
+    throw std::runtime_error("CUDA HT continuation queue 在全部状态完成前停滞");
+  }
   device_status.CopyToHost(host_status.data());
   std::vector<std::uint8_t> status(states.size());
   for (std::size_t state_index = 0; state_index < states.size(); ++state_index) {

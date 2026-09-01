@@ -243,7 +243,9 @@ void TestDfsWavefrontRandomDifferential() {
     const cudaee::HtRecursiveResult dfs = cudaee::ProveEdgeByRecursiveHt(graph, target, options);
     const cudaee::HtWavefrontResult wavefront = cudaee::ProveEdgeByWavefrontHt(
         graph, target,
-        {.search_options = options, .propagation_backend = cudaee::PathCompatibilityBackend::kCpu});
+        {.search_options = options,
+         .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
+         .path_append_backend = cudaee::PathCompatibilityBackend::kCpu});
     Check(dfs.status == wavefront.status, "random DFS/wavefront truth mismatch");
     if (dfs.status == cudaee::HtSearchStatus::kProven) {
       std::string reason;
@@ -342,7 +344,8 @@ void TestNonemptyAndProof() {
   const cudaee::HtWavefrontResult wavefront = cudaee::ProveEdgeByWavefrontHt(
       graph, {0, 5},
       {.search_options = recursive_options,
-       .propagation_backend = cudaee::PathCompatibilityBackend::kCpu});
+       .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu});
   Check(wavefront.status == cudaee::HtSearchStatus::kProven, wavefront.proof.reason);
   Check(wavefront.propagation_backend == "cpu" && wavefront.cpu_verified,
         "CPU wavefront propagation is recorded");
@@ -354,6 +357,12 @@ void TestNonemptyAndProof() {
   Check(cudaee::ProveEdgeByWavefrontHt(graph, {0, 5}, invalid_wavefront_options).status ==
             cudaee::HtSearchStatus::kInvalid,
         "unknown wavefront propagation backend is rejected");
+  invalid_wavefront_options.propagation_backend = cudaee::PathCompatibilityBackend::kCpu;
+  invalid_wavefront_options.path_append_backend =
+      static_cast<cudaee::PathCompatibilityBackend>(255);
+  Check(cudaee::ProveEdgeByWavefrontHt(graph, {0, 5}, invalid_wavefront_options).status ==
+            cudaee::HtSearchStatus::kInvalid,
+        "unknown wavefront path-append backend is rejected");
   Check(wavefront.proof.nodes.size() == recursive.proof.nodes.size(),
         "DFS and wavefront shallow arenas have the same size");
 
@@ -387,7 +396,8 @@ void TestNonemptyAndProof() {
   const cudaee::HtWavefrontResult wavefront_state_budget = cudaee::ProveEdgeByWavefrontHt(
       graph, {0, 5},
       {.search_options = state_budget_options,
-       .propagation_backend = cudaee::PathCompatibilityBackend::kCpu});
+       .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu});
   Check(wavefront_state_budget.status == cudaee::HtSearchStatus::kUnresolved,
         "wavefront state budget remains unresolved");
 
@@ -465,10 +475,15 @@ void TestRecursivePointProof() {
 
   const cudaee::HtWavefrontResult wavefront = cudaee::ProveEdgeByWavefrontHt(
       graph, {2, 4},
-      {.search_options = options, .propagation_backend = cudaee::PathCompatibilityBackend::kCpu});
+      {.search_options = options,
+       .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu});
   Check(wavefront.status == cudaee::HtSearchStatus::kProven, wavefront.proof.reason);
   Check(wavefront.moves_generated > 0U && wavefront.peak_frontier > 0U,
         "wavefront records generated moves and frontier width");
+  Check(wavefront.path_append_backend == "cpu" && wavefront.path_append_cpu_verified &&
+            wavefront.path_append_batches > 0U && wavefront.path_append_tasks > 0U,
+        "CPU wavefront records fully verified path-append batches");
   Check(wavefront.proof.nodes.size() == result.proof.nodes.size(),
         "DFS and wavefront point arenas have the same size");
   Check(std::all_of(wavefront.proof.nodes.begin() + 1, wavefront.proof.nodes.end(),
@@ -481,13 +496,17 @@ void TestRecursivePointProof() {
 #ifndef CUDAEE_HAS_CUDA
   const cudaee::HtWavefrontResult auto_fallback = cudaee::ProveEdgeByWavefrontHt(
       graph, {2, 4},
-      {.search_options = options, .propagation_backend = cudaee::PathCompatibilityBackend::kAuto});
+      {.search_options = options,
+       .propagation_backend = cudaee::PathCompatibilityBackend::kAuto,
+       .path_append_backend = cudaee::PathCompatibilityBackend::kAuto});
   Check(auto_fallback.status == cudaee::HtSearchStatus::kProven &&
             auto_fallback.propagation_backend == "cpu" && auto_fallback.cpu_verified,
         "auto wavefront safely falls back to CPU without a CUDA build");
   const cudaee::HtWavefrontResult unavailable_cuda = cudaee::ProveEdgeByWavefrontHt(
       graph, {2, 4},
-      {.search_options = options, .propagation_backend = cudaee::PathCompatibilityBackend::kCuda});
+      {.search_options = options,
+       .propagation_backend = cudaee::PathCompatibilityBackend::kCuda,
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu});
   Check(unavailable_cuda.status == cudaee::HtSearchStatus::kUnresolved,
         "explicit unavailable CUDA wavefront remains unresolved");
 #endif
@@ -540,11 +559,16 @@ void TestRecursivePointProof() {
     const cudaee::HtWavefrontResult cuda_wavefront = cudaee::ProveEdgeByWavefrontHt(
         graph, {2, 4},
         {.search_options = options,
-         .propagation_backend = cudaee::PathCompatibilityBackend::kCuda});
+         .propagation_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .path_append_backend = cudaee::PathCompatibilityBackend::kCuda});
     Check(cuda_wavefront.status == cudaee::HtSearchStatus::kProven, cuda_wavefront.proof.reason);
     Check(cuda_wavefront.propagation_backend == "cuda" && cuda_wavefront.selected_device >= 0 &&
               cuda_wavefront.cpu_verified,
           "CUDA wavefront propagation is fully CPU verified");
+    Check(cuda_wavefront.path_append_backend == "cuda" &&
+              cuda_wavefront.path_append_selected_device >= 0 &&
+              cuda_wavefront.path_append_cpu_verified && cuda_wavefront.path_append_tasks > 0U,
+          "CUDA wavefront path-append batches are fully CPU verified");
     Check(cudaee::VerifyHtRecursiveProof(graph, cuda_wavefront.proof, &reason), reason);
   }
 #endif
@@ -595,7 +619,9 @@ void TestRecursiveEndProof() {
 
   const cudaee::HtWavefrontResult wavefront = cudaee::ProveEdgeByWavefrontHt(
       graph, {1, 2},
-      {.search_options = options, .propagation_backend = cudaee::PathCompatibilityBackend::kCpu});
+      {.search_options = options,
+       .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu});
   Check(wavefront.status == cudaee::HtSearchStatus::kProven, wavefront.proof.reason);
   Check(wavefront.proof.nodes.size() == result.proof.nodes.size(),
         "DFS and wavefront end arenas have the same size");
@@ -617,6 +643,82 @@ void TestRecursiveEndProof() {
   wrong_internal.nodes[1].move_second = 0;
   Check(!cudaee::VerifyHtRecursiveProof(graph, wrong_internal, &reason),
         "wrong end internal neighbor is rejected");
+}
+
+void TestPathAppendBatch() {
+  const cudaee::NormalizedPathSystem parent = cudaee::NormalizePathSystem({{0, 1, 2}, {3, 4}}, 8);
+  Check(parent.valid, parent.reason);
+  const cudaee::NormalizedPathSystem second_parent =
+      cudaee::NormalizePathSystem({{5, 6}, {0, 7, 3}}, 8);
+  Check(second_parent.valid, second_parent.reason);
+  const std::vector<cudaee::NormalizedPathSystem> parents = {parent, second_parent};
+  const std::vector<cudaee::HtPathAppendTask> tasks = {
+      {0, cudaee::HtPathAppendKind::kPoint, 0, 5, 3},
+      {0, cudaee::HtPathAppendKind::kPoint, 0, 6, 2},
+      {0, cudaee::HtPathAppendKind::kPoint, 1, 6, 7},
+      {0, cudaee::HtPathAppendKind::kPoint, 0, 6, 7},
+      {0, cudaee::HtPathAppendKind::kEnd, 0, -1, 3},
+      {0, cudaee::HtPathAppendKind::kEnd, 0, -1, 2},
+      {0, cudaee::HtPathAppendKind::kEnd, 0, -1, 1},
+      {0, cudaee::HtPathAppendKind::kEnd, 0, -1, 7},
+      {1, cudaee::HtPathAppendKind::kPoint, 5, 1, 0},
+      {1, cudaee::HtPathAppendKind::kEnd, 6, -1, 7},
+      {1, cudaee::HtPathAppendKind::kEnd, 6, -1, 2}};
+  const std::vector<std::uint8_t> expected = {1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1};
+  const cudaee::HtPathAppendBatchResult cpu =
+      cudaee::EvaluateHtPathAppends(8, parents, tasks, cudaee::PathCompatibilityBackend::kCpu);
+  Check(cpu.backend == "cpu" && cpu.cpu_verified && cpu.feasible == expected,
+        "CPU path-append batch covers merge, cycle, degree, and new-node cases");
+  Check(cpu.children.size() == tasks.size() && cpu.children.front().valid &&
+            cpu.children.front().edge_count == parent.edge_count + 2U && !cpu.children[1].valid,
+        "path-append batch keeps canonical children and infeasibility records aligned");
+
+  std::vector<cudaee::HtPathAppendTask> bad_point = tasks;
+  bad_point.front().center = 1;
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::EvaluateHtPathAppends(8, parents, bad_point,
+                                                           cudaee::PathCompatibilityBackend::kCpu);
+        static_cast<void>(ignored);
+      },
+      "path-append rejects a point center already present in the parent");
+  std::vector<cudaee::HtPathAppendTask> bad_end = tasks;
+  bad_end.back().first = 7;
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::EvaluateHtPathAppends(8, parents, bad_end,
+                                                           cudaee::PathCompatibilityBackend::kCpu);
+        static_cast<void>(ignored);
+      },
+      "path-append rejects an end move from an internal node");
+
+#ifdef CUDAEE_HAS_CUDA
+  std::string reason;
+  if (cudaee::detail::HtPathAppendCudaAvailable(&reason)) {
+    const cudaee::HtPathAppendBatchResult gpu =
+        cudaee::EvaluateHtPathAppends(8, parents, tasks, cudaee::PathCompatibilityBackend::kCuda);
+    Check(gpu.backend == "cuda" && gpu.selected_device >= 0 && gpu.cpu_verified &&
+              gpu.feasible == expected,
+          "CUDA path-append flags exactly match CPU normalization");
+    for (std::size_t index = 0; index < tasks.size(); ++index) {
+      Check(gpu.children[index].valid == cpu.children[index].valid &&
+                gpu.children[index].paths == cpu.children[index].paths,
+            "CUDA path-append keeps CPU-certified canonical children");
+    }
+  }
+#else
+  const cudaee::HtPathAppendBatchResult fallback =
+      cudaee::EvaluateHtPathAppends(8, parents, tasks, cudaee::PathCompatibilityBackend::kAuto);
+  Check(fallback.backend == "cpu-fallback" && fallback.feasible == expected,
+        "path-append auto backend safely falls back in a CPU-only build");
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::EvaluateHtPathAppends(8, parents, tasks,
+                                                           cudaee::PathCompatibilityBackend::kCuda);
+        static_cast<void>(ignored);
+      },
+      "explicit CUDA path-append remains unavailable in a CPU-only build");
+#endif
 }
 
 #ifdef CUDAEE_HAS_CUDA
@@ -668,6 +770,7 @@ int main() {
     TestNonemptyAndProof();
     TestRecursivePointProof();
     TestRecursiveEndProof();
+    TestPathAppendBatch();
 #ifdef CUDAEE_HAS_CUDA
     TestCudaWavefrontTruthTable();
 #endif

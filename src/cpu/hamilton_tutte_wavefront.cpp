@@ -153,8 +153,12 @@ struct WaveBuildContext {
   const GraphSnapshot* graph{};
   NodeEdge target;
   const HtRecursiveOptions* options{};
+  PathCompatibilityBackend path_append_backend{PathCompatibilityBackend::kAuto};
   HtWavefrontResult* result{};
   bool budget_exhausted{false};
+  bool path_append_failed{false};
+  bool path_append_invalid{false};
+  std::string path_append_reason;
 };
 
 bool MoveReplyCountAllowed(const WaveBuildContext& context, const std::uint64_t count) {
@@ -174,10 +178,80 @@ bool ConsumeReply(WaveBuildContext* const context) {
   return true;
 }
 
-bool AppendChild(WaveBuildContext* const context, const NormalizedPathSystem& parent,
-                 const std::vector<Path>& additions, const std::uint32_t child_depth,
-                 HtTreeReply* const reply, std::vector<WaveState>* const states) {
-  NormalizedPathSystem child = AddPaths(parent, additions, context->graph->dimension);
+bool ReserveReplyBatch(WaveBuildContext* const context, const std::size_t count) {
+  HtRecursiveProof& proof = context->result->proof;
+  const std::uint64_t count64 = static_cast<std::uint64_t>(count);
+  if (proof.replies_expanded > kHardWavefrontReplies ||
+      count64 > kHardWavefrontReplies - proof.replies_expanded ||
+      (context->options->max_total_replies != 0U &&
+       (proof.replies_expanded > context->options->max_total_replies ||
+        count64 > context->options->max_total_replies - proof.replies_expanded))) {
+    context->budget_exhausted = true;
+    return false;
+  }
+  proof.replies_expanded += count64;
+  return true;
+}
+
+bool ReplyPlanFits(const WaveBuildContext& context, const std::uint64_t already_planned,
+                   const std::size_t additional) {
+  const std::uint64_t additional64 = static_cast<std::uint64_t>(additional);
+  const std::uint64_t expanded = context.result->proof.replies_expanded;
+  if (expanded > kHardWavefrontReplies || already_planned > kHardWavefrontReplies - expanded ||
+      additional64 > kHardWavefrontReplies - expanded - already_planned) {
+    return false;
+  }
+  if (context.options->max_total_replies == 0U) {
+    return true;
+  }
+  const std::uint64_t limit = context.options->max_total_replies;
+  return expanded <= limit && already_planned <= limit - expanded &&
+         additional64 <= limit - expanded - already_planned;
+}
+
+void RecordPathAppendBatch(WaveBuildContext* const context, const HtPathAppendBatchResult& batch) {
+  if (batch.feasible.empty()) {
+    return;
+  }
+  HtWavefrontResult& result = *context->result;
+  ++result.path_append_batches;
+  result.path_append_tasks += batch.feasible.size();
+  result.path_append_cpu_verified = result.path_append_batches == 1U
+                                        ? batch.cpu_verified
+                                        : result.path_append_cpu_verified && batch.cpu_verified;
+  if (result.path_append_backend == "none") {
+    result.path_append_backend = batch.backend;
+  } else if (result.path_append_backend != batch.backend) {
+    result.path_append_backend = "mixed";
+  }
+  if (batch.selected_device >= 0) {
+    result.path_append_selected_device = batch.selected_device;
+  }
+}
+
+std::optional<HtPathAppendBatchResult>
+EvaluatePathAppendBatch(WaveBuildContext* const context, const NormalizedPathSystem& parent,
+                        const std::vector<HtPathAppendTask>& tasks) {
+  try {
+    HtPathAppendBatchResult batch = EvaluateHtPathAppends(context->graph->dimension, {parent},
+                                                          tasks, context->path_append_backend);
+    RecordPathAppendBatch(context, batch);
+    return batch;
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::logic_error& error) {
+    context->path_append_invalid = true;
+    context->path_append_reason = error.what();
+  } catch (const std::exception& error) {
+    context->path_append_failed = true;
+    context->path_append_reason = error.what();
+  }
+  return std::nullopt;
+}
+
+bool AppendNormalizedChild(WaveBuildContext* const context, NormalizedPathSystem child,
+                           const std::uint32_t child_depth, HtTreeReply* const reply,
+                           std::vector<WaveState>* const states) {
   if (!child.valid) {
     reply->path_infeasible = true;
     return true;
@@ -199,6 +273,13 @@ bool AppendChild(WaveBuildContext* const context, const NormalizedPathSystem& pa
   return true;
 }
 
+bool AppendChild(WaveBuildContext* const context, const NormalizedPathSystem& parent,
+                 const std::vector<Path>& additions, const std::uint32_t child_depth,
+                 HtTreeReply* const reply, std::vector<WaveState>* const states) {
+  return AppendNormalizedChild(context, AddPaths(parent, additions, context->graph->dimension),
+                               child_depth, reply, states);
+}
+
 bool RecordMove(WaveBuildContext* const context, const std::uint32_t state_index, WaveMove move,
                 std::vector<WaveState>* const states) {
   if (context->result->moves_generated >= kHardWavefrontMoves) {
@@ -212,26 +293,60 @@ bool RecordMove(WaveBuildContext* const context, const std::uint32_t state_index
 
 bool GeneratePointMoves(WaveBuildContext* const context, const std::uint32_t state_index,
                         std::vector<WaveState>* const states) {
+  struct PlannedMove {
+    PointCandidate candidate;
+    std::size_t append_begin{};
+  };
   const NormalizedPathSystem parent = states->at(state_index).paths;
   const std::uint32_t child_depth = states->at(state_index).depth + 1U;
+  std::vector<PlannedMove> plans;
+  std::vector<HtPathAppendTask> append_tasks;
+  std::uint64_t planned_replies = 0U;
+  bool budget_blocked = false;
   for (const PointCandidate& candidate :
        BuildPointCandidates(*context->graph, context->target, parent, *context->options)) {
     if (!MoveReplyCountAllowed(*context, candidate.replies.size())) {
       continue;
     }
+    if (!ReplyPlanFits(*context, planned_replies, candidate.replies.size())) {
+      budget_blocked = true;
+      break;
+    }
+    plans.push_back({candidate, append_tasks.size()});
+    planned_replies += static_cast<std::uint64_t>(candidate.replies.size());
+    for (const HtNeighborPair& pair : candidate.replies) {
+      append_tasks.push_back({0U, HtPathAppendKind::kPoint, pair.first, pair.center, pair.second});
+    }
+  }
+  if (plans.empty()) {
+    if (budget_blocked) {
+      context->budget_exhausted = true;
+      return false;
+    }
+    return true;
+  }
+  const std::optional<HtPathAppendBatchResult> batch =
+      EvaluatePathAppendBatch(context, parent, append_tasks);
+  if (!batch.has_value()) {
+    return false;
+  }
+
+  for (const PlannedMove& plan : plans) {
+    const PointCandidate& candidate = plan.candidate;
     WaveMove move;
     move.type = HtMoveType::kPoint;
     move.first = candidate.node;
     move.replies.reserve(candidate.replies.size());
+    if (!ReserveReplyBatch(context, candidate.replies.size())) {
+      return false;
+    }
     bool all_infeasible = true;
-    for (const HtNeighborPair& pair : candidate.replies) {
-      if (!ConsumeReply(context)) {
-        return false;
-      }
+    for (std::size_t reply_index = 0; reply_index < candidate.replies.size(); ++reply_index) {
+      const HtNeighborPair& pair = candidate.replies[reply_index];
       HtTreeReply reply;
       reply.first_pair = pair;
-      if (!AppendChild(context, parent, {{pair.first, pair.center, pair.second}}, child_depth,
-                       &reply, states)) {
+      if (!AppendNormalizedChild(context, batch->children[plan.append_begin + reply_index],
+                                 child_depth, &reply, states)) {
         return false;
       }
       all_infeasible = all_infeasible && reply.path_infeasible;
@@ -244,33 +359,71 @@ bool GeneratePointMoves(WaveBuildContext* const context, const std::uint32_t sta
       return true;
     }
   }
+  if (budget_blocked) {
+    context->budget_exhausted = true;
+    return false;
+  }
   return true;
 }
 
 bool GenerateEndMoves(WaveBuildContext* const context, const std::uint32_t state_index,
                       std::vector<WaveState>* const states) {
+  struct PlannedMove {
+    EndCandidate candidate;
+    std::size_t append_begin{};
+  };
   const NormalizedPathSystem parent = states->at(state_index).paths;
   const std::uint32_t child_depth = states->at(state_index).depth + 1U;
+  std::vector<PlannedMove> plans;
+  std::vector<HtPathAppendTask> append_tasks;
+  std::uint64_t planned_replies = 0U;
+  bool budget_blocked = false;
   for (const EndCandidate& candidate :
        BuildEndCandidates(*context->graph, parent, *context->options)) {
     if (!MoveReplyCountAllowed(*context, candidate.replies.size())) {
       continue;
     }
+    if (!ReplyPlanFits(*context, planned_replies, candidate.replies.size())) {
+      budget_blocked = true;
+      break;
+    }
+    plans.push_back({candidate, append_tasks.size()});
+    planned_replies += static_cast<std::uint64_t>(candidate.replies.size());
+    for (const NodeEdge edge : candidate.replies) {
+      const std::int32_t neighbor = edge.u == candidate.endpoint ? edge.v : edge.u;
+      append_tasks.push_back({0U, HtPathAppendKind::kEnd, candidate.endpoint, -1, neighbor});
+    }
+  }
+  if (plans.empty()) {
+    if (budget_blocked) {
+      context->budget_exhausted = true;
+      return false;
+    }
+    return true;
+  }
+  const std::optional<HtPathAppendBatchResult> batch =
+      EvaluatePathAppendBatch(context, parent, append_tasks);
+  if (!batch.has_value()) {
+    return false;
+  }
+
+  for (const PlannedMove& plan : plans) {
+    const EndCandidate& candidate = plan.candidate;
     WaveMove move;
     move.type = HtMoveType::kEnd;
     move.first = candidate.endpoint;
     move.second = candidate.internal_neighbor;
     move.replies.reserve(candidate.replies.size());
+    if (!ReserveReplyBatch(context, candidate.replies.size())) {
+      return false;
+    }
     bool all_infeasible = true;
-    for (const NodeEdge edge : candidate.replies) {
-      if (!ConsumeReply(context)) {
-        return false;
-      }
+    for (std::size_t reply_index = 0; reply_index < candidate.replies.size(); ++reply_index) {
+      const NodeEdge edge = candidate.replies[reply_index];
       HtTreeReply reply;
       reply.edge = edge;
-      const std::int32_t neighbor = edge.u == candidate.endpoint ? edge.v : edge.u;
-      if (!AppendChild(context, parent, {{candidate.endpoint, neighbor}}, child_depth, &reply,
-                       states)) {
+      if (!AppendNormalizedChild(context, batch->children[plan.append_begin + reply_index],
+                                 child_depth, &reply, states)) {
         return false;
       }
       all_infeasible = all_infeasible && reply.path_infeasible;
@@ -282,6 +435,10 @@ bool GenerateEndMoves(WaveBuildContext* const context, const std::uint32_t state
     if (all_infeasible) {
       return true;
     }
+  }
+  if (budget_blocked) {
+    context->budget_exhausted = true;
+    return false;
   }
   return true;
 }
@@ -573,6 +730,12 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
     proof.reason = "未知 HT wavefront propagation 后端";
     return result;
   }
+  if (options.path_append_backend != PathCompatibilityBackend::kAuto &&
+      options.path_append_backend != PathCompatibilityBackend::kCpu &&
+      options.path_append_backend != PathCompatibilityBackend::kCuda) {
+    proof.reason = "未知 HT path-append 后端";
+    return result;
+  }
 
   HtCdBatchResult candidates;
   try {
@@ -611,7 +774,15 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
     return result;
   }
 
-  WaveBuildContext context{&graph, proof.target_edge, &options.search_options, &result, false};
+  WaveBuildContext context{.graph = &graph,
+                           .target = proof.target_edge,
+                           .options = &options.search_options,
+                           .path_append_backend = options.path_append_backend,
+                           .result = &result,
+                           .budget_exhausted = false,
+                           .path_append_failed = false,
+                           .path_append_invalid = false,
+                           .path_append_reason = {}};
   try {
     for (const HtCdCandidate& candidate : candidates.candidates) {
       ++proof.cd_candidates_tested;
@@ -629,6 +800,16 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
 
       std::vector<std::uint32_t> level_offsets;
       if (!ExpandWavefront(&context, &states, &level_offsets)) {
+        if (context.path_append_invalid) {
+          result.status = HtSearchStatus::kInvalid;
+          proof.reason = "HT path-append CPU/CUDA 复核失败: " + context.path_append_reason;
+          return result;
+        }
+        if (context.path_append_failed) {
+          result.status = HtSearchStatus::kUnresolved;
+          proof.reason = "HT path-append 后端失败: " + context.path_append_reason;
+          return result;
+        }
         break;
       }
       std::vector<std::uint8_t> status;

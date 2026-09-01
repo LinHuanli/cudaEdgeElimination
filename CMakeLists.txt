@@ -21,6 +21,7 @@ set(CUDAEE_SOURCES
     src/cpu/hamilton_tutte_proof.cpp
     src/cpu/hamilton_tutte_recursive.cpp
     src/cpu/hamilton_tutte_wavefront.cpp
+    src/cpu/ht_path_append.cpp
     src/cpu/jv_elimination.cpp
     src/cpu/kopt_search.cpp
     src/cpu/path_system.cpp
@@ -36,12 +37,14 @@ if(CUDAEE_ENABLE_CUDA)
   enable_language(CUDA)
   list(APPEND CUDAEE_SOURCES
       src/cuda/ht_cd.cu
+      src/cuda/ht_path_append.cu
       src/cuda/jv_cuda.cu
       src/cuda/kopt_cost.cu
       src/cuda/path_compatibility.cu)
 else()
   list(APPEND CUDAEE_SOURCES
       src/cuda/ht_cd_stub.cpp
+      src/cuda/ht_path_append_stub.cpp
       src/cuda/jv_cuda_stub.cpp
       src/cuda/kopt_cost_stub.cpp
       src/cuda/path_compatibility_stub.cpp)

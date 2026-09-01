@@ -106,6 +106,7 @@ add_test(
     --proof "${HT_WAVEFRONT_PROOF}"
     --scheduler wavefront
     --backend cpu
+    --path-append-backend cpu
     --propagation-backend cpu
     --max-neighborhood 0
     --max-cd-candidates 8
