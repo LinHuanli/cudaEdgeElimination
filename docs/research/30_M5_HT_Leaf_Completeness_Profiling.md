@@ -75,3 +75,5 @@ all-CUDA、hybrid 与 fused 三路必须拥有完全相同的四个规范工作�
 5. CPU backend 也可复用同一批量精确矩阵，但在默认切换前必须与 scalar proof 字节、计数及性能做门禁。
 
 该路径不会用 GPU 的“无命中”直接证明任何事实。completeness 来自 CPU 对每个 cell 的独立精确计算，成功 witness 仍由既有通用 CPU verifier 重建；因此优化目标是更换 CPU 完整认证的数据布局，而不是放宽证明边界。
+
+该切片已由提交 `48d68dc` 完成；正式门禁和 `2.097×` hybrid search 加速见 [M5 HT leaf CPU 精确成本矩阵认证](31_M5_HT_CPU_Exact_Cost_Matrix.md)。本文保留 `ee4f3aa` 的前置画像作为优化依据。

@@ -31,7 +31,7 @@ M4.1 组合层已完成：CPU 路径规范化与匹配穷举、`m<=5` GPU 表查
 
 M4.2a CPU 叶规范器已完成：组合生成 proper 3/4/5-opt 模板，与固定 ElimTSP `swap.c` oracle 差分，并生成绑定快照/路径/兼容表哈希的 `path-kopt-proof-v1`。
 
-M4.2b 批量 CUDA k-opt cost 候选器已完成：GPU 输出完整 template 成本矩阵，成功候选由 CPU 重建；任何未接受集合都由 CPU 全模板兜底，因此 GPU 不承担 completeness 授权。
+M4.2b 批量 CUDA k-opt cost 候选器已完成：GPU 输出完整 template 成本矩阵，并与独立 CPU 精确整数矩阵逐 cell 比较；只有严格改善模板由 CPU 重建完整 witness。非改善结论来自 CPU 全矩阵认证，GPU 不承担 completeness 授权。
 
 M4.3a 有界困难叶 CPU fallback 已完成：收缩 forced outside matching 后用 Held–Karp 子集 DP 精确求解局部巡回，找到的任意阶交换由通用 verifier 重放。默认禁用，最多 18 个 block；规模或内存超限保持 `unresolved`，不会被解释为无改善。
 
@@ -53,7 +53,7 @@ M4.3b3b2b2a frontier path-append batching 已完成：一个 chunk 的全部 poi
 
 M4.3b3b2b2b1 规范 child edge SoA 已完成：CUDA 为每个可行 path-append task count/write 完整规范边集；不可行 slice 为空，主机前缀和使用 `uint64_t`。CPU 从完整 `NormalizePathSystem` 结果独立重建 offsets/edges 并逐元素认证，工作图仍只使用 CPU child。
 
-M4.3b3b2b2b2a frontier leaf batching 已完成：状态按 `(depth,path_count,node_count,max_k,incoming reply bucket)` 确定性分桶；`max_deletion_sets=1` 时同轮、同 k 的首个 cost rows 跨状态融合。CUDA 候选仍经 CPU 全模板 completeness fallback 与 witness verifier；`N=1/256` 的完整 V1 proof 逐字节一致。
+M4.3b3b2b2b2a frontier leaf batching 已完成：状态按 `(depth,path_count,node_count,max_k,incoming reply bucket)` 确定性分桶；`max_deletion_sets=1` 时同轮、同 k 的首个 cost rows 跨状态融合。CUDA 矩阵经 CPU 全矩阵认证，改善候选再经 witness verifier；`N=1/256` 的完整 V1 proof 逐字节一致。
 
 M4.3b3b2b2b2b1 一般 leaf 游标已完成：每个 path/outside 只生成当前 `cost_batch_size` block，同轮同 k 跨状态融合；CPU 消费后才推进下一组合。无界预算不预展开，3/4/5-opt、预算中断和随机路径的 batch/scalar proof 字节一致。
 
@@ -81,7 +81,7 @@ leaf 子阶段画像已完成：8-target 混合 leaf 的 GPU cost 仅占 `2.204%
 
 不可变 matching/reconnect 表缓存已完成：相同 8-target 协议下 CPU search 从 34.095 s 降至 24.138 s，四路 leaf 均约 `1.50×` 加速，proof 与图结果不变。缓存后混合 cursor consume 占 leaf 约 `85.45%`；下一门禁是区分候选 CPU 重建与完整 fallback，而不是继续合并只占约 3% 的 GPU cost。
 
-consume 细分已完成：`99.864%` 的 CUDA cost rows 和 `99.745%` 的 cells 进入 CPU 全模板 fallback，耗时占 consume 的 `99.033%`。下一切片必须保留逐 cell CPU 精确 completeness，但可用端口距离预计算和固定数组矩阵认证替换通用 `TryReconnect` 的重复集合/拓扑构造；仅严格改善模板进入完整 witness 重建。
+CPU 精确矩阵认证已完成：固定数组 scorer 和端口距离缓存逐 cell 复算 CUDA 成本，任何差异失败关闭；只有严格改善模板进入完整 witness 重建。相同 8-target clean run 的 51,309,996 cells 全部获 CPU 认证，旧通用 fallback 降为 0，hybrid leaf/search 相对 CPU scalar 为 `3.571×/2.097×`。下一门禁是让纯 CPU backend 复用同一批处理矩阵，以公平基线决定 GPU 后续方向。
 
 M5 仍未完成：`rl5915/d15112` 的最优 tour witness、跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 

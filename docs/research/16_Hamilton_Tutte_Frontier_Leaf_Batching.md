@@ -33,7 +33,7 @@ leaf 计算完成后仍按原 state index 回填 proof，候选 move 和 child �
 
 ## GPU 候选与 CPU 认证
 
-CUDA cost matrix 仍不是删除授权。任何低于 deleted cost 的 cell 都必须由 CPU 重建完整 tour、检查现存/重复边、重新计算整数成本、提取 inside matching，并调用独立 witness verifier。每个 CUDA row 在候选扫描后还运行 CPU 全模板 completeness fallback，因此 GPU 漏报只增加工作，不会把未穷尽搜索解释成 leaf 失败。
+CUDA cost matrix 仍不是删除授权。任何低于 deleted cost 的 cell 都必须由 CPU 重建完整 tour、检查现存/重复边、重新计算整数成本、提取 inside matching，并调用独立 witness verifier。初版在每个 CUDA row 后运行通用 CPU 全模板 fallback；M5 现已改为先逐 cell 比较独立 CPU 精确成本矩阵，以该 CPU 矩阵承担非改善 completeness。详见[CPU 精确成本矩阵认证](31_M5_HT_CPU_Exact_Cost_Matrix.md)。
 
 批量 API 对每个成功 proof 再调用 `VerifyPathSystemKOptProof`，全部通过才设置 `cpu_verified=true`。显式 CUDA 批次失败保留该 outside 为 unresolved；`auto` 批次失败时一次转为 CPU matrix。unproven leaf 不能独立授权，只会让 HT 继续递归或最终保留边。
 

@@ -12,7 +12,7 @@
 - Concorde 受限 overlay、列—边映射、`CCbigguy` 对偶注入与完整图精确定价证书；
 - 路径系统规范化、`m<=5` CPU 生成/CUDA 查询兼容表与 `m=6,7` CPU 回退；
 - proper 3/4/5-opt CPU 叶 witness、inside coverage 与 `path-kopt-proof-v1` 重放；
-- 批量 CUDA k-opt 精确成本候选矩阵，以及 GPU 未命中后的 CPU completeness fallback；
+- 批量 CUDA k-opt 精确成本候选矩阵、逐 cell CPU 整数认证，以及仅对严格改善模板执行的完整 witness 重建；
 - 收缩 forced outside matching 的 CPU 精确 Held–Karp 子集 DP 困难叶回退；
 - 浅层 Hamilton–Tutte `c,d` AND–OR 根证明与 CPU 复核的 CUDA 候选筛选；
 - CPU 递归 Hamilton–Tutte point/end moves、continuation arena 与全局 `recursive-ht-proof-v1`；

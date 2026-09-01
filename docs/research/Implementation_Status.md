@@ -10,7 +10,7 @@
 | M3.1 对偶稳定化与边集导出 | 待实现 | pr299 PDLP 完整图界偏弱；尚未导出每边 exact RC/Concorde 消元后边集 |
 | M4.1 path-system 组合层 | 完成 | 路径规范化；固定哈希表；368,047 单元 CPU/CUDA 全量差分；`m=6,7` CPU fallback |
 | M4.2a CPU k-opt 叶证明 | 完成 | proper 3/4/5-opt `4/25/208` 模板；ElimTSP oracle 差分；`path-kopt-proof-v1` 独立重放 |
-| M4.2b CUDA k-opt cost | 完成（候选器） | 批量精确成本矩阵；CPU/CUDA 单元一致；坏/漏候选 CPU 全模板兜底；memcheck 0 error |
+| M4.2b CUDA k-opt cost | 完成（CPU 认证候选器） | 批量精确成本矩阵；逐 cell CPU/CUDA 一致；改善 witness 完整重建；memcheck 0 error |
 | M4.3a 精确困难叶 | 完成（有界 CPU fallback） | 收缩 forced outside matching；Held–Karp 子集 DP；通用交换 witness 独立重放；block 超限为 unresolved |
 | M4.3b1 浅层 HS AND–OR | 完成（研究 API） | `c,d` OR；完整邻边对 AND；嵌套 leaf 重放；CUDA flags 经 CPU 全量差分 |
 | M4.3b2 递归 HT 语义与证书 | 完成（CPU 研究 API/CLI） | extra point/end；continuation arena；全局 proof V1；`ht-prove`/`ht-verify` 严格重放 |
@@ -28,7 +28,7 @@
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
-| M5 中大型调优 | 进行中（JV 三轮 + HT profiling） | 不可变 leaf 表缓存令 CPU search 降 29.2%；99.864% CUDA rows 进入 CPU completeness fallback |
+| M5 中大型调优 | 进行中（JV 三轮 + HT matrix fast path） | 51,309,996 cells 全部 CPU 认证；旧 fallback 为 0；HT hybrid search `2.097×` |
 
 ## 当前基准结果
 
@@ -52,6 +52,8 @@ M5 HT 不可变表缓存绑定 `589bca0`：线程安全延迟缓存复用 path-c
 
 M5 HT completeness 画像绑定 `ee4f3aa`：V5 report/V6 summary 显示 727,635 个 CUDA cost rows 中 726,648 个（`99.864%`）进入 CPU 全模板 fallback，51,179,094/51,309,996 cells（`99.745%`）被通用重连器重新穷举。混合 consume 中 candidate/fallback 为 `0.057/15.107 s`，fallback 占 `99.033%`。三条 CUDA leaf 路径计数、proof、图和 tour 均一致；下一步以 CPU 独立精确矩阵替换昂贵的通用无改善认证，不降低 completeness。
 
+M5 HT CPU 精确矩阵认证绑定 `48d68dc`：固定数组 scorer 对 CUDA cost matrix 的 51,309,996 cells 全部进行独立 CPU 整数认证，差异立即失败关闭；987 个严格改善模板仍由通用 CPU 路径重建完整 witness，旧 completeness fallback 降为 0。相同 8-target clean run 中，hybrid cursor consume 从 `15.255 s` 降至 `0.126 s`，leaf/search 为 `5.011/11.586 s`，相对 CPU scalar 达到 `3.571×/2.097×`；all-CUDA/fused search 分别为 `11.673/11.499 s`。四路工作签名、最终图哈希 `fe11f98414b04c0e`、proof 重放和 pcb3038 最优 tour 门禁完全一致。下一步让 CPU backend 复用相同矩阵 fast path，建立公平基线。
+
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
 Concorde 随机 20 点 epoch：25 行、43 列；QSopt 与 cuOpt 模型目标均为 `88`。cuOpt primal violation 为 `4.44e-15`，reduced-cost residual 为 `1.57e-14`；完整图 exact lower bound 为 `87.3932819641`，上界为 `88`。
@@ -62,7 +64,7 @@ pr299 Concorde epoch：454 行、888 列、8561 个非零元；cuOpt 状态 `OPT
 
 CPU k-opt 叶证明：自动生成的 proper 3/4/5-opt 模板数为 `4/25/208`，每阶 2,000 个阈值定向随机矩阵与固定子模块 `swap.c` oracle 一致；成功 witness、全 outside coverage、预算 unresolved 和篡改拒绝均有回归。
 
-CUDA k-opt cost：按删除集合与 proper template 形成精确成本矩阵，CPU/CUDA 逐单元一致；候选成功和 GPU 无命中后的 CPU completeness fallback 均通过回归，CUDA memcheck 为 0 error。当前尚未以真实 HS 任务报告加速比。
+CUDA k-opt cost：按删除集合与 proper template 形成精确成本矩阵，CUDA 全矩阵与独立 CPU 整数矩阵逐 cell 一致后才进入 consumer；非改善 completeness 由 CPU 矩阵认证，严格改善候选再由通用 CPU 路径重建并验证 witness。真实 HT 8-target 的 51,309,996 cells 全部认证，CUDA memcheck 为 0 error；相对 CPU scalar 的 hybrid search 为 `2.097×`，但仍需 CPU matrix 公平基线。
 
 CPU 精确困难叶：将每条 forced outside edge 收缩为可双向访问的 block，其余节点为 singleton block；固定一个 block 的方向消除无向反转对称后，以 Held–Karp 子集 DP 穷举所有 block 次序和方向。比较时消去两条巡回共有的 outside 成本，并禁止候选重新使用 required path edge。成功结果转换为任意 `k>=2` 的交换 witness，再交给同一独立 verifier；默认关闭，启用时最多 18 个 block，内存不足或超限均返回 `unresolved`。60 组随机 7 点、每组两个 outside 的结果与直接 Hamilton 巡回枚举最优值一致，并覆盖 7-opt proof 往返。CPU Debug/ASan、CPU Release 与 CUDA Release 全量回归通过，GPU 2 上 k-opt memcheck 为 0 error。
 
@@ -84,7 +86,7 @@ Frontier path append：一个 chunk 的可尝试 point tasks 先共用一次多�
 
 规范 child edge SoA：父状态新增严格排序的 edge spans。第一阶段输出可行 flags 与 child edge counts，主机建立 `uint64_t` offsets，第二阶段在 task 私有 slice 中复制父边、追加 reply 边并确定性排序；重复边、区间不一致或 CPU 全量差分失败均拒绝批次。固定 recursive-point 全 CUDA wavefront 为 3 batches/84 tasks/172 child edge records，34-state 工作图和 4 节点 V1 proof 保持不变并通过独立重放。
 
-Frontier leaf batching：当前 reply chunk 先按 `(depth,path_count,node_count,max_k,incoming reply bucket)` 分桶。每轮把各 proof 首个未覆盖 outside 的同 k cost blocks 合并，然后按原顺序执行 CPU `TryReconnect`、全模板 completeness fallback、inside coverage 与独立 proof verifier。固定 recursive-point 的 34 rows/136 cells 从 34 个 cost batches 降为 6 个，最大 batch 16；`N=1/256` 的 4 节点 V1 proof 逐字节一致。
+Frontier leaf batching：当前 reply chunk 先按 `(depth,path_count,node_count,max_k,incoming reply bucket)` 分桶。每轮把各 proof 首个未覆盖 outside 的同 k cost blocks 合并，CUDA matrix 先经 CPU 全矩阵逐 cell 认证，只有严格改善 cell 按原顺序执行 `TryReconnect`、inside coverage 与独立 proof verifier。固定 recursive-point 的 34 rows/136 cells 从 34 个 cost batches 降为 6 个，最大 batch 16；`N=1/256` 的 4 节点 V1 proof 逐字节一致。
 
 一般 leaf 游标：每个 path/outside 保留当前 k、组合索引、统计计数和至多一个 pending block；主机只在 CPU 消费当前 block 后推进。固定双 7 点完整 3/4/5-opt 穷举把 50 tasks/2660 cells 合为 13 batches，预算 3 的 `2+1` block 停止点也与 scalar 一致；12 组随机图、三种路径布局和多种 k/预算/batch size 的 CPU/CUDA V1 proof 全部逐字节差分。
 

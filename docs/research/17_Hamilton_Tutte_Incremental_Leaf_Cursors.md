@@ -18,7 +18,7 @@ M4.3b3b2b2b2b1 将 frontier leaf batching 从单 deletion-set 扩展到任意 `m
 
 `PrepareNextBlock` 严格复现 scalar 搜索的循环顺序：`k=3,4,5`，每阶按组合字典序，block 内最多 `cost_batch_size` 项。预算检查发生在构造下一项之前；若一个 block 已含合法前缀，先完整消费前缀，再返回与 scalar 相同的“预算耗尽”。
 
-`ConsumeBlock` 按原 work/template 顺序处理 cost cells。低于 deleted cost 的 GPU 候选仍逐项进入 CPU `TryReconnect`；CUDA block 的每个 work 随后运行 CPU 全模板 completeness fallback。找到 witness、出现 fatal 输入或计数溢出时，游标立即完成，不再生成后续组合。
+`ConsumeBlock` 按原 work/template 顺序处理 cost cells。CUDA block 进入 consumer 前必须与独立 CPU 精确矩阵逐 cell 相等；低于 deleted cost 的候选仍逐项进入 CPU `TryReconnect`。CPU 全矩阵已经覆盖该 block 的全部 proper templates，因此无改善 row 不再调用通用 completeness fallback。找到 witness、出现 fatal 输入或计数溢出时，游标立即完成，不再生成后续组合。
 
 ## 跨游标调度
 
@@ -33,7 +33,7 @@ M4.3b3b2b2b2b1 将 frontier leaf batching 从单 deletion-set 扩展到任意 `m
 
 任何时刻每个游标最多保留一个 block。不同游标可以处于不同 `k`；调度器每轮最多产生 k=3/4/5 三个矩阵，不会为了对齐而跳过或重排单游标工作。
 
-CPU cost backend 继续使用原 scalar 搜索，避免改变其直接全模板计数语义。`auto` 的 CUDA batch 失败会整批转 CPU matrix；显式 CUDA 失败使对应游标 unresolved，之后仍允许配置的 CPU exact fallback。成功 proof 最终再次进入独立 `VerifyPathSystemKOptProof`。
+当前 CPU cost backend 仍使用原 scalar 搜索，避免在未完成 proof/性能门禁前改变默认基线；这是紧接[矩阵认证快路径](31_M5_HT_CPU_Exact_Cost_Matrix.md)之后的待优化项。`auto` 的 CUDA batch 失败会整批转 CPU matrix；显式 CUDA 失败使对应游标 unresolved，之后仍允许配置的 CPU exact fallback。成功 proof 最终再次进入独立 `VerifyPathSystemKOptProof`。
 
 ## 等价与回归
 

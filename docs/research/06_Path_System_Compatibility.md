@@ -105,13 +105,15 @@ CPU 叶搜索没有复制 `swap.c` 的 1,900 余行展开判断，而是从相�
 
 CPU 有独立的成本矩阵实现，CUDA 回归逐单元比较三阶模板及包含相邻删除边端口的任务；批量搜索成功路径也会重建 witness 并再次调用 `VerifyKOptWitness`。compute-sanitizer memcheck 为 0 error。
 
-这张 GPU 成本矩阵被严格定义为**候选 oracle**，不是 completeness certificate。`FindKOptWitness` 按 `cost_batch_size` 分批调用它：
+这张 GPU 成本矩阵被严格定义为**候选 oracle**，不是独立的 completeness certificate。`FindKOptWitness` 按 `cost_batch_size` 分批调用它：
 
-1. 对 GPU 标出的低成本模板逐个做 CPU 完整重连与 witness 复核；
-2. 若某个候选成功，可安全提前返回；
-3. 若 GPU 对一个删除集合没有给出可接受 witness，CPU 对该集合重新穷举全部 proper templates；
-4. `auto` 模式的 CUDA 运行错误转 CPU；显式 CUDA 失败返回 `unresolved`；
-5. 因而 kernel 漏报只会损失性能，不会把“未知”变成证明。
+1. CPU 用独立固定数组 scorer 计算同规模精确整数矩阵；
+2. GPU/CPU 全部 cells 必须相等，否则显式 CUDA 失败关闭；
+3. 对认证矩阵中严格改善的模板逐个做 CPU 完整重连与 witness 复核；
+4. 若某个候选成功，可安全提前返回；无严格改善则由 CPU 全矩阵完成 completeness；
+5. `auto` 模式的 CUDA 运行错误转 CPU；显式 CUDA 失败返回 `unresolved`。
+
+早期实现曾在每个无命中 row 后调用通用重连器全模板 fallback；M5 已用等价的[CPU 精确成本矩阵认证](31_M5_HT_CPU_Exact_Cost_Matrix.md)替换该重复路径。GPU 仍不能单独把“未知”变成证明。
 
 ## 有界精确困难叶
 

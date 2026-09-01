@@ -2,7 +2,7 @@
 
 ## 范围
 
-M4.3b3b2b2b2b2a 消除增量 leaf cost 调度中每个 CUDA batch 重复分配并上传图坐标和 proper reconnect templates 的开销。缓存只改变设备数据生命周期，不改变 deletion-set、template、outside matching 的枚举顺序，也不改变 CPU `TryReconnect`、completeness fallback 或 proof verifier。
+M4.3b3b2b2b2b2a 消除增量 leaf cost 调度中每个 CUDA batch 重复分配并上传图坐标和 proper reconnect templates 的开销。该切片只改变设备数据生命周期，不改变 deletion-set、template、outside matching 的枚举顺序，也不改变当时的 CPU `TryReconnect`、completeness fallback 或 proof verifier；后续 M5 以 CPU 精确矩阵认证替换了通用 fallback。
 
 每个主机线程维护一个首选 CUDA 设备；该线程在曾使用的每个设备上最多保留一份 k-opt cache。首次选择仍使用“可见设备中空闲显存最多者”，随后保持设备亲和性，避免少量缓存分配导致多个等容量 GPU 之间来回迁移。
 
@@ -60,6 +60,6 @@ miss 数等于 `leaf_cuda_cost_batches - hits`。CPU 或 auto fallback 到 CPU �
 
 ## 安全边界与后续
 
-缓存内容仍只服务 GPU 候选成本；任何 cache 命中都不构成删边授权。设备异常使显式 CUDA 搜索 unresolved，`auto` 仍可回退 CPU matrix；GPU 无候选时仍逐 work 执行 CPU 全模板 completeness fallback。
+缓存内容仍只服务 GPU 候选成本；任何 cache 命中都不构成删边授权。设备异常或 CPU/CUDA 矩阵差异使显式 CUDA 搜索 unresolved，`auto` 仍可回退 CPU matrix；GPU 无候选时由逐 cell CPU 精确矩阵提供 completeness，详见 [M5 矩阵认证](31_M5_HT_CPU_Exact_Cost_Matrix.md)。
 
 当前缓存为线程本地、同步 kernel 的正确性基线，没有跨线程共享或异步 stream 生命周期。后续 GPU/CPU long-tail、[cooperative multi-block continuation](20_Hamilton_Tutte_Multi_Block_Continuation.md)与[HT epoch commit](21_Hamilton_Tutte_Epoch_Commit.md)均已保持完整 proof 字节等价或独立重放。
