@@ -30,6 +30,9 @@ struct RunMetrics {
   std::uint64_t static_cache_hits{};
   std::uint64_t workspace_cache_hits{};
   std::uint64_t peak_resident_bytes{};
+  double h2d_ms{};
+  double kernel_ms{};
+  double d2h_ms{};
 };
 
 std::size_t ParseRuns(const std::string_view text) {
@@ -85,6 +88,9 @@ RunMetrics RunOnce(const cudaee::GraphSnapshot& initial, const cudaee::Backend b
     metrics.static_cache_hits += epoch.jv_static_cache_hit ? 1U : 0U;
     metrics.workspace_cache_hits += epoch.jv_workspace_cache_hit ? 1U : 0U;
     metrics.peak_resident_bytes = std::max(metrics.peak_resident_bytes, epoch.jv_resident_bytes);
+    metrics.h2d_ms += epoch.jv_h2d_ms;
+    metrics.kernel_ms += epoch.jv_kernel_ms;
+    metrics.d2h_ms += epoch.jv_d2h_ms;
   }
   *final_graph = std::move(graph);
   return metrics;
@@ -97,7 +103,8 @@ void PrintMetrics(const std::string_view backend, const std::size_t run,
             << metrics.replay_ms << ',' << metrics.edges_scanned << ',' << metrics.committed << ','
             << metrics.active_edges << ',' << cudaee::HexHash(metrics.final_hash) << ','
             << metrics.snapshot_ms << ',' << metrics.commit_ms << ',' << metrics.static_cache_hits
-            << ',' << metrics.workspace_cache_hits << ',' << metrics.peak_resident_bytes << '\n';
+            << ',' << metrics.workspace_cache_hits << ',' << metrics.peak_resident_bytes << ','
+            << metrics.h2d_ms << ',' << metrics.kernel_ms << ',' << metrics.d2h_ms << '\n';
 }
 
 } // namespace
@@ -124,7 +131,7 @@ int main(const int argc, char** argv) {
 
     std::cout << "backend,run,algorithm_ms,propose_ms,verify_ms,replay_ms,edges_scanned,committed,"
                  "active_edges,final_hash,snapshot_ms,commit_ms,static_cache_hits,"
-                 "workspace_cache_hits,peak_resident_bytes\n";
+                 "workspace_cache_hits,peak_resident_bytes,h2d_ms,kernel_ms,d2h_ms\n";
     for (std::size_t run = 1U; run <= runs; ++run) {
       cudaee::GraphSnapshot cpu_graph;
       const RunMetrics cpu = RunOnce(initial, cudaee::Backend::kCpu, &cpu_graph);

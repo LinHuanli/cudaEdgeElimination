@@ -5,6 +5,8 @@
 #include "cuda_edge_elimination/tour.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -180,6 +182,18 @@ void TestJvCudaResidentCache() {
   Check(selected_device >= 0 && !first_usage.static_hit && !first_usage.workspace_hit &&
             first_usage.resident_bytes > 0U,
         "first CUDA JV cache run uploads static graph and workspace");
+  const std::uint64_t edge_count = graph.edges.size();
+  const std::uint64_t node_count = graph.points.size();
+  const std::uint64_t adjacency_count = graph.neighbors.size();
+  // CSR 动态区应为两个 int32 数组，不允许悄悄退回重复的 int64 权重副本。
+  const std::uint64_t expected_resident_bytes =
+      24U * edge_count + 20U * node_count + 4U + 8U * adjacency_count;
+  Check(first_usage.resident_bytes == expected_resident_bytes,
+        "CUDA JV resident bytes use int32 CSR edge ids");
+  Check(std::isfinite(first_usage.h2d_ms) && first_usage.h2d_ms >= 0.0 &&
+            std::isfinite(first_usage.kernel_ms) && first_usage.kernel_ms >= 0.0 &&
+            std::isfinite(first_usage.d2h_ms) && first_usage.d2h_ms >= 0.0,
+        "CUDA JV phase timings are finite and non-negative");
 
   cudaee::JvCudaCacheUsage second_usage;
   const std::vector<cudaee::Candidate> second =

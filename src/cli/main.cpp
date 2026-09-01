@@ -223,7 +223,9 @@ void PrintEliminationSummary(const cudaee::GraphSnapshot& graph,
               << " commit_ms=" << epoch.commit_ms
               << " jv_static_cache_hit=" << (epoch.jv_static_cache_hit ? 1 : 0)
               << " jv_workspace_cache_hit=" << (epoch.jv_workspace_cache_hit ? 1 : 0)
-              << " jv_resident_bytes=" << epoch.jv_resident_bytes << '\n';
+              << " jv_resident_bytes=" << epoch.jv_resident_bytes
+              << " jv_h2d_ms=" << epoch.jv_h2d_ms << " jv_kernel_ms=" << epoch.jv_kernel_ms
+              << " jv_d2h_ms=" << epoch.jv_d2h_ms << '\n';
   }
   std::cout << "status=OK backend=" << result.backend << " committed=" << committed
             << " active_edges=" << graph.ActiveEdgeCount()

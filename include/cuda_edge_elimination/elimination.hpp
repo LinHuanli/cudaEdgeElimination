@@ -33,12 +33,19 @@ struct EpochMetrics {
   bool jv_static_cache_hit{false};
   bool jv_workspace_cache_hit{false};
   std::uint64_t jv_resident_bytes{};
+  double jv_h2d_ms{};
+  double jv_kernel_ms{};
+  double jv_d2h_ms{};
 };
 
 struct JvCudaCacheUsage {
   bool static_hit{false};
   bool workspace_hit{false};
   std::uint64_t resident_bytes{};
+  // 三段同步 wall time 仅用于性能诊断，不进入 proof。
+  double h2d_ms{};
+  double kernel_ms{};
+  double d2h_ms{};
 };
 
 struct EliminationResult {

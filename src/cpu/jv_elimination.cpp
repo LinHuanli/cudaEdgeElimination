@@ -290,6 +290,9 @@ EliminationResult RunJvElimination(GraphSnapshot* const graph, const Backend bac
     metrics.jv_static_cache_hit = cuda_cache.static_hit;
     metrics.jv_workspace_cache_hit = cuda_cache.workspace_hit;
     metrics.jv_resident_bytes = cuda_cache.resident_bytes;
+    metrics.jv_h2d_ms = cuda_cache.h2d_ms;
+    metrics.jv_kernel_ms = cuda_cache.kernel_ms;
+    metrics.jv_d2h_ms = cuda_cache.d2h_ms;
 
     const auto verify_start = std::chrono::steady_clock::now();
     std::vector<Candidate> verified = VerifyCandidates(*graph, proposed, &metrics.rejected);
