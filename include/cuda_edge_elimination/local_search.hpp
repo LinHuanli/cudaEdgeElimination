@@ -209,6 +209,24 @@ void WritePathSystemKOptProof(const std::filesystem::path& path, const PathSyste
 
 namespace detail {
 
+// 由调用方在同步只读作用域入口构造；绑定图对象身份，供同一作用域内多个 leaf batch 复用。
+class KOptSnapshotBinding {
+public:
+  explicit KOptSnapshotBinding(const GraphSnapshot& graph);
+
+  [[nodiscard]] bool Matches(const GraphSnapshot& graph) const noexcept { return graph_ == &graph; }
+  [[nodiscard]] std::uint64_t snapshot_hash() const noexcept { return snapshot_hash_; }
+
+private:
+  const GraphSnapshot* graph_{};
+  std::uint64_t snapshot_hash_{};
+};
+
+[[nodiscard]] PathSystemKOptBatchResult ProvePathSystemsByKOptBoundToSnapshot(
+    const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
+    const std::optional<NodeEdge>& required_edge, const KOptSnapshotBinding& binding,
+    const KOptSearchOptions& options = {});
+
 [[nodiscard]] bool KOptCostCudaAvailable(std::string* reason);
 [[nodiscard]] std::vector<std::int64_t>
 EvaluateKOptTemplateCostsCuda(const GraphSnapshot& graph, const KOptReconnectTable& table,

@@ -617,6 +617,30 @@ void TestNoImprovementAndBudget() {
   }
 #endif
 
+  const cudaee::detail::KOptSnapshotBinding cursor_binding(seven_node_graph);
+  const cudaee::PathSystemKOptBatchResult bound_cursor_batch =
+      cudaee::detail::ProvePathSystemsByKOptBoundToSnapshot(
+          seven_node_graph, {seven_node_paths, seven_node_paths}, cudaee::NodeEdge{0, 1},
+          cursor_binding, cursor_options);
+  Check(bound_cursor_batch.cost_tasks == cursor_batch.cost_tasks &&
+            bound_cursor_batch.cost_cells == cursor_batch.cost_cells &&
+            cudaee::SerializePathSystemKOptProof(bound_cursor_batch.proofs[0]) ==
+                cudaee::SerializePathSystemKOptProof(cursor_batch.proofs[0]) &&
+            cudaee::SerializePathSystemKOptProof(bound_cursor_batch.proofs[1]) ==
+                cudaee::SerializePathSystemKOptProof(cursor_batch.proofs[1]),
+        "snapshot-bound batches preserve canonical work and proof bytes");
+  cudaee::GraphSnapshot copied_seven_node_graph = seven_node_graph;
+  bool mismatched_binding_rejected = false;
+  try {
+    const auto ignored = cudaee::detail::ProvePathSystemsByKOptBoundToSnapshot(
+        copied_seven_node_graph, {seven_node_paths}, cudaee::NodeEdge{0, 1}, cursor_binding,
+        cursor_options);
+    static_cast<void>(ignored);
+  } catch (const std::invalid_argument&) {
+    mismatched_binding_rejected = true;
+  }
+  Check(mismatched_binding_rejected, "snapshot binding rejects a different graph object");
+
   cudaee::KOptSearchOptions budget_cursor_options = cursor_options;
   budget_cursor_options.max_deletion_sets = 3;
   const cudaee::PathSystemKOptProof scalar_budget_cursor = cudaee::ProvePathSystemByKOpt(

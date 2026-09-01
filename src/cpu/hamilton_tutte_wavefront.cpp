@@ -242,6 +242,7 @@ struct WaveBuildContext {
   std::uint32_t leaf_frontier_batch_states{256};
   bool fuse_leaf_buckets{false};
   PointCandidateOrderCache point_candidate_order;
+  const detail::KOptSnapshotBinding* leaf_snapshot_binding{};
   HtWavefrontResult* result{};
   bool budget_exhausted{false};
   bool path_append_failed{false};
@@ -1078,8 +1079,12 @@ void EvaluateLeafStateIndices(WaveBuildContext* const context, std::vector<WaveS
     PathSystemKOptBatchResult batch;
     {
       ScopedPhaseTimer timer(&context->result->leaf_ms);
-      batch = ProvePathSystemsByKOpt(*context->graph, path_systems, context->target,
-                                     context->options->root_options.leaf_options);
+      if (context->leaf_snapshot_binding == nullptr) {
+        throw std::logic_error("HT leaf 缺少不可变 snapshot binding");
+      }
+      batch = detail::ProvePathSystemsByKOptBoundToSnapshot(
+          *context->graph, path_systems, context->target, *context->leaf_snapshot_binding,
+          context->options->root_options.leaf_options);
     }
     if (batch.proofs.size() != path_systems.size()) {
       throw std::logic_error("HT leaf batch 返回的 proof 数量不一致");
@@ -1363,7 +1368,8 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
                                          const HtWavefrontOptions& options) {
   HtWavefrontResult result;
   HtRecursiveProof& proof = result.proof;
-  proof.snapshot_hash = graph.ContentHash();
+  const detail::KOptSnapshotBinding leaf_snapshot_binding(graph);
+  proof.snapshot_hash = leaf_snapshot_binding.snapshot_hash();
   proof.target_edge = CanonicalEdge(raw_target.u, raw_target.v);
   proof.cd_mode = options.search_options.root_options.cd_mode;
   if (options.propagation_backend != PathCompatibilityBackend::kAuto &&
@@ -1436,6 +1442,7 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
                            .leaf_frontier_batch_states = options.leaf_frontier_batch_states,
                            .fuse_leaf_buckets = options.fuse_leaf_buckets,
                            .point_candidate_order = {},
+                           .leaf_snapshot_binding = &leaf_snapshot_binding,
                            .result = &result,
                            .budget_exhausted = false,
                            .path_append_failed = false,

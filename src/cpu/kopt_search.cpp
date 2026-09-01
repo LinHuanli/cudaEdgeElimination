@@ -2072,9 +2072,15 @@ void RecordKOptCpuLongTail(PathSystemKOptBatchResult* const result, const std::s
 
 } // namespace
 
-PathSystemKOptBatchResult ProvePathSystemsByKOpt(
+detail::KOptSnapshotBinding::KOptSnapshotBinding(const GraphSnapshot& graph)
+    : graph_(&graph), snapshot_hash_(graph.ContentHash()) {}
+
+namespace {
+
+PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
     const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
-    const std::optional<NodeEdge>& required_edge, const KOptSearchOptions& options) {
+    const std::optional<NodeEdge>& required_edge, const KOptSearchOptions& options,
+    const std::optional<std::uint64_t> bound_snapshot_hash) {
   PathSystemKOptBatchResult result;
   if (path_systems.empty()) {
     result.cpu_verified = true;
@@ -2086,7 +2092,7 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
   {
     ScopedPhaseTimer timer(&result.setup_ms);
     ScopedPhaseTimer initialize_timer(&result.proof_initialize_ms);
-    snapshot_hash = graph.ContentHash();
+    snapshot_hash = bound_snapshot_hash.has_value() ? *bound_snapshot_hash : graph.ContentHash();
     works.reserve(path_systems.size());
     for (const NormalizedPathSystem& paths : path_systems) {
       works.push_back(InitializeBatchedPathProof(paths, snapshot_hash));
@@ -2313,6 +2319,25 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
         options.cost_backend == PathCompatibilityBackend::kCpu ? "cpu-scalar" : "scalar";
   }
   return result;
+}
+
+} // namespace
+
+PathSystemKOptBatchResult ProvePathSystemsByKOpt(
+    const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
+    const std::optional<NodeEdge>& required_edge, const KOptSearchOptions& options) {
+  return ProvePathSystemsByKOptImpl(graph, path_systems, required_edge, options, std::nullopt);
+}
+
+PathSystemKOptBatchResult detail::ProvePathSystemsByKOptBoundToSnapshot(
+    const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
+    const std::optional<NodeEdge>& required_edge, const KOptSnapshotBinding& binding,
+    const KOptSearchOptions& options) {
+  if (!binding.Matches(graph)) {
+    throw std::invalid_argument("k-opt snapshot binding 与图对象不一致");
+  }
+  return ProvePathSystemsByKOptImpl(graph, path_systems, required_edge, options,
+                                    binding.snapshot_hash());
 }
 
 bool VerifyPathSystemKOptProof(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
