@@ -66,6 +66,6 @@ HT scan report 升级为 V9，benchmark summary 升级为 V11，新增：
 
 CPU Debug/Release、CUDA Release、GPU 大矩阵差分、无 OpenMP 回退和 compute-sanitizer memcheck 均通过。
 
-## 6. 下一切片
+## 6. 后续结果
 
-并行后 CPU leaf 中 cost evaluate 仍占 53.02%，但 setup、cursor prepare、consume 和矩阵 scatter 合计也已不可忽略。下一步先增加“CPU backend + leaf bucket fusion”对照：它可以把 frontier batches 从 500 降到 86、并行 cost batches 从 726 降到约 208，并复用更少的 batch 级快照哈希。只有同一 clean commit 上证明端到端稳定获益，才考虑把融合用于 CPU 默认路径；否则保持现有默认调度并转向 scorer 数据布局。
+[CPU leaf 复杂度桶融合](36_M5_HT_CPU_Leaf_Bucket_Fusion.md)已在 clean commit 上完成：frontier batches 从 500 降至 86，并行 cells 覆盖从 95.263% 升至 99.489%，CPU leaf/search 分别获得 `1.149×/1.113×` 加速。V12 保留五路长期对照；在 rl5915/d15112 补齐最优 tour 门禁前，融合开关仍默认关闭。

@@ -41,5 +41,6 @@
 37. [M5 HT Hamilton reply 主机去重与过滤缓存](research/33_M5_HT_Hamilton_Reply_Host_Cache.md)：批内 center 去重、邻边预计算、V7/V9 画像与 8-target search 约 2.26× 降幅。
 38. [M5 HT leaf setup 画像与快照哈希复用](research/34_M5_HT_Leaf_Setup_Snapshot_Hash.md)：V8/V10 setup 细分、批内快照哈希复用及 CPU search 约 1.45× 降幅。
 39. [M5 HT CPU 精确成本矩阵行并行](research/35_M5_HT_CPU_Cost_Row_Parallelism.md)：8,192-cell 门槛、8-thread 静态 row 分片、V9/V11 门禁及 CPU search 约 1.85× 降幅。
+40. [M5 HT CPU leaf 复杂度桶融合](research/36_M5_HT_CPU_Leaf_Bucket_Fusion.md)：V12 五路门禁、CPU 并行覆盖提升及 pcb3038 search 1.113× 收益。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。
