@@ -97,6 +97,10 @@ struct HtScanAttempt {
   std::uint64_t leaf_cost_cells{};
   std::uint64_t leaf_cuda_cost_batches{};
   std::uint64_t leaf_cpu_long_tail_cells{};
+  std::uint64_t leaf_cost_rows_consumed{};
+  std::uint64_t leaf_candidate_templates_rechecked{};
+  std::uint64_t leaf_cpu_completeness_rows{};
+  std::uint64_t leaf_cpu_completeness_templates{};
   std::uint64_t peak_leaf_device_cache_bytes{};
   std::uint64_t path_append_tasks{};
   std::uint64_t hamilton_replies_generated{};
@@ -109,6 +113,8 @@ struct HtScanAttempt {
   double leaf_cost_evaluate_ms{};
   double leaf_cost_scatter_ms{};
   double leaf_cursor_consume_ms{};
+  double leaf_candidate_recheck_ms{};
+  double leaf_completeness_fallback_ms{};
   double leaf_scalar_search_ms{};
   double leaf_apply_ms{};
   double leaf_proof_verify_ms{};
@@ -142,6 +148,10 @@ struct HtScanResult {
   std::uint64_t leaf_cost_cells{};
   std::uint64_t leaf_cuda_cost_batches{};
   std::uint64_t leaf_cpu_long_tail_cells{};
+  std::uint64_t leaf_cost_rows_consumed{};
+  std::uint64_t leaf_candidate_templates_rechecked{};
+  std::uint64_t leaf_cpu_completeness_rows{};
+  std::uint64_t leaf_cpu_completeness_templates{};
   std::uint64_t peak_leaf_device_cache_bytes{};
   double target_selection_ms{};
   double candidate_ms{};
@@ -152,6 +162,8 @@ struct HtScanResult {
   double leaf_cost_evaluate_ms{};
   double leaf_cost_scatter_ms{};
   double leaf_cursor_consume_ms{};
+  double leaf_candidate_recheck_ms{};
+  double leaf_completeness_fallback_ms{};
   double leaf_scalar_search_ms{};
   double leaf_apply_ms{};
   double leaf_proof_verify_ms{};

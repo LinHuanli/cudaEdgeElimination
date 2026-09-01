@@ -512,7 +512,9 @@ void TestNoImprovementAndBudget() {
   Check(cursor_batch.cpu_verified && cursor_batch.scalar_searches == 0U &&
             cursor_batch.cost_tasks == 2U * scalar_cursor.deletion_sets_tested &&
             cursor_batch.cost_batches == 13U && cursor_batch.cost_tasks == 50U &&
-            cursor_batch.cost_cells == 2660U &&
+            cursor_batch.cost_cells == 2660U && cursor_batch.cost_rows_consumed == 50U &&
+            cursor_batch.candidate_recheck_ms >= 0.0 &&
+            cursor_batch.completeness_fallback_ms >= 0.0 &&
             cudaee::SerializePathSystemKOptProof(cursor_batch.proofs[0]) ==
                 cudaee::SerializePathSystemKOptProof(scalar_cursor) &&
             cudaee::SerializePathSystemKOptProof(cursor_batch.proofs[1]) ==
@@ -524,7 +526,10 @@ void TestNoImprovementAndBudget() {
               cursor_batch.snapshot_cache_hits + 1U == cursor_batch.cuda_cost_batches &&
               cursor_batch.template_cache_hits + 3U == cursor_batch.cuda_cost_batches &&
               cursor_batch.workspace_cache_hits + 3U == cursor_batch.cuda_cost_batches &&
-              cursor_batch.peak_device_cache_bytes > 0U,
+              cursor_batch.peak_device_cache_bytes > 0U &&
+              cursor_batch.cpu_completeness_rows == cursor_batch.cost_rows_consumed &&
+              cursor_batch.cpu_completeness_templates == cursor_batch.cost_cells &&
+              cursor_batch.completeness_fallback_ms > 0.0,
           "incremental leaf batches expose one snapshot and three template/workspace uploads");
   }
 #endif
@@ -568,7 +573,8 @@ void TestPathSystemLeafCostBatch() {
             batch.cost_batches == 1U && batch.cost_tasks == 3U && batch.cost_cells == 12U &&
             batch.scalar_searches == 0U && batch.cuda_cost_batches == 0U &&
             batch.cpu_long_tail_batches == 1U && batch.cpu_long_tail_tasks == 3U &&
-            batch.cpu_long_tail_cells == 12U,
+            batch.cpu_long_tail_cells == 12U && batch.cost_rows_consumed == 3U &&
+            batch.cpu_completeness_rows == 0U && batch.cpu_completeness_templates == 0U,
         "leaf cost batch fuses three first deletion-set rows");
   const std::string expected = cudaee::SerializePathSystemKOptProof(scalar);
   for (const cudaee::PathSystemKOptProof& proof : batch.proofs) {
@@ -613,7 +619,8 @@ void TestLeafCpuLongTailThreshold() {
   Check(small.cost_backend == "cpu" && small.cost_batches == 1U && small.cost_tasks == 31U &&
             small.cost_cells == 124U && small.cpu_long_tail_batches == 1U &&
             small.cpu_long_tail_tasks == 31U && small.cpu_long_tail_cells == 124U &&
-            small.cuda_cost_batches == 0U,
+            small.cuda_cost_batches == 0U && small.cost_rows_consumed == 31U &&
+            small.cpu_completeness_rows == 0U,
         "auto leaf matrix below 128 cells uses the explicit CPU long-tail");
   for (const cudaee::PathSystemKOptProof& proof : small.proofs) {
     Check(cudaee::SerializePathSystemKOptProof(proof) ==

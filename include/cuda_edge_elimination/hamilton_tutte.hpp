@@ -228,6 +228,10 @@ struct HtWavefrontResult {
   std::uint64_t leaf_cpu_long_tail_batches{};
   std::uint64_t leaf_cpu_long_tail_tasks{};
   std::uint64_t leaf_cpu_long_tail_cells{};
+  std::uint64_t leaf_cost_rows_consumed{};
+  std::uint64_t leaf_candidate_templates_rechecked{};
+  std::uint64_t leaf_cpu_completeness_rows{};
+  std::uint64_t leaf_cpu_completeness_templates{};
   std::string hamilton_reply_backend{"none"};
   int hamilton_reply_selected_device{-1};
   bool hamilton_reply_cpu_verified{false};
@@ -254,6 +258,8 @@ struct HtWavefrontResult {
   double leaf_cost_evaluate_ms{};
   double leaf_cost_scatter_ms{};
   double leaf_cursor_consume_ms{};
+  double leaf_candidate_recheck_ms{};
+  double leaf_completeness_fallback_ms{};
   double leaf_scalar_search_ms{};
   double leaf_apply_ms{};
   double leaf_proof_verify_ms{};

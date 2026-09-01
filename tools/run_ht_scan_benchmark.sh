@@ -232,6 +232,8 @@ cuda_leaf_cursor_prepare_ms="$(read_field "${run_dir}/cuda.report" leaf_cursor_p
 cuda_leaf_cost_evaluate_ms="$(read_field "${run_dir}/cuda.report" leaf_cost_evaluate_ms)"
 cuda_leaf_cost_scatter_ms="$(read_field "${run_dir}/cuda.report" leaf_cost_scatter_ms)"
 cuda_leaf_cursor_consume_ms="$(read_field "${run_dir}/cuda.report" leaf_cursor_consume_ms)"
+cuda_leaf_candidate_recheck_ms="$(read_field "${run_dir}/cuda.report" leaf_candidate_recheck_ms)"
+cuda_leaf_completeness_fallback_ms="$(read_field "${run_dir}/cuda.report" leaf_completeness_fallback_ms)"
 cuda_leaf_scalar_search_ms="$(read_field "${run_dir}/cuda.report" leaf_scalar_search_ms)"
 cuda_leaf_apply_ms="$(read_field "${run_dir}/cuda.report" leaf_apply_ms)"
 cuda_leaf_proof_verify_ms="$(read_field "${run_dir}/cuda.report" leaf_proof_verify_ms)"
@@ -240,6 +242,8 @@ hybrid_leaf_cursor_prepare_ms="$(read_field "${run_dir}/hybrid.report" leaf_curs
 hybrid_leaf_cost_evaluate_ms="$(read_field "${run_dir}/hybrid.report" leaf_cost_evaluate_ms)"
 hybrid_leaf_cost_scatter_ms="$(read_field "${run_dir}/hybrid.report" leaf_cost_scatter_ms)"
 hybrid_leaf_cursor_consume_ms="$(read_field "${run_dir}/hybrid.report" leaf_cursor_consume_ms)"
+hybrid_leaf_candidate_recheck_ms="$(read_field "${run_dir}/hybrid.report" leaf_candidate_recheck_ms)"
+hybrid_leaf_completeness_fallback_ms="$(read_field "${run_dir}/hybrid.report" leaf_completeness_fallback_ms)"
 hybrid_leaf_scalar_search_ms="$(read_field "${run_dir}/hybrid.report" leaf_scalar_search_ms)"
 hybrid_leaf_apply_ms="$(read_field "${run_dir}/hybrid.report" leaf_apply_ms)"
 hybrid_leaf_proof_verify_ms="$(read_field "${run_dir}/hybrid.report" leaf_proof_verify_ms)"
@@ -248,9 +252,34 @@ fused_leaf_cursor_prepare_ms="$(read_field "${run_dir}/fused.report" leaf_cursor
 fused_leaf_cost_evaluate_ms="$(read_field "${run_dir}/fused.report" leaf_cost_evaluate_ms)"
 fused_leaf_cost_scatter_ms="$(read_field "${run_dir}/fused.report" leaf_cost_scatter_ms)"
 fused_leaf_cursor_consume_ms="$(read_field "${run_dir}/fused.report" leaf_cursor_consume_ms)"
+fused_leaf_candidate_recheck_ms="$(read_field "${run_dir}/fused.report" leaf_candidate_recheck_ms)"
+fused_leaf_completeness_fallback_ms="$(read_field "${run_dir}/fused.report" leaf_completeness_fallback_ms)"
 fused_leaf_scalar_search_ms="$(read_field "${run_dir}/fused.report" leaf_scalar_search_ms)"
 fused_leaf_apply_ms="$(read_field "${run_dir}/fused.report" leaf_apply_ms)"
 fused_leaf_proof_verify_ms="$(read_field "${run_dir}/fused.report" leaf_proof_verify_ms)"
+cuda_leaf_cost_rows="$(read_field "${run_dir}/cuda.report" leaf_cost_rows_consumed)"
+hybrid_leaf_cost_rows="$(read_field "${run_dir}/hybrid.report" leaf_cost_rows_consumed)"
+fused_leaf_cost_rows="$(read_field "${run_dir}/fused.report" leaf_cost_rows_consumed)"
+cuda_leaf_candidate_rechecks="$(read_field "${run_dir}/cuda.report" leaf_candidate_templates_rechecked)"
+hybrid_leaf_candidate_rechecks="$(read_field "${run_dir}/hybrid.report" leaf_candidate_templates_rechecked)"
+fused_leaf_candidate_rechecks="$(read_field "${run_dir}/fused.report" leaf_candidate_templates_rechecked)"
+cuda_leaf_completeness_rows="$(read_field "${run_dir}/cuda.report" leaf_cpu_completeness_rows)"
+hybrid_leaf_completeness_rows="$(read_field "${run_dir}/hybrid.report" leaf_cpu_completeness_rows)"
+fused_leaf_completeness_rows="$(read_field "${run_dir}/fused.report" leaf_cpu_completeness_rows)"
+cuda_leaf_completeness_templates="$(read_field "${run_dir}/cuda.report" leaf_cpu_completeness_templates)"
+hybrid_leaf_completeness_templates="$(read_field "${run_dir}/hybrid.report" leaf_cpu_completeness_templates)"
+fused_leaf_completeness_templates="$(read_field "${run_dir}/fused.report" leaf_cpu_completeness_templates)"
+if [[ "${cuda_leaf_cost_rows}" != "${hybrid_leaf_cost_rows}" ||
+      "${cuda_leaf_cost_rows}" != "${fused_leaf_cost_rows}" ||
+      "${cuda_leaf_candidate_rechecks}" != "${hybrid_leaf_candidate_rechecks}" ||
+      "${cuda_leaf_candidate_rechecks}" != "${fused_leaf_candidate_rechecks}" ||
+      "${cuda_leaf_completeness_rows}" != "${hybrid_leaf_completeness_rows}" ||
+      "${cuda_leaf_completeness_rows}" != "${fused_leaf_completeness_rows}" ||
+      "${cuda_leaf_completeness_templates}" != "${hybrid_leaf_completeness_templates}" ||
+      "${cuda_leaf_completeness_templates}" != "${fused_leaf_completeness_templates}" ]]; then
+  echo "CUDA leaf consume 的规范工作计数不一致" >&2
+  exit 1
+fi
 cpu_path_append_ms="$(read_field "${run_dir}/cpu.report" path_append_ms)"
 cuda_path_append_ms="$(read_field "${run_dir}/cuda.report" path_append_ms)"
 hybrid_path_append_ms="$(read_field "${run_dir}/hybrid.report" path_append_ms)"
@@ -325,6 +354,18 @@ fused_leaf_residual_ms="$(awk -v total="${fused_leaf_ms}" -v setup="${fused_leaf
   -v scalar="${fused_leaf_scalar_search_ms}" -v apply="${fused_leaf_apply_ms}" \
   -v verify="${fused_leaf_proof_verify_ms}" \
   'BEGIN { printf "%.6f", total-setup-prepare-cost-scatter-consume-scalar-apply-verify }')"
+cuda_leaf_consume_residual_ms="$(awk -v total="${cuda_leaf_cursor_consume_ms}" \
+  -v candidate="${cuda_leaf_candidate_recheck_ms}" \
+  -v completeness="${cuda_leaf_completeness_fallback_ms}" \
+  'BEGIN { printf "%.6f", total-candidate-completeness }')"
+hybrid_leaf_consume_residual_ms="$(awk -v total="${hybrid_leaf_cursor_consume_ms}" \
+  -v candidate="${hybrid_leaf_candidate_recheck_ms}" \
+  -v completeness="${hybrid_leaf_completeness_fallback_ms}" \
+  'BEGIN { printf "%.6f", total-candidate-completeness }')"
+fused_leaf_consume_residual_ms="$(awk -v total="${fused_leaf_cursor_consume_ms}" \
+  -v candidate="${fused_leaf_candidate_recheck_ms}" \
+  -v completeness="${fused_leaf_completeness_fallback_ms}" \
+  'BEGIN { printf "%.6f", total-candidate-completeness }')"
 cpu_host_build_ms="$(awk -v work="${cpu_work_graph_ms}" -v leaf="${cpu_leaf_ms}" \
   -v path="${cpu_path_append_ms}" -v hamilton="${cpu_hamilton_reply_ms}" \
   -v end="${cpu_end_reply_ms}" 'BEGIN { printf "%.6f", work-leaf-path-hamilton-end }')"
@@ -383,7 +424,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V5"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V6"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -423,6 +464,9 @@ summary="${run_dir}/summary.txt"
   echo "cuda_leaf_cost_evaluate_ms ${cuda_leaf_cost_evaluate_ms}"
   echo "cuda_leaf_cost_scatter_ms ${cuda_leaf_cost_scatter_ms}"
   echo "cuda_leaf_cursor_consume_ms ${cuda_leaf_cursor_consume_ms}"
+  echo "cuda_leaf_candidate_recheck_ms ${cuda_leaf_candidate_recheck_ms}"
+  echo "cuda_leaf_completeness_fallback_ms ${cuda_leaf_completeness_fallback_ms}"
+  echo "cuda_leaf_consume_residual_ms ${cuda_leaf_consume_residual_ms}"
   echo "cuda_leaf_scalar_search_ms ${cuda_leaf_scalar_search_ms}"
   echo "cuda_leaf_apply_ms ${cuda_leaf_apply_ms}"
   echo "cuda_leaf_proof_verify_ms ${cuda_leaf_proof_verify_ms}"
@@ -432,6 +476,9 @@ summary="${run_dir}/summary.txt"
   echo "hybrid_leaf_cost_evaluate_ms ${hybrid_leaf_cost_evaluate_ms}"
   echo "hybrid_leaf_cost_scatter_ms ${hybrid_leaf_cost_scatter_ms}"
   echo "hybrid_leaf_cursor_consume_ms ${hybrid_leaf_cursor_consume_ms}"
+  echo "hybrid_leaf_candidate_recheck_ms ${hybrid_leaf_candidate_recheck_ms}"
+  echo "hybrid_leaf_completeness_fallback_ms ${hybrid_leaf_completeness_fallback_ms}"
+  echo "hybrid_leaf_consume_residual_ms ${hybrid_leaf_consume_residual_ms}"
   echo "hybrid_leaf_scalar_search_ms ${hybrid_leaf_scalar_search_ms}"
   echo "hybrid_leaf_apply_ms ${hybrid_leaf_apply_ms}"
   echo "hybrid_leaf_proof_verify_ms ${hybrid_leaf_proof_verify_ms}"
@@ -441,10 +488,17 @@ summary="${run_dir}/summary.txt"
   echo "fused_leaf_cost_evaluate_ms ${fused_leaf_cost_evaluate_ms}"
   echo "fused_leaf_cost_scatter_ms ${fused_leaf_cost_scatter_ms}"
   echo "fused_leaf_cursor_consume_ms ${fused_leaf_cursor_consume_ms}"
+  echo "fused_leaf_candidate_recheck_ms ${fused_leaf_candidate_recheck_ms}"
+  echo "fused_leaf_completeness_fallback_ms ${fused_leaf_completeness_fallback_ms}"
+  echo "fused_leaf_consume_residual_ms ${fused_leaf_consume_residual_ms}"
   echo "fused_leaf_scalar_search_ms ${fused_leaf_scalar_search_ms}"
   echo "fused_leaf_apply_ms ${fused_leaf_apply_ms}"
   echo "fused_leaf_proof_verify_ms ${fused_leaf_proof_verify_ms}"
   echo "fused_leaf_residual_ms ${fused_leaf_residual_ms}"
+  echo "leaf_cost_rows_consumed ${cuda_leaf_cost_rows}"
+  echo "leaf_candidate_templates_rechecked ${cuda_leaf_candidate_rechecks}"
+  echo "leaf_cpu_completeness_rows ${cuda_leaf_completeness_rows}"
+  echo "leaf_cpu_completeness_templates ${cuda_leaf_completeness_templates}"
   echo "leaf_speedup ${leaf_speedup}"
   echo "hybrid_leaf_speedup ${hybrid_leaf_speedup}"
   echo "fused_leaf_speedup_vs_hybrid ${fused_leaf_speedup}"

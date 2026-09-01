@@ -433,6 +433,11 @@ struct ReconnectAttempt {
   bool fatal{false};
   std::string reason;
   std::uint64_t matchings_tested{};
+  std::uint64_t candidate_templates_rechecked{};
+  std::uint64_t completeness_templates_tested{};
+  bool used_completeness_fallback{false};
+  double candidate_recheck_ms{};
+  double completeness_fallback_ms{};
 };
 
 struct ExactTourBlock {
@@ -608,28 +613,46 @@ ReconnectAttempt TryReconnectFromCostRow(const GraphSnapshot& graph, const TourC
     invalid.reason = "k-opt cost row 或后端非法";
     return invalid;
   }
+  const SteadyClock::time_point candidate_begin = SteadyClock::now();
+  std::uint64_t candidate_templates_rechecked = 0U;
   for (std::size_t template_index = 0U; template_index < reconnect_templates.size();
        ++template_index) {
     if (added_costs[template_index] >= task.deleted_cost) {
       continue;
     }
+    ++candidate_templates_rechecked;
     const std::vector<EndpointMatching> preferred = {reconnect_templates[template_index]};
     ReconnectAttempt attempt = TryReconnect(graph, context, outside, deleted_positions, preferred);
     if (attempt.fatal) {
+      attempt.candidate_templates_rechecked = candidate_templates_rechecked;
+      attempt.candidate_recheck_ms = ElapsedMilliseconds(candidate_begin);
       return attempt;
     }
     if (attempt.witness.has_value()) {
       // 指标记录规范 CPU 枚举到该模板的位置，而不是 GPU 预筛选的额外工作量。
       attempt.matchings_tested = static_cast<std::uint64_t>(template_index + 1U);
+      attempt.candidate_templates_rechecked = candidate_templates_rechecked;
+      attempt.candidate_recheck_ms = ElapsedMilliseconds(candidate_begin);
       return attempt;
     }
   }
+  const double candidate_recheck_ms = ElapsedMilliseconds(candidate_begin);
   if (cost_backend == "cuda") {
     // CUDA 仍只是候选器；没有 CPU 接受的候选时完整枚举，保证 completeness。
-    return TryReconnect(graph, context, outside, deleted_positions, reconnect_templates);
+    const SteadyClock::time_point completeness_begin = SteadyClock::now();
+    ReconnectAttempt fallback =
+        TryReconnect(graph, context, outside, deleted_positions, reconnect_templates);
+    fallback.candidate_templates_rechecked = candidate_templates_rechecked;
+    fallback.completeness_templates_tested = fallback.matchings_tested;
+    fallback.used_completeness_fallback = true;
+    fallback.candidate_recheck_ms = candidate_recheck_ms;
+    fallback.completeness_fallback_ms = ElapsedMilliseconds(completeness_begin);
+    return fallback;
   }
   ReconnectAttempt exhausted;
   exhausted.matchings_tested = static_cast<std::uint64_t>(reconnect_templates.size());
+  exhausted.candidate_templates_rechecked = candidate_templates_rechecked;
+  exhausted.candidate_recheck_ms = candidate_recheck_ms;
   return exhausted;
 }
 
@@ -1525,6 +1548,15 @@ struct KOptCursorBlock {
   bool budget_blocked{false};
 };
 
+struct KOptCursorConsumeStats {
+  std::uint64_t cost_rows{};
+  std::uint64_t candidate_templates_rechecked{};
+  std::uint64_t cpu_completeness_rows{};
+  std::uint64_t cpu_completeness_templates{};
+  double candidate_recheck_ms{};
+  double completeness_fallback_ms{};
+};
+
 class KOptSearchCursor {
 public:
   KOptSearchCursor(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
@@ -1596,7 +1628,8 @@ public:
     }
   }
 
-  void ConsumeBlock(const KOptCostBatchResult& costs) {
+  KOptCursorConsumeStats ConsumeBlock(const KOptCostBatchResult& costs) {
+    KOptCursorConsumeStats stats;
     if (finished_ || !pending_.has_value()) {
       throw std::logic_error("k-opt cost cursor 没有待消费 block");
     }
@@ -1608,17 +1641,26 @@ public:
       result_.reason = "k-opt cost cursor 矩阵规模错误";
       pending_.reset();
       finished_ = true;
-      return;
+      return stats;
     }
     for (std::size_t work_index = 0U; work_index < block.works.size(); ++work_index) {
+      ++stats.cost_rows;
       const std::size_t row_offset = work_index * reconnect_table.templates.size();
       const std::span<const std::int64_t> row(costs.added_costs.data() + row_offset,
                                               reconnect_table.templates.size());
-      if (ConsumeAttempt(TryReconnectFromCostRow(
-              *graph_, context_, outside_, block.works[work_index].deleted_positions,
-              block.works[work_index].task, reconnect_table.templates, row, costs.backend))) {
+      ReconnectAttempt attempt = TryReconnectFromCostRow(
+          *graph_, context_, outside_, block.works[work_index].deleted_positions,
+          block.works[work_index].task, reconnect_table.templates, row, costs.backend);
+      stats.candidate_templates_rechecked += attempt.candidate_templates_rechecked;
+      stats.candidate_recheck_ms += attempt.candidate_recheck_ms;
+      stats.completeness_fallback_ms += attempt.completeness_fallback_ms;
+      if (attempt.used_completeness_fallback) {
+        ++stats.cpu_completeness_rows;
+        stats.cpu_completeness_templates += attempt.completeness_templates_tested;
+      }
+      if (ConsumeAttempt(std::move(attempt))) {
         pending_.reset();
-        return;
+        return stats;
       }
     }
     const bool budget_blocked = block.budget_blocked;
@@ -1627,11 +1669,12 @@ public:
       result_.status = KOptSearchStatus::kUnresolved;
       result_.reason = "k-opt 删除集合预算耗尽";
       finished_ = true;
-      return;
+      return stats;
     }
     if (!has_combination_) {
       k_ready_ = false;
     }
+    return stats;
   }
 
   void FailCost(std::string reason) {
@@ -2016,7 +2059,18 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
           }
           {
             ScopedPhaseTimer timer(&result.cursor_consume_ms);
-            active[slice.active_index].cursor->ConsumeBlock(cursor_costs);
+            const KOptCursorConsumeStats stats =
+                active[slice.active_index].cursor->ConsumeBlock(cursor_costs);
+            if (!AddWithoutOverflow(&result.cost_rows_consumed, stats.cost_rows) ||
+                !AddWithoutOverflow(&result.candidate_templates_rechecked,
+                                    stats.candidate_templates_rechecked) ||
+                !AddWithoutOverflow(&result.cpu_completeness_rows, stats.cpu_completeness_rows) ||
+                !AddWithoutOverflow(&result.cpu_completeness_templates,
+                                    stats.cpu_completeness_templates)) {
+              throw std::overflow_error("path-system k-opt cursor consume 统计溢出");
+            }
+            result.candidate_recheck_ms += stats.candidate_recheck_ms;
+            result.completeness_fallback_ms += stats.completeness_fallback_ms;
           }
         }
       }

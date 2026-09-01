@@ -154,12 +154,18 @@ struct PathSystemKOptBatchResult {
   std::uint64_t cpu_long_tail_batches{};
   std::uint64_t cpu_long_tail_tasks{};
   std::uint64_t cpu_long_tail_cells{};
+  std::uint64_t cost_rows_consumed{};
+  std::uint64_t candidate_templates_rechecked{};
+  std::uint64_t cpu_completeness_rows{};
+  std::uint64_t cpu_completeness_templates{};
   // 同步 wall time 只用于诊断，不进入 leaf proof。
   double setup_ms{};
   double cursor_prepare_ms{};
   double cost_evaluate_ms{};
   double cost_scatter_ms{};
   double cursor_consume_ms{};
+  double candidate_recheck_ms{};
+  double completeness_fallback_ms{};
   double scalar_search_ms{};
   double apply_ms{};
   double proof_verify_ms{};

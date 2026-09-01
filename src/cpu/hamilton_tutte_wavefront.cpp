@@ -905,11 +905,20 @@ void RecordLeafBatch(WaveBuildContext* const context, const PathSystemKOptBatchR
                 "CPU long-tail batches");
   AddLeafMetric(&result.leaf_cpu_long_tail_tasks, batch.cpu_long_tail_tasks, "CPU long-tail tasks");
   AddLeafMetric(&result.leaf_cpu_long_tail_cells, batch.cpu_long_tail_cells, "CPU long-tail cells");
+  AddLeafMetric(&result.leaf_cost_rows_consumed, batch.cost_rows_consumed, "cost rows consumed");
+  AddLeafMetric(&result.leaf_candidate_templates_rechecked, batch.candidate_templates_rechecked,
+                "candidate templates rechecked");
+  AddLeafMetric(&result.leaf_cpu_completeness_rows, batch.cpu_completeness_rows,
+                "CPU completeness rows");
+  AddLeafMetric(&result.leaf_cpu_completeness_templates, batch.cpu_completeness_templates,
+                "CPU completeness templates");
   result.leaf_setup_ms += batch.setup_ms;
   result.leaf_cursor_prepare_ms += batch.cursor_prepare_ms;
   result.leaf_cost_evaluate_ms += batch.cost_evaluate_ms;
   result.leaf_cost_scatter_ms += batch.cost_scatter_ms;
   result.leaf_cursor_consume_ms += batch.cursor_consume_ms;
+  result.leaf_candidate_recheck_ms += batch.candidate_recheck_ms;
+  result.leaf_completeness_fallback_ms += batch.completeness_fallback_ms;
   result.leaf_scalar_search_ms += batch.scalar_search_ms;
   result.leaf_apply_ms += batch.apply_ms;
   result.leaf_proof_verify_ms += batch.proof_verify_ms;
