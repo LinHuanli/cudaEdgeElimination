@@ -43,5 +43,6 @@
 39. [M5 HT CPU 精确成本矩阵行并行](research/35_M5_HT_CPU_Cost_Row_Parallelism.md)：8,192-cell 门槛、8-thread 静态 row 分片、V9/V11 门禁及 CPU search 约 1.85× 降幅。
 40. [M5 HT CPU leaf 复杂度桶融合](research/36_M5_HT_CPU_Leaf_Bucket_Fusion.md)：V12 五路门禁、CPU 并行覆盖提升及 pcb3038 search 1.113× 收益。
 41. [M5 HT 多实例融合门禁](research/37_M5_HT_Multi_Instance_Fusion_Gates.md)：锁定三份最优 tour、三实例 V12 门禁与 CPU leaf 后端感知默认值。
+42. [M5 HT path-append 子阶段画像](research/38_M5_HT_Path_Append_Profile.md)：V10/V13 计时、三实例 clean baseline 与全维度 CPU 规范化根因。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

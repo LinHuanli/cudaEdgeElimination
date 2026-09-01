@@ -62,6 +62,8 @@ M5 HT leaf setup 画像与快照哈希复用绑定 `f71b472/c968b01`：V8 report
 
 M5 HT CPU cost row 并行与 leaf 桶融合绑定 `34cf918/63133c7/623f167`：8,192 cells 以上按 task row 静态分片，最多 8 线程；无 OpenMP、小 batch 和单线程保持串行。clean 1/8-thread A/B 使 CPU certify/leaf/search 从 `2.340/3.029/3.444 s` 降至 `0.701/1.442/1.867 s`。V12 再加入 CPU 融合为第五路；pcb3038 leaf/search 为 `1.149×/1.113×`，rl5915/d15112 leaf 为 `1.085×/1.180×`、search 均为 `1.016×`。三份锁定公开 tour 及三实例五路 proof、规范工作量和最终图全部通过。CLI 现对 CPU leaf 默认融合，auto/CUDA 默认不变，显式 0/1 可覆盖。大实例下一瓶颈是 path-append。
 
+M5 HT path-append 画像绑定 `ba15919`：V10 report/V13 summary 将包含式总量拆为 parent prepare、child normalize、child edges、CUDA evaluate 和 compare。clean 三实例 baseline 中 child normalize 占 path-append `86.972%/92.840%/97.866%`；d15112 单项为 5,193.507 ms，而设备评估仅 11.101 ms。根因是每个小 task 都调用按完整 TSP 维度分配、扫描的通用 CPU 规范化器；下一步用稀疏 fast path，并保留 dense proof 重放作独立认证。
+
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
 Concorde 随机 20 点 epoch：25 行、43 列；QSopt 与 cuOpt 模型目标均为 `88`。cuOpt primal violation 为 `4.44e-15`，reduced-cost residual 为 `1.57e-14`；完整图 exact lower bound 为 `87.3932819641`，上界为 `88`。
