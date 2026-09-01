@@ -21,5 +21,6 @@
 17. [Hamilton–Tutte frontier reply batching](research/13_Hamilton_Tutte_Frontier_Reply_Batching.md)：跨父状态 chunk、确定性回填、资源边界与 point-first end 筛选。
 18. [Hamilton–Tutte frontier path append](research/14_Hamilton_Tutte_Frontier_Path_Append.md)：多父状态稀疏 spans、point-first 两阶段批处理与无投机 end 生成。
 19. [Hamilton–Tutte GPU 规范 child edge SoA](research/15_Hamilton_Tutte_GPU_Child_Edge_SoA.md)：设备端 count/write、规范边 CSR 与 CPU 全数组认证。
+20. [Hamilton–Tutte frontier leaf batching](research/16_Hamilton_Tutte_Frontier_Leaf_Batching.md)：确定性复杂度桶、跨状态 k-opt cost row 融合与 scalar long-tail。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

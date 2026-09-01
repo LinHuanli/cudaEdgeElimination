@@ -631,6 +631,12 @@ void TestRecursivePointProof() {
             !wavefront.path_append_device_children_verified && wavefront.path_append_batches > 0U &&
             wavefront.path_append_tasks > 0U && wavefront.path_append_child_edges > 0U,
         "CPU wavefront records fully verified path-append batches");
+  Check(wavefront.leaf_cost_backend == "cpu-scalar" && wavefront.leaf_cpu_verified &&
+            wavefront.leaf_frontier_batches > 0U &&
+            wavefront.leaf_frontier_states == wavefront.proof.leaf_calls &&
+            wavefront.leaf_bucket_count > 0U && wavefront.peak_leaf_frontier_batch > 0U &&
+            wavefront.leaf_scalar_searches > 0U,
+        "CPU wavefront records deterministic leaf complexity buckets");
   Check(wavefront.hamilton_reply_backend == "cpu" && wavefront.hamilton_reply_cpu_verified &&
             wavefront.hamilton_reply_batches > 0U && wavefront.hamilton_reply_centers > 0U &&
             wavefront.hamilton_replies_generated > 0U,
@@ -664,6 +670,21 @@ void TestRecursivePointProof() {
             single_state_batches.end_reply_tasks == wavefront.end_reply_tasks &&
             single_state_batches.end_replies_generated == wavefront.end_replies_generated,
         "multi-parent chunks reduce launch count without speculative end work");
+
+  const cudaee::HtWavefrontResult single_leaf_batches = cudaee::ProveEdgeByWavefrontHt(
+      graph, {2, 4},
+      {.search_options = options,
+       .leaf_frontier_batch_states = 1,
+       .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu});
+  Check(single_leaf_batches.status == wavefront.status &&
+            cudaee::SerializeHtRecursiveProof(single_leaf_batches.proof) ==
+                cudaee::SerializeHtRecursiveProof(wavefront.proof) &&
+            single_leaf_batches.leaf_frontier_batches > wavefront.leaf_frontier_batches &&
+            single_leaf_batches.leaf_frontier_states == wavefront.leaf_frontier_states &&
+            single_leaf_batches.peak_leaf_frontier_batch == 1U,
+        "leaf bucket batch size preserves the canonical recursive proof");
 
 #ifndef CUDAEE_HAS_CUDA
   const cudaee::HtWavefrontResult auto_fallback = cudaee::ProveEdgeByWavefrontHt(
@@ -732,9 +753,12 @@ void TestRecursivePointProof() {
     Check(cuda_result.status == cudaee::HtSearchStatus::kProven, cuda_result.proof.reason);
     Check(cudaee::VerifyHtRecursiveProof(graph, cuda_result.proof, &reason), reason);
 
+    cudaee::HtRecursiveOptions cuda_wavefront_options = options;
+    cuda_wavefront_options.root_options.leaf_options.cost_backend =
+        cudaee::PathCompatibilityBackend::kCuda;
     const cudaee::HtWavefrontResult cuda_wavefront = cudaee::ProveEdgeByWavefrontHt(
         graph, {2, 4},
-        {.search_options = options,
+        {.search_options = cuda_wavefront_options,
          .propagation_backend = cudaee::PathCompatibilityBackend::kCuda,
          .path_append_backend = cudaee::PathCompatibilityBackend::kCuda,
          .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCuda});
@@ -748,6 +772,25 @@ void TestRecursivePointProof() {
               cuda_wavefront.path_append_device_children_verified &&
               cuda_wavefront.path_append_tasks > 0U && cuda_wavefront.path_append_child_edges > 0U,
           "CUDA wavefront path-append batches are fully CPU verified");
+    Check(cuda_wavefront.leaf_cost_backend == "cuda" &&
+              cuda_wavefront.leaf_cost_selected_device >= 0 && cuda_wavefront.leaf_cpu_verified &&
+              cuda_wavefront.leaf_cost_batches > 0U && cuda_wavefront.leaf_cost_tasks > 0U &&
+              cuda_wavefront.leaf_cost_cells == 4U * cuda_wavefront.leaf_cost_tasks,
+          "CUDA wavefront fuses CPU-verified 3-opt leaf cost rows");
+    const cudaee::HtWavefrontResult cuda_single_leaf = cudaee::ProveEdgeByWavefrontHt(
+        graph, {2, 4},
+        {.search_options = cuda_wavefront_options,
+         .leaf_frontier_batch_states = 1,
+         .propagation_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .path_append_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCuda});
+    Check(cuda_single_leaf.status == cuda_wavefront.status &&
+              cudaee::SerializeHtRecursiveProof(cuda_single_leaf.proof) ==
+                  cudaee::SerializeHtRecursiveProof(cuda_wavefront.proof) &&
+              cuda_single_leaf.leaf_cost_batches > cuda_wavefront.leaf_cost_batches &&
+              cuda_single_leaf.leaf_cost_tasks == cuda_wavefront.leaf_cost_tasks &&
+              cuda_single_leaf.leaf_cost_cells == cuda_wavefront.leaf_cost_cells,
+          "CUDA leaf fusion preserves proof bytes and complete cost work");
     Check(cuda_wavefront.hamilton_reply_backend == "cuda" &&
               cuda_wavefront.hamilton_reply_selected_device >= 0 &&
               cuda_wavefront.hamilton_reply_cpu_verified &&

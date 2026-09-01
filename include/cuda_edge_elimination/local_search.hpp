@@ -127,11 +127,27 @@ struct PathSystemKOptProof {
   std::vector<OutsideKOptWitness> records;
 };
 
+struct PathSystemKOptBatchResult {
+  std::vector<PathSystemKOptProof> proofs;
+  std::string cost_backend{"none"};
+  int selected_device{-1};
+  bool cpu_verified{false};
+  std::uint64_t cost_batches{};
+  std::uint64_t cost_tasks{};
+  std::uint64_t cost_cells{};
+  std::uint64_t scalar_searches{};
+};
+
 // 逐个解决未覆盖 outside matching，并用 inside coverage 合并重复叶证明。
 [[nodiscard]] PathSystemKOptProof
 ProvePathSystemByKOpt(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
                       const std::optional<NodeEdge>& required_edge,
                       const KOptSearchOptions& options = {});
+
+// max_deletion_sets=1 时跨 path systems 合并同 k cost rows；其他搜索安全转入 scalar。
+[[nodiscard]] PathSystemKOptBatchResult ProvePathSystemsByKOpt(
+    const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
+    const std::optional<NodeEdge>& required_edge, const KOptSearchOptions& options = {});
 
 [[nodiscard]] bool VerifyPathSystemKOptProof(const GraphSnapshot& graph,
                                              const NormalizedPathSystem& paths,

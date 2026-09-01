@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <new>
 #include <optional>
 #include <string>
@@ -126,6 +127,7 @@ struct WaveMove {
 struct WaveState {
   NormalizedPathSystem paths;
   std::uint32_t depth{};
+  std::uint64_t incoming_reply_count{};
   PathSystemKOptProof leaf_proof;
   std::vector<WaveMove> moves;
 };
@@ -137,6 +139,7 @@ struct WaveBuildContext {
   PathCompatibilityBackend path_append_backend{PathCompatibilityBackend::kAuto};
   PathCompatibilityBackend hamilton_reply_backend{PathCompatibilityBackend::kAuto};
   std::uint32_t reply_frontier_batch_states{256};
+  std::uint32_t leaf_frontier_batch_states{256};
   HtWavefrontResult* result{};
   bool budget_exhausted{false};
   bool path_append_failed{false};
@@ -572,7 +575,8 @@ std::optional<PreparedFrontierChunk> PrepareFrontierCandidates(WaveBuildContext*
 }
 
 bool AppendNormalizedChild(WaveBuildContext* const context, NormalizedPathSystem child,
-                           const std::uint32_t child_depth, HtTreeReply* const reply,
+                           const std::uint32_t child_depth,
+                           const std::uint64_t incoming_reply_count, HtTreeReply* const reply,
                            std::vector<WaveState>* const states) {
   if (!child.valid) {
     reply->path_infeasible = true;
@@ -591,15 +595,17 @@ bool AppendNormalizedChild(WaveBuildContext* const context, NormalizedPathSystem
   WaveState state;
   state.paths = std::move(child);
   state.depth = child_depth;
+  state.incoming_reply_count = incoming_reply_count;
   states->push_back(std::move(state));
   return true;
 }
 
 bool AppendChild(WaveBuildContext* const context, const NormalizedPathSystem& parent,
                  const std::vector<Path>& additions, const std::uint32_t child_depth,
-                 HtTreeReply* const reply, std::vector<WaveState>* const states) {
+                 const std::uint64_t incoming_reply_count, HtTreeReply* const reply,
+                 std::vector<WaveState>* const states) {
   return AppendNormalizedChild(context, AddPaths(parent, additions, context->graph->dimension),
-                               child_depth, reply, states);
+                               child_depth, incoming_reply_count, reply, states);
 }
 
 bool RecordMove(WaveBuildContext* const context, const std::uint32_t state_index, WaveMove move,
@@ -654,7 +660,7 @@ bool GeneratePointMoves(WaveBuildContext* const context, const std::uint32_t sta
       HtTreeReply reply;
       reply.first_pair = pair;
       if (!AppendNormalizedChild(context, batch.children.at(candidate.append_begin + reply_index),
-                                 child_depth, &reply, states)) {
+                                 child_depth, candidate.replies.size(), &reply, states)) {
         return false;
       }
       all_infeasible = all_infeasible && reply.path_infeasible;
@@ -715,7 +721,7 @@ bool GenerateEndMoves(WaveBuildContext* const context, const std::uint32_t state
       HtTreeReply reply;
       reply.edge = edge;
       if (!AppendNormalizedChild(context, batch.children.at(candidate.append_begin + reply_index),
-                                 child_depth, &reply, states)) {
+                                 child_depth, candidate.replies.size(), &reply, states)) {
         return false;
       }
       all_infeasible = all_infeasible && reply.path_infeasible;
@@ -789,7 +795,7 @@ RootBuildStatus BuildRootMove(WaveBuildContext* const context, const HtCdCandida
       if (!AppendChild(context, parent,
                        {{first.first, first.center, first.second},
                         {second.first, second.center, second.second}},
-                       0U, &reply, states)) {
+                       0U, reply_count, &reply, states)) {
         return RootBuildStatus::kBudget;
       }
       move.replies.push_back(reply);
@@ -797,6 +803,120 @@ RootBuildStatus BuildRootMove(WaveBuildContext* const context, const HtCdCandida
   }
   return RecordMove(context, 0U, std::move(move), states) ? RootBuildStatus::kBuilt
                                                           : RootBuildStatus::kBudget;
+}
+
+struct LeafBucketKey {
+  std::uint32_t depth{};
+  std::uint32_t path_count{};
+  std::uint32_t node_count{};
+  std::uint32_t max_k{};
+  std::uint32_t reply_bucket{};
+
+  bool operator<(const LeafBucketKey& other) const {
+    return std::tie(depth, path_count, node_count, max_k, reply_bucket) <
+           std::tie(other.depth, other.path_count, other.node_count, other.max_k,
+                    other.reply_bucket);
+  }
+};
+
+std::uint32_t ReplyCountBucket(std::uint64_t reply_count) {
+  std::uint32_t bucket = 0U;
+  while (reply_count > 1U) {
+    reply_count >>= 1U;
+    ++bucket;
+  }
+  return bucket;
+}
+
+LeafBucketKey BuildLeafBucketKey(const WaveState& state, const KOptSearchOptions& options) {
+  std::size_t node_count = 0U;
+  for (const Path& path : state.paths.paths) {
+    if (path.size() > std::numeric_limits<std::size_t>::max() - node_count) {
+      throw std::overflow_error("HT leaf bucket 节点数溢出");
+    }
+    node_count += path.size();
+  }
+  if (state.paths.paths.size() > std::numeric_limits<std::uint32_t>::max() ||
+      node_count > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::overflow_error("HT leaf bucket 复杂度键溢出");
+  }
+  return {.depth = state.depth,
+          .path_count = static_cast<std::uint32_t>(state.paths.paths.size()),
+          .node_count = static_cast<std::uint32_t>(node_count),
+          .max_k = options.max_k,
+          .reply_bucket = ReplyCountBucket(state.incoming_reply_count)};
+}
+
+void AddLeafMetric(std::uint64_t* const total, const std::uint64_t value, const char* const name) {
+  if (value > std::numeric_limits<std::uint64_t>::max() - *total) {
+    throw std::overflow_error(std::string("HT leaf 指标溢出: ") + name);
+  }
+  *total += value;
+}
+
+void RecordLeafBatch(WaveBuildContext* const context, const PathSystemKOptBatchResult& batch,
+                     const std::size_t state_count) {
+  HtWavefrontResult& result = *context->result;
+  AddLeafMetric(&result.leaf_frontier_batches, 1U, "frontier batches");
+  AddLeafMetric(&result.leaf_frontier_states, state_count, "frontier states");
+  result.peak_leaf_frontier_batch =
+      std::max(result.peak_leaf_frontier_batch, static_cast<std::uint64_t>(state_count));
+  result.leaf_cpu_verified = result.leaf_frontier_batches == 1U
+                                 ? batch.cpu_verified
+                                 : result.leaf_cpu_verified && batch.cpu_verified;
+  AddLeafMetric(&result.leaf_cost_batches, batch.cost_batches, "cost batches");
+  AddLeafMetric(&result.leaf_cost_tasks, batch.cost_tasks, "cost tasks");
+  AddLeafMetric(&result.leaf_cost_cells, batch.cost_cells, "cost cells");
+  AddLeafMetric(&result.leaf_scalar_searches, batch.scalar_searches, "scalar searches");
+  if (batch.cost_backend != "none") {
+    if (result.leaf_cost_backend == "none") {
+      result.leaf_cost_backend = batch.cost_backend;
+    } else if (result.leaf_cost_backend != batch.cost_backend) {
+      result.leaf_cost_backend = "mixed";
+    }
+  }
+  if (batch.selected_device >= 0) {
+    result.leaf_cost_selected_device = batch.selected_device;
+  }
+}
+
+void EvaluateLeafFrontierChunk(WaveBuildContext* const context,
+                               std::vector<WaveState>* const states,
+                               const std::size_t frontier_begin, const std::size_t frontier_end) {
+  std::map<LeafBucketKey, std::vector<std::size_t>> buckets;
+  for (std::size_t state_index = frontier_begin; state_index < frontier_end; ++state_index) {
+    buckets[BuildLeafBucketKey(states->at(state_index),
+                               context->options->root_options.leaf_options)]
+        .push_back(state_index);
+  }
+  AddLeafMetric(&context->result->leaf_bucket_count, buckets.size(), "bucket count");
+  for (const auto& [key, state_indices] : buckets) {
+    static_cast<void>(key);
+    const std::size_t max_batch_states =
+        context->leaf_frontier_batch_states == 0U
+            ? state_indices.size()
+            : static_cast<std::size_t>(context->leaf_frontier_batch_states);
+    for (std::size_t begin = 0U; begin < state_indices.size();) {
+      const std::size_t end = begin + std::min(max_batch_states, state_indices.size() - begin);
+      std::vector<NormalizedPathSystem> path_systems;
+      path_systems.reserve(end - begin);
+      for (std::size_t offset = begin; offset < end; ++offset) {
+        path_systems.push_back(states->at(state_indices[offset]).paths);
+      }
+      AddLeafMetric(&context->result->proof.leaf_calls, path_systems.size(), "leaf calls");
+      PathSystemKOptBatchResult batch =
+          ProvePathSystemsByKOpt(*context->graph, path_systems, context->target,
+                                 context->options->root_options.leaf_options);
+      if (batch.proofs.size() != path_systems.size()) {
+        throw std::logic_error("HT leaf batch 返回的 proof 数量不一致");
+      }
+      RecordLeafBatch(context, batch, path_systems.size());
+      for (std::size_t offset = begin; offset < end; ++offset) {
+        states->at(state_indices[offset]).leaf_proof = std::move(batch.proofs[offset - begin]);
+      }
+      begin = end;
+    }
+  }
 }
 
 bool ExpandWavefront(WaveBuildContext* const context, std::vector<WaveState>* const states,
@@ -819,12 +939,7 @@ bool ExpandWavefront(WaveBuildContext* const context, std::vector<WaveState>* co
     for (std::size_t batch_begin = frontier_begin; batch_begin < frontier_end;) {
       const std::size_t batch_end =
           batch_begin + std::min(max_batch_states, frontier_end - batch_begin);
-      for (std::size_t index = batch_begin; index < batch_end; ++index) {
-        ++context->result->proof.leaf_calls;
-        WaveState& state = states->at(index);
-        state.leaf_proof = ProvePathSystemByKOpt(*context->graph, state.paths, context->target,
-                                                 context->options->root_options.leaf_options);
-      }
+      EvaluateLeafFrontierChunk(context, states, batch_begin, batch_end);
       if (!context->options->enable_point_moves && !context->options->enable_end_moves) {
         batch_begin = batch_end;
         continue;
@@ -1106,6 +1221,7 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
                            .path_append_backend = options.path_append_backend,
                            .hamilton_reply_backend = options.hamilton_reply_backend,
                            .reply_frontier_batch_states = options.reply_frontier_batch_states,
+                           .leaf_frontier_batch_states = options.leaf_frontier_batch_states,
                            .result = &result,
                            .budget_exhausted = false,
                            .path_append_failed = false,

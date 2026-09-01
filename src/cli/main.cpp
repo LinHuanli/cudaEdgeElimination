@@ -41,6 +41,7 @@ void PrintHelp() {
       << "                [--scheduler dfs|wavefront] [--backend auto|cpu|cuda]\n"
       << "                [--reply-backend auto|cpu|cuda]\n"
       << "                [--reply-frontier-batch-states N]\n"
+      << "                [--leaf-frontier-batch-states N]\n"
       << "                [--path-append-backend auto|cpu|cuda]\n"
       << "                [--propagation-backend auto|cpu|cuda] [--max-depth N] [HT budgets]\n"
       << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
@@ -392,6 +393,17 @@ bool HtProveCommand(const Arguments& arguments) {
   std::uint64_t path_append_batches = 0;
   std::uint64_t path_append_tasks = 0;
   std::uint64_t path_append_child_edges = 0;
+  std::string leaf_cost_backend = "none";
+  int leaf_cost_selected_device = -1;
+  bool leaf_cpu_verified = false;
+  std::uint64_t leaf_frontier_batches = 0;
+  std::uint64_t leaf_frontier_states = 0;
+  std::uint64_t leaf_bucket_count = 0;
+  std::uint64_t peak_leaf_frontier_batch = 0;
+  std::uint64_t leaf_cost_batches = 0;
+  std::uint64_t leaf_cost_tasks = 0;
+  std::uint64_t leaf_cost_cells = 0;
+  std::uint64_t leaf_scalar_searches = 0;
   std::uint64_t hamilton_reply_batches = 0;
   std::uint64_t hamilton_reply_centers = 0;
   std::uint64_t hamilton_replies_generated = 0;
@@ -416,6 +428,8 @@ bool HtProveCommand(const Arguments& arguments) {
         {.search_options = options,
          .reply_frontier_batch_states =
              OptionalInteger<std::uint32_t>(arguments, "reply-frontier-batch-states", 256U),
+         .leaf_frontier_batch_states =
+             OptionalInteger<std::uint32_t>(arguments, "leaf-frontier-batch-states", 256U),
          .propagation_backend =
              ParsePathCompatibilityBackend(Optional(arguments, "propagation-backend", "auto")),
          .path_append_backend =
@@ -436,6 +450,17 @@ bool HtProveCommand(const Arguments& arguments) {
     path_append_batches = result.path_append_batches;
     path_append_tasks = result.path_append_tasks;
     path_append_child_edges = result.path_append_child_edges;
+    leaf_cost_backend = std::move(result.leaf_cost_backend);
+    leaf_cost_selected_device = result.leaf_cost_selected_device;
+    leaf_cpu_verified = result.leaf_cpu_verified;
+    leaf_frontier_batches = result.leaf_frontier_batches;
+    leaf_frontier_states = result.leaf_frontier_states;
+    leaf_bucket_count = result.leaf_bucket_count;
+    peak_leaf_frontier_batch = result.peak_leaf_frontier_batch;
+    leaf_cost_batches = result.leaf_cost_batches;
+    leaf_cost_tasks = result.leaf_cost_tasks;
+    leaf_cost_cells = result.leaf_cost_cells;
+    leaf_scalar_searches = result.leaf_scalar_searches;
     hamilton_reply_batches = result.hamilton_reply_batches;
     hamilton_reply_centers = result.hamilton_reply_centers;
     hamilton_replies_generated = result.hamilton_replies_generated;
@@ -474,6 +499,16 @@ bool HtProveCommand(const Arguments& arguments) {
               << " path_append_cpu_verified=" << (path_append_cpu_verified ? 1 : 0)
               << " path_append_device_children_verified="
               << (path_append_device_children_verified ? 1 : 0)
+              << " leaf_cost_backend=" << leaf_cost_backend
+              << " leaf_cost_device=" << leaf_cost_selected_device
+              << " leaf_cpu_verified=" << (leaf_cpu_verified ? 1 : 0)
+              << " leaf_frontier_batches=" << leaf_frontier_batches
+              << " leaf_frontier_states=" << leaf_frontier_states
+              << " leaf_bucket_count=" << leaf_bucket_count
+              << " peak_leaf_frontier_batch=" << peak_leaf_frontier_batch
+              << " leaf_cost_batches=" << leaf_cost_batches
+              << " leaf_cost_tasks=" << leaf_cost_tasks << " leaf_cost_cells=" << leaf_cost_cells
+              << " leaf_scalar_searches=" << leaf_scalar_searches
               << " reply_backend=" << hamilton_reply_backend
               << " reply_device=" << hamilton_reply_selected_device
               << " reply_batches=" << hamilton_reply_batches

@@ -444,6 +444,49 @@ void TestNoImprovementAndBudget() {
         "all proper 3/4/5 reconnect templates tested");
 }
 
+void TestPathSystemLeafCostBatch() {
+  const cudaee::GraphSnapshot graph = MakeGraph(
+      {{0.0, 0.0, 0, 0}, {2.0, 1.0, 2, 1}, {0.0, 1.0, 0, 1}, {1.0, 2.0, 1, 2}, {1.0, 0.0, 1, 0}});
+  const cudaee::NormalizedPathSystem paths =
+      cudaee::NormalizePathSystem({{0, 1, 2, 3, 4}}, graph.dimension);
+  Check(paths.valid, paths.reason);
+  const std::optional<cudaee::NodeEdge> required = cudaee::NodeEdge{0, 1};
+  const cudaee::KOptSearchOptions options = {.max_k = 3,
+                                             .max_deletion_sets = 1,
+                                             .cost_backend =
+                                                 cudaee::PathCompatibilityBackend::kAuto,
+                                             .cost_batch_size = 8,
+                                             .exact_fallback_max_blocks = 10};
+  const cudaee::PathSystemKOptProof scalar =
+      cudaee::ProvePathSystemByKOpt(graph, paths, required, options);
+  Check(scalar.proven, scalar.reason);
+
+  const cudaee::PathSystemKOptBatchResult batch =
+      cudaee::ProvePathSystemsByKOpt(graph, {paths, paths, paths}, required, options);
+  Check(batch.cpu_verified && batch.proofs.size() == 3U && batch.cost_batches == 1U &&
+            batch.cost_tasks == 3U && batch.cost_cells == 12U && batch.scalar_searches == 0U,
+        "leaf cost batch fuses three first deletion-set rows");
+  const std::string expected = cudaee::SerializePathSystemKOptProof(scalar);
+  for (const cudaee::PathSystemKOptProof& proof : batch.proofs) {
+    Check(cudaee::SerializePathSystemKOptProof(proof) == expected,
+          "batched leaf proof is byte-identical to scalar search");
+  }
+
+  cudaee::KOptSearchOptions cpu_options = options;
+  cpu_options.cost_backend = cudaee::PathCompatibilityBackend::kCpu;
+  const cudaee::PathSystemKOptProof cpu_scalar =
+      cudaee::ProvePathSystemByKOpt(graph, paths, required, cpu_options);
+  const cudaee::PathSystemKOptBatchResult cpu_batch =
+      cudaee::ProvePathSystemsByKOpt(graph, {paths, paths}, required, cpu_options);
+  Check(cpu_batch.cost_backend == "cpu-scalar" && cpu_batch.cost_batches == 0U &&
+            cpu_batch.scalar_searches > 0U &&
+            cudaee::SerializePathSystemKOptProof(cpu_batch.proofs[0]) ==
+                cudaee::SerializePathSystemKOptProof(cpu_scalar) &&
+            cudaee::SerializePathSystemKOptProof(cpu_batch.proofs[1]) ==
+                cudaee::SerializePathSystemKOptProof(cpu_scalar),
+        "CPU leaf bucket keeps the scalar proof semantics");
+}
+
 void TestExactFallbackAgainstBruteForce() {
   std::mt19937 random(19870217U); // NOLINT(bugprone-random-generator-seed): 固定回归种子。
   std::uniform_int_distribution<std::int64_t> coordinate(-30, 30);
@@ -541,6 +584,24 @@ void TestTwoPathCoverageProof() {
   Check(proof.outside_count == 2, "m=2 outside count");
   std::string reason;
   Check(cudaee::VerifyPathSystemKOptProof(graph, paths, required, proof, &reason), reason);
+
+  const cudaee::KOptSearchOptions batch_options = {.max_k = 3,
+                                                   .max_deletion_sets = 1,
+                                                   .cost_backend =
+                                                       cudaee::PathCompatibilityBackend::kAuto,
+                                                   .cost_batch_size = 8,
+                                                   .exact_fallback_max_blocks = 10};
+  const cudaee::PathSystemKOptProof scalar_budgeted =
+      cudaee::ProvePathSystemByKOpt(graph, paths, required, batch_options);
+  const cudaee::PathSystemKOptBatchResult batch =
+      cudaee::ProvePathSystemsByKOpt(graph, {paths, paths}, required, batch_options);
+  Check(batch.cpu_verified && batch.proofs.size() == 2U && batch.cost_batches > 0U &&
+            batch.cost_tasks >= 2U &&
+            cudaee::SerializePathSystemKOptProof(batch.proofs[0]) ==
+                cudaee::SerializePathSystemKOptProof(scalar_budgeted) &&
+            cudaee::SerializePathSystemKOptProof(batch.proofs[1]) ==
+                cudaee::SerializePathSystemKOptProof(scalar_budgeted),
+        "two-path leaf batching preserves outside coverage and proof bytes");
 }
 
 } // namespace
@@ -552,6 +613,7 @@ int main() {
     TestReconnectTemplatesAgainstElimTspOracle();
     TestImprovingWitnessAndProof();
     TestNoImprovementAndBudget();
+    TestPathSystemLeafCostBatch();
     TestExactFallbackAgainstBruteForce();
     TestExactSevenOptProofRoundTrip();
     TestTwoPathCoverageProof();

@@ -180,6 +180,8 @@ struct HtWavefrontOptions {
   HtRecursiveOptions search_options{};
   // 每个 reply 生成 chunk 的父状态上限；0 表示一次覆盖完整 frontier，不裁剪状态。
   std::uint32_t reply_frontier_batch_states{256};
+  // 同一复杂度桶内每个 leaf batch 的状态上限；0 表示一次覆盖完整桶。
+  std::uint32_t leaf_frontier_batch_states{256};
   // 只控制 continuation 真值传播；leaf/c,d 后端仍由 search_options 分别配置。
   PathCompatibilityBackend propagation_backend{PathCompatibilityBackend::kAuto};
   // 只控制递归 point/end reply 的批量路径冲突标记；CPU 始终规范化并逐项认证。
@@ -201,6 +203,17 @@ struct HtWavefrontResult {
   std::uint64_t path_append_batches{};
   std::uint64_t path_append_tasks{};
   std::uint64_t path_append_child_edges{};
+  std::string leaf_cost_backend{"none"};
+  int leaf_cost_selected_device{-1};
+  bool leaf_cpu_verified{false};
+  std::uint64_t leaf_frontier_batches{};
+  std::uint64_t leaf_frontier_states{};
+  std::uint64_t leaf_bucket_count{};
+  std::uint64_t peak_leaf_frontier_batch{};
+  std::uint64_t leaf_cost_batches{};
+  std::uint64_t leaf_cost_tasks{};
+  std::uint64_t leaf_cost_cells{};
+  std::uint64_t leaf_scalar_searches{};
   std::string hamilton_reply_backend{"none"};
   int hamilton_reply_selected_device{-1};
   bool hamilton_reply_cpu_verified{false};

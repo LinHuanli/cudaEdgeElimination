@@ -54,4 +54,4 @@ CPU 不复用 GPU 的 count 规则生成期望值，而是先把父路径与 rep
 
 ## 后续
 
-M4.3b3b2b2b2 将以该 SoA 为输入，把 frontier leaf 按 `(depth,path_count,node_count,k_max,reply bucket)` 分桶。首版仍需 CPU 对每个 leaf 的最终真值和 witness 完整复核；随后才评估多 block continuation、GPU/CPU long-tail 和设备快照复用。HT epoch commit 仍保持待实现。
+M4.3b3b2b2b2a 已把 frontier leaf 按 `(depth,path_count,node_count,k_max,reply bucket)` 分桶，并跨 leaf 融合规则 k-opt cost rows，见 [frontier leaf batching](16_Hamilton_Tutte_Frontier_Leaf_Batching.md)。CPU 仍对每个成功 leaf 的 witness 和最终 proof 完整复核；多 block continuation、一般 GPU/CPU long-tail 和设备快照复用仍待评估。HT epoch commit 保持待实现。

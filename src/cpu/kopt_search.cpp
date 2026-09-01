@@ -805,10 +805,25 @@ std::uint64_t ComputePathSystemHash(const NormalizedPathSystem& paths) {
   return hash;
 }
 
-KOptSearchResult FindKOptWitness(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
-                                 const EndpointMatching& outside,
-                                 const std::optional<NodeEdge>& required_edge,
-                                 const KOptSearchOptions& options) {
+namespace {
+
+struct PreparedKOptCostRow {
+  std::uint32_t k{};
+  KOptCostTask task;
+  std::vector<std::int64_t> added_costs;
+  std::string backend;
+  std::string error;
+};
+
+bool SameKOptCostTask(const KOptCostTask& first, const KOptCostTask& second) {
+  return first.port_nodes == second.port_nodes && first.deleted_cost == second.deleted_cost;
+}
+
+KOptSearchResult FindKOptWitnessImpl(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
+                                     const EndpointMatching& outside,
+                                     const std::optional<NodeEdge>& required_edge,
+                                     const KOptSearchOptions& options,
+                                     const PreparedKOptCostRow* const prepared_row) {
   KOptSearchResult result;
   if (options.max_k < 3 || options.max_k > 5 || options.cost_batch_size == 0) {
     result.reason = "max_k 必须位于 [3,5] 且 cost_batch_size 必须为正数";
@@ -915,15 +930,35 @@ KOptSearchResult FindKOptWitness(const GraphSnapshot& graph, const NormalizedPat
           tasks.push_back(work.task);
         }
         KOptCostBatchResult costs;
-        try {
-          costs = EvaluateKOptTemplateCosts(graph, k, tasks, options.cost_backend);
-        } catch (const std::exception& error) {
-          if (options.cost_backend != PathCompatibilityBackend::kAuto) {
-            result.status = KOptSearchStatus::kUnresolved;
-            result.reason = std::string("CUDA k-opt cost 失败: ") + error.what();
-            return result;
+        const bool use_prepared = prepared_row != nullptr && prepared_row->k == k &&
+                                  tasks.size() == 1U &&
+                                  SameKOptCostTask(tasks.front(), prepared_row->task);
+        if (use_prepared && !prepared_row->error.empty()) {
+          result.status = KOptSearchStatus::kUnresolved;
+          result.reason = "CUDA k-opt cost 失败: " + prepared_row->error;
+          return result;
+        }
+        if (use_prepared) {
+          costs.k = k;
+          costs.template_count = static_cast<std::uint32_t>(reconnect_table.templates.size());
+          costs.added_costs = prepared_row->added_costs;
+          costs.backend = prepared_row->backend;
+        } else {
+          try {
+            costs = EvaluateKOptTemplateCosts(graph, k, tasks, options.cost_backend);
+          } catch (const std::exception& error) {
+            if (options.cost_backend != PathCompatibilityBackend::kAuto) {
+              result.status = KOptSearchStatus::kUnresolved;
+              result.reason = std::string("CUDA k-opt cost 失败: ") + error.what();
+              return result;
+            }
+            costs = EvaluateKOptTemplateCosts(graph, k, tasks, PathCompatibilityBackend::kCpu);
           }
-          costs = EvaluateKOptTemplateCosts(graph, k, tasks, PathCompatibilityBackend::kCpu);
+        }
+        if (costs.added_costs.size() != tasks.size() * reconnect_table.templates.size()) {
+          result.status = KOptSearchStatus::kUnresolved;
+          result.reason = "k-opt cost 缓存矩阵规模错误";
+          return result;
         }
         if (!AddWithoutOverflow(&result.reconnect_matchings_tested,
                                 static_cast<std::uint64_t>(costs.added_costs.size()))) {
@@ -966,6 +1001,15 @@ KOptSearchResult FindKOptWitness(const GraphSnapshot& graph, const NormalizedPat
   result.status = KOptSearchStatus::kNoImprovement;
   result.reason = "已穷举允许的 k-opt 重连但未找到严格改善";
   return result;
+}
+
+} // namespace
+
+KOptSearchResult FindKOptWitness(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
+                                 const EndpointMatching& outside,
+                                 const std::optional<NodeEdge>& required_edge,
+                                 const KOptSearchOptions& options) {
+  return FindKOptWitnessImpl(graph, paths, outside, required_edge, options, nullptr);
 }
 
 KOptSearchResult FindExactTourWitness(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
@@ -1354,6 +1398,287 @@ PathSystemKOptProof ProvePathSystemByKOpt(const GraphSnapshot& graph,
   proof.reason =
       proof.proven ? "全部 outside matching 均有严格改善 witness" : "存在未覆盖 outside matching";
   return proof;
+}
+
+namespace {
+
+struct BatchedPathProofWork {
+  PathSystemKOptProof proof;
+  std::vector<EndpointMatching> outside;
+  std::vector<EndpointMatching> inside;
+  std::optional<PathCompatibilityTable> table;
+  std::vector<bool> covered;
+  bool finished{false};
+};
+
+BatchedPathProofWork InitializeBatchedPathProof(const GraphSnapshot& graph,
+                                                const NormalizedPathSystem& paths) {
+  BatchedPathProofWork work;
+  work.proof.snapshot_hash = graph.ContentHash();
+  work.proof.path_system_hash = ComputePathSystemHash(paths);
+  work.proof.path_count = static_cast<std::uint32_t>(paths.paths.size());
+  if (work.proof.path_count == 0U || work.proof.path_count > kMaxTestablePathCount) {
+    work.proof.reason = "路径数不在 [1,7]";
+    work.finished = true;
+    return work;
+  }
+  work.outside = EnumerateOutsideMatchings(work.proof.path_count);
+  work.inside = EnumerateInsideMatchings(work.proof.path_count);
+  work.proof.outside_count = static_cast<std::uint32_t>(work.outside.size());
+  if (work.proof.path_count <= kMaxGpuPathCount) {
+    work.table = BuildPathCompatibilityTable(work.proof.path_count);
+    work.proof.compatibility_table_hash = work.table->generator_hash;
+  }
+  work.covered.assign(work.outside.size(), false);
+  return work;
+}
+
+std::optional<std::uint32_t> FirstUncoveredOutside(const BatchedPathProofWork& work) {
+  for (std::size_t index = 0U; index < work.covered.size(); ++index) {
+    if (!work.covered[index]) {
+      return static_cast<std::uint32_t>(index);
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<PreparedKOptCostRow> BuildFirstKOptCostRowRequest(
+    const GraphSnapshot& graph, const NormalizedPathSystem& paths, const EndpointMatching& outside,
+    const std::optional<NodeEdge>& required_edge, const KOptSearchOptions& options) {
+  TourContext context;
+  std::string reason;
+  if (!BuildTourContext(graph, paths, outside, required_edge, &context, &reason)) {
+    return std::nullopt;
+  }
+  const std::size_t selectable_count = context.selectable_positions.size();
+  for (std::uint32_t k = 3U; k <= options.max_k && k < selectable_count; ++k) {
+    std::vector<std::size_t> deleted_positions;
+    deleted_positions.reserve(k);
+    for (std::size_t index = 0U; index < k; ++index) {
+      deleted_positions.push_back(context.selectable_positions[index]);
+    }
+    std::sort(deleted_positions.begin(), deleted_positions.end());
+    PreparedKOptCostRow row;
+    row.k = k;
+    row.task = BuildKOptCostTask(graph, context, deleted_positions);
+    return row;
+  }
+  return std::nullopt;
+}
+
+void FinishBatchedPathProofIfCovered(BatchedPathProofWork* const work) {
+  if (FirstUncoveredOutside(*work).has_value()) {
+    return;
+  }
+  work->proof.proven = true;
+  work->proof.reason = "全部 outside matching 均有严格改善 witness";
+  work->finished = true;
+}
+
+void ApplyBatchedKOptSearch(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
+                            const std::optional<NodeEdge>& required_edge,
+                            const KOptSearchOptions& options, const std::uint32_t source,
+                            KOptSearchResult search, BatchedPathProofWork* const work) {
+  if (!AddWithoutOverflow(&work->proof.deletion_sets_tested, search.deletion_sets_tested) ||
+      !AddWithoutOverflow(&work->proof.reconnect_matchings_tested,
+                          search.reconnect_matchings_tested)) {
+    work->proof.reason = "path-system k-opt 统计计数溢出";
+    work->finished = true;
+    return;
+  }
+  if (search.status != KOptSearchStatus::kImproved && options.exact_fallback_max_blocks != 0U) {
+    KOptSearchResult exact = FindExactTourWitness(graph, paths, work->outside[source],
+                                                  required_edge, options.exact_fallback_max_blocks);
+    if (!AddWithoutOverflow(&work->proof.exact_states_tested, exact.exact_states_tested)) {
+      work->proof.reason = "path-system exact DP 状态计数溢出";
+      work->finished = true;
+      return;
+    }
+    if (exact.status == KOptSearchStatus::kImproved) {
+      search = std::move(exact);
+    } else {
+      search.reason += "; exact fallback: " + exact.reason;
+      search.status = exact.status;
+    }
+  }
+  if (search.status != KOptSearchStatus::kImproved) {
+    work->proof.reason = "outside " + std::to_string(source) + " unresolved: " + search.reason;
+    work->finished = true;
+    return;
+  }
+  std::string verify_reason;
+  if (!VerifyKOptWitness(graph, paths, work->outside[source], required_edge, search.witness,
+                         &verify_reason)) {
+    work->proof.reason = "outside witness 复核失败: " + verify_reason;
+    work->finished = true;
+    return;
+  }
+  const auto inside_iterator =
+      std::find(work->inside.begin(), work->inside.end(), search.witness.inside_matching);
+  if (inside_iterator == work->inside.end()) {
+    work->proof.reason = "witness inside matching 不在规范枚举中";
+    work->finished = true;
+    return;
+  }
+  const auto inside_index = static_cast<std::uint32_t>(inside_iterator - work->inside.begin());
+  for (std::uint32_t outside_index = 0U; outside_index < work->outside.size(); ++outside_index) {
+    const bool compatible =
+        work->table.has_value()
+            ? work->table->Covers(outside_index, inside_index)
+            : IsAlternatingHamiltonianCycle(work->outside[outside_index],
+                                            search.witness.inside_matching, work->proof.path_count);
+    work->covered[outside_index] = work->covered[outside_index] || compatible;
+  }
+  if (!work->covered[source]) {
+    work->proof.reason = "witness 未覆盖其源 outside matching";
+    work->finished = true;
+    return;
+  }
+  work->proof.records.push_back({source, std::move(search.witness)});
+  FinishBatchedPathProofIfCovered(work);
+}
+
+void RecordKOptBatchBackend(PathSystemKOptBatchResult* const result, const std::string& backend,
+                            const int selected_device) {
+  if (result->cost_backend == "none") {
+    result->cost_backend = backend;
+  } else if (result->cost_backend != backend) {
+    result->cost_backend = "mixed";
+  }
+  if (selected_device >= 0) {
+    result->selected_device = selected_device;
+  }
+}
+
+} // namespace
+
+PathSystemKOptBatchResult ProvePathSystemsByKOpt(
+    const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
+    const std::optional<NodeEdge>& required_edge, const KOptSearchOptions& options) {
+  PathSystemKOptBatchResult result;
+  if (path_systems.empty()) {
+    result.cpu_verified = true;
+    return result;
+  }
+
+  std::vector<BatchedPathProofWork> works;
+  works.reserve(path_systems.size());
+  for (const NormalizedPathSystem& paths : path_systems) {
+    works.push_back(InitializeBatchedPathProof(graph, paths));
+  }
+  const bool can_batch_costs = options.max_k >= 3U && options.max_k <= 5U &&
+                               options.cost_batch_size != 0U && options.max_deletion_sets == 1U &&
+                               (options.cost_backend == PathCompatibilityBackend::kAuto ||
+                                options.cost_backend == PathCompatibilityBackend::kCuda);
+
+  struct ActiveSearch {
+    std::size_t path_index{};
+    std::uint32_t source{};
+    std::optional<PreparedKOptCostRow> prepared;
+  };
+  while (true) {
+    std::vector<ActiveSearch> active;
+    for (std::size_t path_index = 0U; path_index < works.size(); ++path_index) {
+      BatchedPathProofWork& work = works[path_index];
+      if (work.finished) {
+        continue;
+      }
+      FinishBatchedPathProofIfCovered(&work);
+      if (work.finished) {
+        continue;
+      }
+      const std::uint32_t source = *FirstUncoveredOutside(work);
+      ActiveSearch search{.path_index = path_index, .source = source, .prepared = std::nullopt};
+      if (can_batch_costs) {
+        search.prepared = BuildFirstKOptCostRowRequest(
+            graph, path_systems[path_index], work.outside[source], required_edge, options);
+      }
+      active.push_back(std::move(search));
+    }
+    if (active.empty()) {
+      break;
+    }
+
+    for (std::uint32_t k = 3U; k <= 5U; ++k) {
+      std::vector<KOptCostTask> cost_tasks;
+      std::vector<std::size_t> active_indices;
+      for (std::size_t active_index = 0U; active_index < active.size(); ++active_index) {
+        if (active[active_index].prepared.has_value() && active[active_index].prepared->k == k) {
+          cost_tasks.push_back(active[active_index].prepared->task);
+          active_indices.push_back(active_index);
+        }
+      }
+      if (cost_tasks.empty()) {
+        continue;
+      }
+      if (!AddWithoutOverflow(&result.cost_batches, 1U) ||
+          !AddWithoutOverflow(&result.cost_tasks, cost_tasks.size())) {
+        throw std::overflow_error("path-system k-opt batch 统计溢出");
+      }
+      KOptCostBatchResult costs;
+      try {
+        costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, options.cost_backend);
+      } catch (const std::exception& error) {
+        if (options.cost_backend == PathCompatibilityBackend::kCuda) {
+          for (const std::size_t active_index : active_indices) {
+            active[active_index].prepared->error = error.what();
+          }
+          RecordKOptBatchBackend(&result, "cuda-error", -1);
+          continue;
+        }
+        costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, PathCompatibilityBackend::kCpu);
+      }
+      if (!AddWithoutOverflow(&result.cost_cells, costs.added_costs.size())) {
+        throw std::overflow_error("path-system k-opt batch cost cell 统计溢出");
+      }
+      RecordKOptBatchBackend(&result, costs.backend, costs.selected_device);
+      if (costs.template_count == 0U ||
+          costs.added_costs.size() != cost_tasks.size() * costs.template_count) {
+        throw std::logic_error("path-system k-opt batch cost 矩阵规模错误");
+      }
+      for (std::size_t row = 0U; row < active_indices.size(); ++row) {
+        PreparedKOptCostRow& prepared = *active[active_indices[row]].prepared;
+        const auto begin =
+            costs.added_costs.begin() + static_cast<std::ptrdiff_t>(row * costs.template_count);
+        const auto end = begin + static_cast<std::ptrdiff_t>(costs.template_count);
+        prepared.added_costs.assign(begin, end);
+        prepared.backend = costs.backend;
+      }
+    }
+
+    for (ActiveSearch& search : active) {
+      const PreparedKOptCostRow* const prepared =
+          search.prepared.has_value() ? &*search.prepared : nullptr;
+      if (prepared == nullptr) {
+        if (!AddWithoutOverflow(&result.scalar_searches, 1U)) {
+          throw std::overflow_error("path-system k-opt scalar 统计溢出");
+        }
+      }
+      KOptSearchResult search_result = FindKOptWitnessImpl(
+          graph, path_systems[search.path_index], works[search.path_index].outside[search.source],
+          required_edge, options, prepared);
+      ApplyBatchedKOptSearch(graph, path_systems[search.path_index], required_edge, options,
+                             search.source, std::move(search_result), &works[search.path_index]);
+    }
+  }
+
+  result.proofs.reserve(works.size());
+  result.cpu_verified = true;
+  for (std::size_t index = 0U; index < works.size(); ++index) {
+    if (works[index].proof.proven) {
+      std::string reason;
+      if (!VerifyPathSystemKOptProof(graph, path_systems[index], required_edge, works[index].proof,
+                                     &reason)) {
+        throw std::logic_error("批量 path-system proof CPU 复核失败: " + reason);
+      }
+    }
+    result.proofs.push_back(std::move(works[index].proof));
+  }
+  if (result.cost_backend == "none" && result.scalar_searches != 0U) {
+    result.cost_backend =
+        options.cost_backend == PathCompatibilityBackend::kCpu ? "cpu-scalar" : "scalar";
+  }
+  return result;
 }
 
 bool VerifyPathSystemKOptProof(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
