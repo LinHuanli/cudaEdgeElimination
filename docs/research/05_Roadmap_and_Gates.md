@@ -97,6 +97,8 @@ path-append V10/V13 画像和稀疏规范化已完成：内部 fast path 按实�
 
 point-candidate V12/V15 画像、Top-K 与静态次序缓存已完成：target 级严格全序配合 state generation marks，使三实例 point scan 相对 Top-K 再加速 `188.364×/238.242×/293.326×`，累计 CPU-fused search 相对全量排序画像加速 `1.135×/1.858×/1.756×`。五路规范计数、活动边、工作签名和 proof 逐字节不变。该 host 路径已不再是主要矛盾，下一切片转向跨目标不可变 leaf 数据与调度共享。
 
+leaf proof 批内快照绑定复用已完成：生成器内部逐成功 proof 的整图哈希改为复用同一同步 batch 的入口哈希，公开 verifier 与全部 HT/epoch 独立重放仍自行绑定图。三实例 leaf verify 加速 `8.882×/17.591×/27.449×`，CPU-fused search 加速 `1.037×/1.355×/1.618×`。下一步把相同只读 snapshot binding 上移到同一 wavefront 的多个 leaf batches。
+
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
