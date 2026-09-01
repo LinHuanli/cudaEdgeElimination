@@ -904,6 +904,8 @@ void RecordLeafBatch(WaveBuildContext* const context, const PathSystemKOptBatchR
   AddLeafMetric(&result.leaf_cost_tasks, batch.cost_tasks, "cost tasks");
   AddLeafMetric(&result.leaf_cost_cells, batch.cost_cells, "cost cells");
   AddLeafMetric(&result.leaf_scalar_searches, batch.scalar_searches, "scalar searches");
+  AddLeafMetric(&result.leaf_cursor_searches_started, batch.cursor_searches_started,
+                "cursor searches started");
   AddLeafMetric(&result.leaf_cuda_cost_batches, batch.cuda_cost_batches, "CUDA cost batches");
   AddLeafMetric(&result.leaf_snapshot_cache_hits, batch.snapshot_cache_hits, "snapshot cache hits");
   AddLeafMetric(&result.leaf_template_cache_hits, batch.template_cache_hits, "template cache hits");
@@ -925,6 +927,9 @@ void RecordLeafBatch(WaveBuildContext* const context, const PathSystemKOptBatchR
   AddLeafMetric(&result.leaf_cpu_certified_cost_cells, batch.cpu_certified_cost_cells,
                 "CPU certified cost cells");
   result.leaf_setup_ms += batch.setup_ms;
+  result.leaf_proof_initialize_ms += batch.proof_initialize_ms;
+  result.leaf_coverage_scan_ms += batch.coverage_scan_ms;
+  result.leaf_cursor_construct_ms += batch.cursor_construct_ms;
   result.leaf_cursor_prepare_ms += batch.cursor_prepare_ms;
   result.leaf_cost_evaluate_ms += batch.cost_evaluate_ms;
   result.leaf_cost_cpu_certify_ms += batch.cost_cpu_certify_ms;

@@ -553,10 +553,14 @@ void TestNoImprovementAndBudget() {
       cudaee::ProvePathSystemsByKOpt(seven_node_graph, {seven_node_paths, seven_node_paths},
                                      cudaee::NodeEdge{0, 1}, cursor_options);
   Check(cursor_batch.cpu_verified && cursor_batch.scalar_searches == 0U &&
+            cursor_batch.cursor_searches_started == 2U &&
             cursor_batch.cost_tasks == 2U * scalar_cursor.deletion_sets_tested &&
             cursor_batch.cost_batches == 13U && cursor_batch.cost_tasks == 50U &&
             cursor_batch.cost_cells == 2660U && cursor_batch.cost_rows_consumed == 50U &&
             cursor_batch.cpu_certified_cost_cells == cursor_batch.cost_cells &&
+            cursor_batch.setup_ms + 1.0e-6 >= cursor_batch.proof_initialize_ms +
+                                                  cursor_batch.coverage_scan_ms +
+                                                  cursor_batch.cursor_construct_ms &&
             cursor_batch.candidate_recheck_ms >= 0.0 &&
             cursor_batch.completeness_fallback_ms >= 0.0 &&
             cudaee::SerializePathSystemKOptProof(cursor_batch.proofs[0]) ==

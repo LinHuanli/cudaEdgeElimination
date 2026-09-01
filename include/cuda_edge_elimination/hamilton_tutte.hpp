@@ -227,6 +227,7 @@ struct HtWavefrontResult {
   std::uint64_t leaf_cost_tasks{};
   std::uint64_t leaf_cost_cells{};
   std::uint64_t leaf_scalar_searches{};
+  std::uint64_t leaf_cursor_searches_started{};
   std::uint64_t leaf_cuda_cost_batches{};
   std::uint64_t leaf_snapshot_cache_hits{};
   std::uint64_t leaf_template_cache_hits{};
@@ -264,6 +265,9 @@ struct HtWavefrontResult {
   double work_graph_ms{};
   double leaf_ms{};
   double leaf_setup_ms{};
+  double leaf_proof_initialize_ms{};
+  double leaf_coverage_scan_ms{};
+  double leaf_cursor_construct_ms{};
   double leaf_cursor_prepare_ms{};
   double leaf_cost_evaluate_ms{};
   double leaf_cost_cpu_certify_ms{};

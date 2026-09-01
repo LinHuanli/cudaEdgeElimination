@@ -643,7 +643,7 @@ void TestRecursivePointProof() {
             wavefront.leaf_frontier_states == wavefront.proof.leaf_calls &&
             wavefront.leaf_bucket_count > 0U && wavefront.peak_leaf_frontier_batch > 0U &&
             wavefront.leaf_cost_batches > 0U && wavefront.leaf_cost_tasks > 0U &&
-            wavefront.leaf_cost_cells > 0U &&
+            wavefront.leaf_cost_cells > 0U && wavefront.leaf_cursor_searches_started > 0U &&
             wavefront.leaf_cpu_certified_cost_cells == wavefront.leaf_cost_cells &&
             wavefront.leaf_cost_rows_consumed == wavefront.leaf_cost_tasks &&
             wavefront.leaf_cpu_completeness_rows == 0U && wavefront.leaf_scalar_searches == 0U,
@@ -731,6 +731,9 @@ void TestRecursivePointProof() {
       timed_attempt.leaf_cost_evaluate_ms + timed_attempt.leaf_cost_scatter_ms +
       timed_attempt.leaf_cursor_consume_ms + timed_attempt.leaf_scalar_search_ms +
       timed_attempt.leaf_apply_ms + timed_attempt.leaf_proof_verify_ms;
+  const double measured_setup_subphases = timed_attempt.leaf_proof_initialize_ms +
+                                          timed_attempt.leaf_coverage_scan_ms +
+                                          timed_attempt.leaf_cursor_construct_ms;
   const double measured_consume_subphases =
       timed_attempt.leaf_candidate_recheck_ms + timed_attempt.leaf_completeness_fallback_ms;
   const double measured_hamilton_reply_subphases =
@@ -741,6 +744,7 @@ void TestRecursivePointProof() {
             timed_attempt.proof_verify_ms >= 0.0 && timed_attempt.immediate_verify_ms >= 0.0 &&
             timed_attempt.work_graph_ms + 1.0e-6 >= measured_build_subphases &&
             timed_attempt.leaf_ms + 1.0e-6 >= measured_leaf_subphases &&
+            timed_attempt.leaf_setup_ms + 1.0e-6 >= measured_setup_subphases &&
             timed_attempt.leaf_cost_evaluate_ms + 1.0e-6 >=
                 timed_attempt.leaf_cost_cpu_certify_ms &&
             timed_attempt.leaf_cursor_consume_ms + 1.0e-6 >= measured_consume_subphases &&
@@ -750,6 +754,7 @@ void TestRecursivePointProof() {
             scan.leaf_frontier_states == timed_attempt.leaf_frontier_states &&
             scan.leaf_bucket_count == timed_attempt.leaf_bucket_count &&
             scan.peak_leaf_frontier_batch == timed_attempt.peak_leaf_frontier_batch &&
+            scan.leaf_cursor_searches_started == timed_attempt.leaf_cursor_searches_started &&
             scan.hamilton_reply_batches == timed_attempt.hamilton_reply_batches &&
             scan.hamilton_reply_centers == timed_attempt.hamilton_reply_centers &&
             scan.hamilton_reply_unique_centers == timed_attempt.hamilton_reply_unique_centers &&
@@ -1019,7 +1024,11 @@ void TestRecursivePointProof() {
               cuda_wavefront.leaf_cost_selected_device >= 0 && cuda_wavefront.leaf_cpu_verified &&
               cuda_wavefront.leaf_cost_batches > 0U && cuda_wavefront.leaf_cost_tasks > 0U &&
               cuda_wavefront.leaf_cost_cells == 4U * cuda_wavefront.leaf_cost_tasks &&
-              cuda_wavefront.leaf_setup_ms >= 0.0 && cuda_wavefront.leaf_cursor_prepare_ms >= 0.0 &&
+              cuda_wavefront.leaf_cursor_searches_started > 0U &&
+              cuda_wavefront.leaf_setup_ms + 1.0e-6 >=
+                  cuda_wavefront.leaf_proof_initialize_ms + cuda_wavefront.leaf_coverage_scan_ms +
+                      cuda_wavefront.leaf_cursor_construct_ms &&
+              cuda_wavefront.leaf_cursor_prepare_ms >= 0.0 &&
               cuda_wavefront.leaf_cost_evaluate_ms > 0.0 &&
               cuda_wavefront.leaf_cost_scatter_ms >= 0.0 &&
               cuda_wavefront.leaf_cursor_consume_ms > 0.0 &&

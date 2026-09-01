@@ -1980,6 +1980,7 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
   std::vector<BatchedPathProofWork> works;
   {
     ScopedPhaseTimer timer(&result.setup_ms);
+    ScopedPhaseTimer initialize_timer(&result.proof_initialize_ms);
     works.reserve(path_systems.size());
     for (const NormalizedPathSystem& paths : path_systems) {
       works.push_back(InitializeBatchedPathProof(graph, paths));
@@ -2005,15 +2006,27 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
         if (work.finished) {
           continue;
         }
-        FinishBatchedPathProofIfCovered(&work);
+        std::uint32_t source = 0U;
+        {
+          ScopedPhaseTimer coverage_timer(&result.coverage_scan_ms);
+          FinishBatchedPathProofIfCovered(&work);
+          if (!work.finished) {
+            source = *FirstUncoveredOutside(work);
+          }
+        }
         if (work.finished) {
           continue;
         }
-        const std::uint32_t source = *FirstUncoveredOutside(work);
         ActiveSearch search{.path_index = path_index, .source = source, .cursor = std::nullopt};
         if (can_batch_costs) {
-          search.cursor.emplace(graph, path_systems[path_index], work.catalog->outside[source],
-                                required_edge, options);
+          {
+            ScopedPhaseTimer cursor_timer(&result.cursor_construct_ms);
+            search.cursor.emplace(graph, path_systems[path_index], work.catalog->outside[source],
+                                  required_edge, options);
+          }
+          if (!AddWithoutOverflow(&result.cursor_searches_started, 1U)) {
+            throw std::overflow_error("path-system k-opt cursor 构造计数溢出");
+          }
         }
         active.push_back(std::move(search));
       }

@@ -149,6 +149,7 @@ struct PathSystemKOptBatchResult {
   std::uint64_t cost_tasks{};
   std::uint64_t cost_cells{};
   std::uint64_t scalar_searches{};
+  std::uint64_t cursor_searches_started{};
   std::uint64_t cuda_cost_batches{};
   std::uint64_t snapshot_cache_hits{};
   std::uint64_t template_cache_hits{};
@@ -164,6 +165,9 @@ struct PathSystemKOptBatchResult {
   std::uint64_t cpu_certified_cost_cells{};
   // 同步 wall time 只用于诊断，不进入 leaf proof。
   double setup_ms{};
+  double proof_initialize_ms{};
+  double coverage_scan_ms{};
+  double cursor_construct_ms{};
   double cursor_prepare_ms{};
   double cost_evaluate_ms{};
   double cost_cpu_certify_ms{};
