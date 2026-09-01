@@ -27,7 +27,7 @@
 | M4.3b3b2b2b2b2b1 CPU long-tail | 完成（128-cell 基线） | 缓存后交叉点；融合矩阵分流；CPU/CUDA proof 规范计数 |
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
-| M5 中大型调优 | 进行中（JV 二轮完成） | 三实例 clean-commit 五次门禁；进程内 11.117×/29.788×/40.119×；proof 全重放；CSR/驻留优化 |
+| M5 中大型调优 | 进行中（JV 三轮完成） | 三实例 clean-commit 五次门禁；进程内 11.194×/30.517×/41.695×；proof 全重放；CSR edge-id/驻留优化 |
 
 ## 当前基准结果
 
@@ -36,6 +36,8 @@ pr299 输入 1208 条边；JV 两个 epoch 后保留 1122 条，提交 86 条删
 M5 JV 正式基准绑定 `cac180f`：pcb3038、rl5915、d15112 分别从 `6883/29143/166499` 条边删除 `179/550/7312` 条，最终哈希为 `90d13888e351df17`、`0174cf46124ce870`、`76e196dd53d887d5`。进程内 CUDA 算法中位数为 `2.396/7.681/74.829 ms`，相对 CPU 为 `8.132×/25.679×/37.426×`；独立 CLI wall 加速为 `0.186×/0.940×/6.139×`。所有运行逐份 CPU 重放并比较输出；pcb3038 的 137,694 最优 tour 还通过 0 缺边门禁。另两实例尚缺本地最优 tour witness，不能标成 tour-checked。
 
 M5 JV 驻留优化绑定 `25590af`：精确比较坐标、边端点和边权后复用静态 device arrays，每轮仍完整上传 active/CSR/witness。三实例 CUDA 算法中位数降为 `1.741/6.639/70.097 ms`，相对 CPU 为 `11.117×/29.788×/40.119×`；所有 timed epochs 均命中静态键和增长 workspace，峰值驻留为 `391148/1517168/8294196 bytes`。最终图哈希和输出 SHA-256 均未改变。
+
+M5 JV 动态 edge-id 优化绑定 `41feceb`：CUDA CSR 不再重复上传 64 位权重，而用 32 位稳定 edge id 读取驻留权重；三实例算法中位数降为 `1.728/6.503/67.651 ms`，相对 CPU 为 `11.194×/30.517×/41.695×`，峰值驻留降为 `336084/1284024/6962204 bytes`。d15112 的同步 H2D/kernel/D2H 中位数为 `2.965/6.628/0.513 ms`；proof、最终图哈希与输出 SHA-256 均未改变。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 

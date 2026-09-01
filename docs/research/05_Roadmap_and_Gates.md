@@ -69,10 +69,10 @@ M4.3b3b2b2b2c HT epoch commit 已完成：同一不可变 snapshot 上的多个�
 
 依次 pcb3038、rl5915、d15112，定位 CSR 构建、带宽、分歧和复核瓶颈。图重排、多流、多 GPU 都必须在 M1–M4 证书不变量不变的前提下实验。
 
-JV 基线与第二轮优化已完成：三实例各预热一次、计时五次，CPU/CUDA 输出逐字节一致且每次 proof 均由独立 CPU 进程重放。规范边 CSR 免排序快路径后，又加入 exact 静态图键和增长 workspace 的跨 epoch CUDA 驻留缓存；进程内算法中位数加速达到 `11.117× / 29.788× / 40.119×`，驻留仅 `0.373/1.447/7.910 MiB`。独立 CLI 因 context/I/O 仍只有 `0.176× / 0.944× / 6.019×`。`pcb3038` 另通过成本 137,694 的受保护最优 tour 门禁。
+JV 基线与第三轮优化已完成：三实例各预热一次、计时五次，CPU/CUDA 输出逐字节一致且每次 proof 均由独立 CPU 进程重放。规范边 CSR 免排序、跨 epoch CUDA 驻留后，动态 CSR 再以 32 位 edge id 引用静态边权；进程内算法中位数加速达到 `11.194× / 30.517× / 41.695×`，驻留降为 `0.321/1.225/6.640 MiB`。分段计时确认 d15112 的 H2D/kernel/D2H 为 `2.965/6.628/0.513 ms`。独立 CLI 仍受 context/I/O 和共享节点抖动支配。`pcb3038` 另通过成本 137,694 的受保护最优 tour 门禁。
 
-M5 仍未完成：`rl5915/d15112` 的最优 tour witness、全图 HT 自动目标调度、动态 CSR 传输优化、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
+M5 仍未完成：`rl5915/d15112` 的最优 tour witness、全图 HT 自动目标调度、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
 
-当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append batching、M4.3b3b2b2b1 规范 child edge SoA、M4.3b3b2b2b2a frontier leaf batching、M4.3b3b2b2b2b1 一般 leaf 游标、M4.3b3b2b2b2b2a GPU leaf 驻留缓存、M4.3b3b2b2b2b2b1 CPU long-tail、M4.3b3b2b2b2b2b2 cooperative multi-block continuation、M4.3b3b2b2b2c HT epoch commit，以及 M5 JV 中大型基线与首轮 CSR 优化。M3.1 未完成时必须在状态清单中标为 pending；中大型全图 HT 调度属于 M5，不能用 JV 或小实例闭环冒充性能结论。
+当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append、M4.3b3b2b2b1 规范 child edge SoA、M4.3b3b2b2b2a frontier leaf batching、M4.3b3b2b2b2b1 一般 leaf 游标、M4.3b3b2b2b2b2a GPU leaf 驻留缓存、M4.3b3b2b2b2b2b1 CPU long-tail、M4.3b3b2b2b2b2b2 cooperative multi-block continuation、M4.3b3b2b2b2c HT epoch commit，以及 M5 JV 中大型基线、CSR 快路径、驻留与动态 edge-id 优化。M3.1 未完成时必须在状态清单中标为 pending；中大型全图 HT 调度属于 M5，不能用 JV 或小实例闭环冒充性能结论。

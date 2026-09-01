@@ -69,3 +69,5 @@ CUDA 单元测试覆盖四条路径：
 2. 评估 active edge id 紧凑 launch，减少已删除边线程；
 3. 将 JV/HT/LP 放入常驻 orchestrator，避免短任务反复创建 CUDA context；
 4. 保留 exact cache key、owner-device 释放和所有错误 fail-closed 门禁。
+
+第 1 项已由后续的 [动态 CSR edge-id 传输](24_M5_JV_Dynamic_CSR_Edge_Ids.md)完成；本文件继续保留 `25590af` 的驻留权重基线。

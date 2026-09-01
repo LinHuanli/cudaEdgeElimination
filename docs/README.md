@@ -29,5 +29,6 @@
 25. [Hamilton–Tutte 不可变 epoch 提交](research/21_Hamilton_Tutte_Epoch_Commit.md)：整批 CPU 复核、V2 内嵌 sidecar 与原子确定性删边。
 26. [M5 JV 中大型基准](research/22_M5_JV_Medium_Benchmark.md)：三组 clean-commit CPU/CUDA 门禁、最优 tour 检查、阶段计时与 CSR 快路径。
 27. [M5 JV CUDA 驻留缓存](research/23_M5_JV_Device_Residency.md)：精确静态键、动态 CSR 刷新、增长 workspace 与三实例稳态收益。
+28. [M5 JV 动态 CSR edge-id](research/24_M5_JV_Dynamic_CSR_Edge_Ids.md)：复用驻留边权、分段 CUDA 计时与三实例显存/耗时门禁。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

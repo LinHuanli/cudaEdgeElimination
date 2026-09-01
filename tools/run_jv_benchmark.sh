@@ -239,6 +239,8 @@ mapfile -t cpu_proposes < <(awk -F',' '$1 == "cpu" { print $6 }' "${metrics}" | 
 mapfile -t cuda_proposes < <(awk -F',' '$1 == "cuda" { print $6 }' "${metrics}" | sort -n)
 mapfile -t inprocess_cpu < <(awk -F',' '$1 == "cpu" { print $3 }' "${run_dir}/inprocess.csv" | sort -n)
 mapfile -t inprocess_cuda < <(awk -F',' '$1 == "cuda" { print $3 }' "${run_dir}/inprocess.csv" | sort -n)
+mapfile -t inprocess_cpu_propose < <(awk -F',' '$1 == "cpu" { print $4 }' "${run_dir}/inprocess.csv" | sort -n)
+mapfile -t inprocess_cuda_propose < <(awk -F',' '$1 == "cuda" { print $4 }' "${run_dir}/inprocess.csv" | sort -n)
 mapfile -t inprocess_cpu_replay < <(awk -F',' '$1 == "cpu" { print $6 }' "${run_dir}/inprocess.csv" | sort -n)
 mapfile -t inprocess_cuda_replay < <(awk -F',' '$1 == "cuda" { print $6 }' "${run_dir}/inprocess.csv" | sort -n)
 mapfile -t inprocess_cpu_snapshot < <(awk -F',' '$1 == "cpu" { print $11 }' "${run_dir}/inprocess.csv" | sort -n)
@@ -255,6 +257,7 @@ mapfile -t inprocess_cuda_d2h < <(awk -F',' '$1 == "cuda" { print $18 }' "${run_
 # 所有数据列必须完整，避免部分失败的结果被误汇总为成功。
 for count in "${#cpu_walls[@]}" "${#cuda_walls[@]}" "${#cpu_proposes[@]}" \
   "${#cuda_proposes[@]}" "${#inprocess_cpu[@]}" "${#inprocess_cuda[@]}" \
+  "${#inprocess_cpu_propose[@]}" "${#inprocess_cuda_propose[@]}" \
   "${#inprocess_cpu_replay[@]}" "${#inprocess_cuda_replay[@]}" \
   "${#inprocess_cpu_snapshot[@]}" "${#inprocess_cuda_snapshot[@]}" \
   "${#inprocess_cpu_commit[@]}" "${#inprocess_cuda_commit[@]}" \
@@ -293,6 +296,8 @@ inprocess_speedup="$(awk -v cpu="${inprocess_cpu[median_index]}" \
   echo "inprocess_cpu_algorithm_p95_ms ${inprocess_cpu[p95_index]}"
   echo "inprocess_cuda_algorithm_median_ms ${inprocess_cuda[median_index]}"
   echo "inprocess_cuda_algorithm_p95_ms ${inprocess_cuda[p95_index]}"
+  echo "inprocess_cpu_propose_median_ms ${inprocess_cpu_propose[median_index]}"
+  echo "inprocess_cuda_propose_median_ms ${inprocess_cuda_propose[median_index]}"
   echo "inprocess_cpu_replay_median_ms ${inprocess_cpu_replay[median_index]}"
   echo "inprocess_cuda_replay_median_ms ${inprocess_cuda_replay[median_index]}"
   echo "inprocess_cpu_snapshot_median_ms ${inprocess_cpu_snapshot[median_index]}"
