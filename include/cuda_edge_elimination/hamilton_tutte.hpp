@@ -282,6 +282,11 @@ struct HtWavefrontResult {
   double leaf_apply_ms{};
   double leaf_proof_verify_ms{};
   double path_append_ms{};
+  double path_append_parent_prepare_ms{};
+  double path_append_child_normalize_ms{};
+  double path_append_child_edges_ms{};
+  double path_append_cuda_evaluate_ms{};
+  double path_append_cuda_compare_ms{};
   double hamilton_reply_ms{};
   double hamilton_reply_validation_ms{};
   double hamilton_reply_cpu_enumerate_ms{};
@@ -339,6 +344,12 @@ struct HtPathAppendBatchResult {
   bool cpu_verified{false};
   // 仅当 CUDA 写出的完整 offsets/edges 与 CPU 规范化结果逐项相等时为 true。
   bool device_children_verified{false};
+  // 以下互斥子阶段仅用于性能画像，不参与 proof 或后端判定。
+  double parent_prepare_ms{};
+  double child_normalize_ms{};
+  double child_edges_ms{};
+  double cuda_evaluate_ms{};
+  double cuda_compare_ms{};
 };
 
 // 批量检查递归 HT point/end reply，并用 CPU 规范化结果认证 GPU flags 与 child edge SoA。

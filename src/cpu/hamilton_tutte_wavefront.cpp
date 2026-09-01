@@ -239,6 +239,11 @@ void RecordPathAppendBatch(WaveBuildContext* const context, const HtPathAppendBa
           ? batch.device_children_verified
           : result.path_append_device_children_verified && batch.device_children_verified;
   result.path_append_child_edges += batch.child_edges.size();
+  result.path_append_parent_prepare_ms += batch.parent_prepare_ms;
+  result.path_append_child_normalize_ms += batch.child_normalize_ms;
+  result.path_append_child_edges_ms += batch.child_edges_ms;
+  result.path_append_cuda_evaluate_ms += batch.cuda_evaluate_ms;
+  result.path_append_cuda_compare_ms += batch.cuda_compare_ms;
   if (result.path_append_backend == "none") {
     result.path_append_backend = batch.backend;
   } else if (result.path_append_backend != batch.backend) {

@@ -132,6 +132,11 @@ struct HtScanAttempt {
   double leaf_apply_ms{};
   double leaf_proof_verify_ms{};
   double path_append_ms{};
+  double path_append_parent_prepare_ms{};
+  double path_append_child_normalize_ms{};
+  double path_append_child_edges_ms{};
+  double path_append_cuda_evaluate_ms{};
+  double path_append_cuda_compare_ms{};
   double hamilton_reply_ms{};
   double hamilton_reply_validation_ms{};
   double hamilton_reply_cpu_enumerate_ms{};
@@ -199,6 +204,11 @@ struct HtScanResult {
   double leaf_apply_ms{};
   double leaf_proof_verify_ms{};
   double path_append_ms{};
+  double path_append_parent_prepare_ms{};
+  double path_append_child_normalize_ms{};
+  double path_append_child_edges_ms{};
+  double path_append_cuda_evaluate_ms{};
+  double path_append_cuda_compare_ms{};
   double hamilton_reply_ms{};
   double hamilton_reply_validation_ms{};
   double hamilton_reply_cpu_enumerate_ms{};

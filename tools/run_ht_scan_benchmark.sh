@@ -413,6 +413,32 @@ cpu_path_append_ms="$(read_field "${run_dir}/cpu.report" path_append_ms)"
 cpu_fused_path_append_ms="$(read_field "${run_dir}/cpu-fused.report" path_append_ms)"
 cuda_path_append_ms="$(read_field "${run_dir}/cuda.report" path_append_ms)"
 hybrid_path_append_ms="$(read_field "${run_dir}/hybrid.report" path_append_ms)"
+fused_path_append_ms="$(read_field "${run_dir}/fused.report" path_append_ms)"
+cpu_path_append_parent_prepare_ms="$(read_field "${run_dir}/cpu.report" path_append_parent_prepare_ms)"
+cpu_fused_path_append_parent_prepare_ms="$(read_field "${run_dir}/cpu-fused.report" path_append_parent_prepare_ms)"
+cuda_path_append_parent_prepare_ms="$(read_field "${run_dir}/cuda.report" path_append_parent_prepare_ms)"
+hybrid_path_append_parent_prepare_ms="$(read_field "${run_dir}/hybrid.report" path_append_parent_prepare_ms)"
+fused_path_append_parent_prepare_ms="$(read_field "${run_dir}/fused.report" path_append_parent_prepare_ms)"
+cpu_path_append_child_normalize_ms="$(read_field "${run_dir}/cpu.report" path_append_child_normalize_ms)"
+cpu_fused_path_append_child_normalize_ms="$(read_field "${run_dir}/cpu-fused.report" path_append_child_normalize_ms)"
+cuda_path_append_child_normalize_ms="$(read_field "${run_dir}/cuda.report" path_append_child_normalize_ms)"
+hybrid_path_append_child_normalize_ms="$(read_field "${run_dir}/hybrid.report" path_append_child_normalize_ms)"
+fused_path_append_child_normalize_ms="$(read_field "${run_dir}/fused.report" path_append_child_normalize_ms)"
+cpu_path_append_child_edges_ms="$(read_field "${run_dir}/cpu.report" path_append_child_edges_ms)"
+cpu_fused_path_append_child_edges_ms="$(read_field "${run_dir}/cpu-fused.report" path_append_child_edges_ms)"
+cuda_path_append_child_edges_ms="$(read_field "${run_dir}/cuda.report" path_append_child_edges_ms)"
+hybrid_path_append_child_edges_ms="$(read_field "${run_dir}/hybrid.report" path_append_child_edges_ms)"
+fused_path_append_child_edges_ms="$(read_field "${run_dir}/fused.report" path_append_child_edges_ms)"
+cpu_path_append_cuda_evaluate_ms="$(read_field "${run_dir}/cpu.report" path_append_cuda_evaluate_ms)"
+cpu_fused_path_append_cuda_evaluate_ms="$(read_field "${run_dir}/cpu-fused.report" path_append_cuda_evaluate_ms)"
+cuda_path_append_cuda_evaluate_ms="$(read_field "${run_dir}/cuda.report" path_append_cuda_evaluate_ms)"
+hybrid_path_append_cuda_evaluate_ms="$(read_field "${run_dir}/hybrid.report" path_append_cuda_evaluate_ms)"
+fused_path_append_cuda_evaluate_ms="$(read_field "${run_dir}/fused.report" path_append_cuda_evaluate_ms)"
+cpu_path_append_cuda_compare_ms="$(read_field "${run_dir}/cpu.report" path_append_cuda_compare_ms)"
+cpu_fused_path_append_cuda_compare_ms="$(read_field "${run_dir}/cpu-fused.report" path_append_cuda_compare_ms)"
+cuda_path_append_cuda_compare_ms="$(read_field "${run_dir}/cuda.report" path_append_cuda_compare_ms)"
+hybrid_path_append_cuda_compare_ms="$(read_field "${run_dir}/hybrid.report" path_append_cuda_compare_ms)"
+fused_path_append_cuda_compare_ms="$(read_field "${run_dir}/fused.report" path_append_cuda_compare_ms)"
 cpu_hamilton_reply_ms="$(read_field "${run_dir}/cpu.report" hamilton_reply_ms)"
 cpu_fused_hamilton_reply_ms="$(read_field "${run_dir}/cpu-fused.report" hamilton_reply_ms)"
 cuda_hamilton_reply_ms="$(read_field "${run_dir}/cuda.report" hamilton_reply_ms)"
@@ -598,6 +624,39 @@ fused_leaf_consume_residual_ms="$(awk -v total="${fused_leaf_cursor_consume_ms}"
   -v candidate="${fused_leaf_candidate_recheck_ms}" \
   -v completeness="${fused_leaf_completeness_fallback_ms}" \
   'BEGIN { printf "%.6f", total-candidate-completeness }')"
+cpu_path_append_residual_ms="$(awk -v total="${cpu_path_append_ms}" \
+  -v parent="${cpu_path_append_parent_prepare_ms}" \
+  -v normalize="${cpu_path_append_child_normalize_ms}" \
+  -v edges="${cpu_path_append_child_edges_ms}" -v cuda="${cpu_path_append_cuda_evaluate_ms}" \
+  -v compare="${cpu_path_append_cuda_compare_ms}" \
+  'BEGIN { printf "%.6f", total-parent-normalize-edges-cuda-compare }')"
+cpu_fused_path_append_residual_ms="$(awk -v total="${cpu_fused_path_append_ms}" \
+  -v parent="${cpu_fused_path_append_parent_prepare_ms}" \
+  -v normalize="${cpu_fused_path_append_child_normalize_ms}" \
+  -v edges="${cpu_fused_path_append_child_edges_ms}" \
+  -v cuda="${cpu_fused_path_append_cuda_evaluate_ms}" \
+  -v compare="${cpu_fused_path_append_cuda_compare_ms}" \
+  'BEGIN { printf "%.6f", total-parent-normalize-edges-cuda-compare }')"
+cuda_path_append_residual_ms="$(awk -v total="${cuda_path_append_ms}" \
+  -v parent="${cuda_path_append_parent_prepare_ms}" \
+  -v normalize="${cuda_path_append_child_normalize_ms}" \
+  -v edges="${cuda_path_append_child_edges_ms}" -v cuda="${cuda_path_append_cuda_evaluate_ms}" \
+  -v compare="${cuda_path_append_cuda_compare_ms}" \
+  'BEGIN { printf "%.6f", total-parent-normalize-edges-cuda-compare }')"
+hybrid_path_append_residual_ms="$(awk -v total="${hybrid_path_append_ms}" \
+  -v parent="${hybrid_path_append_parent_prepare_ms}" \
+  -v normalize="${hybrid_path_append_child_normalize_ms}" \
+  -v edges="${hybrid_path_append_child_edges_ms}" \
+  -v cuda="${hybrid_path_append_cuda_evaluate_ms}" \
+  -v compare="${hybrid_path_append_cuda_compare_ms}" \
+  'BEGIN { printf "%.6f", total-parent-normalize-edges-cuda-compare }')"
+fused_path_append_residual_ms="$(awk -v total="${fused_path_append_ms}" \
+  -v parent="${fused_path_append_parent_prepare_ms}" \
+  -v normalize="${fused_path_append_child_normalize_ms}" \
+  -v edges="${fused_path_append_child_edges_ms}" \
+  -v cuda="${fused_path_append_cuda_evaluate_ms}" \
+  -v compare="${fused_path_append_cuda_compare_ms}" \
+  'BEGIN { printf "%.6f", total-parent-normalize-edges-cuda-compare }')"
 cpu_hamilton_reply_residual_ms="$(awk -v total="${cpu_hamilton_reply_ms}" \
   -v validation="${cpu_hamilton_reply_validation_ms}" \
   -v enumerate="${cpu_hamilton_reply_enumerate_ms}" -v cuda="${cpu_hamilton_reply_cuda_ms}" \
@@ -684,7 +743,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V12"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V13"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -829,9 +888,40 @@ summary="${run_dir}/summary.txt"
   echo "hybrid_leaf_speedup ${hybrid_leaf_speedup}"
   echo "fused_leaf_speedup_vs_hybrid ${fused_leaf_speedup}"
   echo "cpu_path_append_ms ${cpu_path_append_ms}"
+  echo "cpu_path_append_parent_prepare_ms ${cpu_path_append_parent_prepare_ms}"
+  echo "cpu_path_append_child_normalize_ms ${cpu_path_append_child_normalize_ms}"
+  echo "cpu_path_append_child_edges_ms ${cpu_path_append_child_edges_ms}"
+  echo "cpu_path_append_cuda_evaluate_ms ${cpu_path_append_cuda_evaluate_ms}"
+  echo "cpu_path_append_cuda_compare_ms ${cpu_path_append_cuda_compare_ms}"
+  echo "cpu_path_append_residual_ms ${cpu_path_append_residual_ms}"
   echo "cpu_fused_path_append_ms ${cpu_fused_path_append_ms}"
+  echo "cpu_fused_path_append_parent_prepare_ms ${cpu_fused_path_append_parent_prepare_ms}"
+  echo "cpu_fused_path_append_child_normalize_ms ${cpu_fused_path_append_child_normalize_ms}"
+  echo "cpu_fused_path_append_child_edges_ms ${cpu_fused_path_append_child_edges_ms}"
+  echo "cpu_fused_path_append_cuda_evaluate_ms ${cpu_fused_path_append_cuda_evaluate_ms}"
+  echo "cpu_fused_path_append_cuda_compare_ms ${cpu_fused_path_append_cuda_compare_ms}"
+  echo "cpu_fused_path_append_residual_ms ${cpu_fused_path_append_residual_ms}"
   echo "cuda_path_append_ms ${cuda_path_append_ms}"
+  echo "cuda_path_append_parent_prepare_ms ${cuda_path_append_parent_prepare_ms}"
+  echo "cuda_path_append_child_normalize_ms ${cuda_path_append_child_normalize_ms}"
+  echo "cuda_path_append_child_edges_ms ${cuda_path_append_child_edges_ms}"
+  echo "cuda_path_append_cuda_evaluate_ms ${cuda_path_append_cuda_evaluate_ms}"
+  echo "cuda_path_append_cuda_compare_ms ${cuda_path_append_cuda_compare_ms}"
+  echo "cuda_path_append_residual_ms ${cuda_path_append_residual_ms}"
   echo "hybrid_path_append_ms ${hybrid_path_append_ms}"
+  echo "hybrid_path_append_parent_prepare_ms ${hybrid_path_append_parent_prepare_ms}"
+  echo "hybrid_path_append_child_normalize_ms ${hybrid_path_append_child_normalize_ms}"
+  echo "hybrid_path_append_child_edges_ms ${hybrid_path_append_child_edges_ms}"
+  echo "hybrid_path_append_cuda_evaluate_ms ${hybrid_path_append_cuda_evaluate_ms}"
+  echo "hybrid_path_append_cuda_compare_ms ${hybrid_path_append_cuda_compare_ms}"
+  echo "hybrid_path_append_residual_ms ${hybrid_path_append_residual_ms}"
+  echo "fused_path_append_ms ${fused_path_append_ms}"
+  echo "fused_path_append_parent_prepare_ms ${fused_path_append_parent_prepare_ms}"
+  echo "fused_path_append_child_normalize_ms ${fused_path_append_child_normalize_ms}"
+  echo "fused_path_append_child_edges_ms ${fused_path_append_child_edges_ms}"
+  echo "fused_path_append_cuda_evaluate_ms ${fused_path_append_cuda_evaluate_ms}"
+  echo "fused_path_append_cuda_compare_ms ${fused_path_append_cuda_compare_ms}"
+  echo "fused_path_append_residual_ms ${fused_path_append_residual_ms}"
   echo "cpu_hamilton_reply_ms ${cpu_hamilton_reply_ms}"
   echo "cpu_fused_hamilton_reply_ms ${cpu_fused_hamilton_reply_ms}"
   echo "cuda_hamilton_reply_ms ${cuda_hamilton_reply_ms}"

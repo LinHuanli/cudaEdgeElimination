@@ -636,7 +636,15 @@ void TestRecursivePointProof() {
         "wavefront records generated moves and frontier width");
   Check(wavefront.path_append_backend == "cpu" && wavefront.path_append_cpu_verified &&
             !wavefront.path_append_device_children_verified && wavefront.path_append_batches > 0U &&
-            wavefront.path_append_tasks > 0U && wavefront.path_append_child_edges > 0U,
+            wavefront.path_append_tasks > 0U && wavefront.path_append_child_edges > 0U &&
+            wavefront.path_append_parent_prepare_ms >= 0.0 &&
+            wavefront.path_append_child_normalize_ms > 0.0 &&
+            wavefront.path_append_child_edges_ms >= 0.0 &&
+            wavefront.path_append_cuda_evaluate_ms == 0.0 &&
+            wavefront.path_append_cuda_compare_ms == 0.0 &&
+            wavefront.path_append_ms + 1.0e-6 >= wavefront.path_append_parent_prepare_ms +
+                                                     wavefront.path_append_child_normalize_ms +
+                                                     wavefront.path_append_child_edges_ms,
         "CPU wavefront records fully verified path-append batches");
   Check(wavefront.leaf_cost_backend == "cpu" && wavefront.leaf_cpu_verified &&
             wavefront.leaf_frontier_batches > 0U &&
@@ -743,6 +751,10 @@ void TestRecursivePointProof() {
   const double measured_hamilton_reply_subphases =
       timed_attempt.hamilton_reply_validation_ms + timed_attempt.hamilton_reply_cpu_enumerate_ms +
       timed_attempt.hamilton_reply_cuda_evaluate_ms + timed_attempt.hamilton_reply_cuda_compare_ms;
+  const double measured_path_append_subphases =
+      timed_attempt.path_append_parent_prepare_ms + timed_attempt.path_append_child_normalize_ms +
+      timed_attempt.path_append_child_edges_ms + timed_attempt.path_append_cuda_evaluate_ms +
+      timed_attempt.path_append_cuda_compare_ms;
   Check(timed_attempt.candidate_ms >= 0.0 && timed_attempt.work_graph_ms >= 0.0 &&
             timed_attempt.propagation_ms >= 0.0 && timed_attempt.proof_extract_ms >= 0.0 &&
             timed_attempt.proof_verify_ms >= 0.0 && timed_attempt.immediate_verify_ms >= 0.0 &&
@@ -752,6 +764,7 @@ void TestRecursivePointProof() {
             timed_attempt.leaf_cost_evaluate_ms + 1.0e-6 >=
                 timed_attempt.leaf_cost_cpu_certify_ms &&
             timed_attempt.leaf_cursor_consume_ms + 1.0e-6 >= measured_consume_subphases &&
+            timed_attempt.path_append_ms + 1.0e-6 >= measured_path_append_subphases &&
             timed_attempt.hamilton_reply_ms + 1.0e-6 >= measured_hamilton_reply_subphases &&
             scan.work_graph_ms == timed_attempt.work_graph_ms &&
             scan.leaf_frontier_batches == timed_attempt.leaf_frontier_batches &&
@@ -762,6 +775,9 @@ void TestRecursivePointProof() {
             scan.leaf_cpu_parallel_cost_batches == timed_attempt.leaf_cpu_parallel_cost_batches &&
             scan.leaf_cpu_parallel_cost_cells == timed_attempt.leaf_cpu_parallel_cost_cells &&
             scan.peak_leaf_cpu_cost_threads == timed_attempt.peak_leaf_cpu_cost_threads &&
+            scan.path_append_parent_prepare_ms == timed_attempt.path_append_parent_prepare_ms &&
+            scan.path_append_child_normalize_ms == timed_attempt.path_append_child_normalize_ms &&
+            scan.path_append_child_edges_ms == timed_attempt.path_append_child_edges_ms &&
             scan.hamilton_reply_batches == timed_attempt.hamilton_reply_batches &&
             scan.hamilton_reply_centers == timed_attempt.hamilton_reply_centers &&
             scan.hamilton_reply_unique_centers == timed_attempt.hamilton_reply_unique_centers &&
@@ -1025,7 +1041,17 @@ void TestRecursivePointProof() {
               cuda_wavefront.path_append_selected_device >= 0 &&
               cuda_wavefront.path_append_cpu_verified &&
               cuda_wavefront.path_append_device_children_verified &&
-              cuda_wavefront.path_append_tasks > 0U && cuda_wavefront.path_append_child_edges > 0U,
+              cuda_wavefront.path_append_tasks > 0U &&
+              cuda_wavefront.path_append_child_edges > 0U &&
+              cuda_wavefront.path_append_child_normalize_ms > 0.0 &&
+              cuda_wavefront.path_append_cuda_evaluate_ms > 0.0 &&
+              cuda_wavefront.path_append_cuda_compare_ms >= 0.0 &&
+              cuda_wavefront.path_append_ms + 1.0e-6 >=
+                  cuda_wavefront.path_append_parent_prepare_ms +
+                      cuda_wavefront.path_append_child_normalize_ms +
+                      cuda_wavefront.path_append_child_edges_ms +
+                      cuda_wavefront.path_append_cuda_evaluate_ms +
+                      cuda_wavefront.path_append_cuda_compare_ms,
           "CUDA wavefront path-append batches are fully CPU verified");
     Check(cuda_wavefront.leaf_cost_backend == "cuda" &&
               cuda_wavefront.leaf_cost_selected_device >= 0 && cuda_wavefront.leaf_cpu_verified &&
@@ -1296,7 +1322,9 @@ void TestPathAppendBatch() {
     expected_child_edges.insert(expected_child_edges.end(), slice.begin(), slice.end());
   }
   Check(!cpu.device_children_verified && cpu.child_edge_offsets == expected_offsets &&
-            cpu.child_edges == expected_child_edges,
+            cpu.child_edges == expected_child_edges && cpu.parent_prepare_ms >= 0.0 &&
+            cpu.child_normalize_ms > 0.0 && cpu.child_edges_ms >= 0.0 &&
+            cpu.cuda_evaluate_ms == 0.0 && cpu.cuda_compare_ms == 0.0,
         "CPU path-append exposes aligned canonical child edge SoA");
 
   std::vector<cudaee::HtPathAppendTask> bad_point = tasks;
@@ -1326,7 +1354,8 @@ void TestPathAppendBatch() {
     Check(gpu.backend == "cuda" && gpu.selected_device >= 0 && gpu.cpu_verified &&
               gpu.device_children_verified && gpu.feasible == expected &&
               gpu.child_edge_offsets == cpu.child_edge_offsets &&
-              gpu.child_edges == cpu.child_edges,
+              gpu.child_edges == cpu.child_edges && gpu.child_normalize_ms > 0.0 &&
+              gpu.cuda_evaluate_ms > 0.0 && gpu.cuda_compare_ms >= 0.0,
           "CUDA path-append child SoA exactly matches CPU normalization");
     for (std::size_t index = 0; index < tasks.size(); ++index) {
       Check(gpu.children[index].valid == cpu.children[index].valid &&

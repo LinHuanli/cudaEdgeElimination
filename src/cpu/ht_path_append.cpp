@@ -1,6 +1,7 @@
 #include "cuda_edge_elimination/hamilton_tutte.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -11,6 +12,11 @@
 
 namespace cudaee {
 namespace {
+
+double ElapsedMilliseconds(const std::chrono::steady_clock::time_point begin) {
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin)
+      .count();
+}
 
 bool SameCanonicalPathSystem(const NormalizedPathSystem& first,
                              const NormalizedPathSystem& second) {
@@ -94,6 +100,7 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
   std::vector<detail::HtPathNodeRecord> node_records;
   std::vector<NodeEdge> parent_edges;
   state_spans.reserve(parents.size());
+  const auto parent_prepare_begin = std::chrono::steady_clock::now();
   for (const NormalizedPathSystem& parent : parents) {
     const NormalizedPathSystem canonical = NormalizePathSystem(parent.paths, dimension);
     if (!parent.valid || !canonical.valid || !SameCanonicalPathSystem(parent, canonical)) {
@@ -136,14 +143,19 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
   }
 
   HtPathAppendBatchResult result;
+  result.parent_prepare_ms = ElapsedMilliseconds(parent_prepare_begin);
   result.feasible.reserve(tasks.size());
   result.children.reserve(tasks.size());
   result.child_edge_offsets.reserve(tasks.size() + 1U);
   result.child_edge_offsets.push_back(0U);
   for (const HtPathAppendTask& task : tasks) {
+    const auto child_normalize_begin = std::chrono::steady_clock::now();
     ValidateTask(dimension, parents, task);
     result.children.push_back(
         NormalizePathSystem(BuildRawChild(parents[task.parent_index], task), dimension));
+    result.child_normalize_ms += ElapsedMilliseconds(child_normalize_begin);
+
+    const auto child_edges_begin = std::chrono::steady_clock::now();
     result.feasible.push_back(static_cast<std::uint8_t>(result.children.back().valid));
     if (result.children.back().valid) {
       const std::vector<NodeEdge> child_edges = BuildCanonicalEdges(result.children.back());
@@ -154,6 +166,7 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
       result.child_edges.insert(result.child_edges.end(), child_edges.begin(), child_edges.end());
     }
     result.child_edge_offsets.push_back(static_cast<std::uint64_t>(result.child_edges.size()));
+    result.child_edges_ms += ElapsedMilliseconds(child_edges_begin);
   }
   result.cpu_verified = true;
 
@@ -172,10 +185,12 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
   }
 
   detail::HtPathAppendDeviceBatch cuda_batch;
+  const auto cuda_evaluate_begin = std::chrono::steady_clock::now();
   try {
     cuda_batch = detail::EvaluateHtPathAppendsCuda(dimension, state_spans, node_records,
                                                    parent_edges, tasks, &result.selected_device);
   } catch (const std::exception&) {
+    result.cuda_evaluate_ms = ElapsedMilliseconds(cuda_evaluate_begin);
     if (backend == PathCompatibilityBackend::kCuda) {
       throw;
     }
@@ -183,6 +198,8 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
     result.backend = "cpu-fallback";
     return result;
   }
+  result.cuda_evaluate_ms = ElapsedMilliseconds(cuda_evaluate_begin);
+  const auto cuda_compare_begin = std::chrono::steady_clock::now();
   if (cuda_batch.feasible != result.feasible ||
       cuda_batch.child_edge_offsets != result.child_edge_offsets ||
       cuda_batch.child_edges != result.child_edges) {
@@ -192,6 +209,7 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
   result.child_edges = std::move(cuda_batch.child_edges);
   result.device_children_verified = true;
   result.backend = "cuda";
+  result.cuda_compare_ms = ElapsedMilliseconds(cuda_compare_begin);
   return result;
 }
 

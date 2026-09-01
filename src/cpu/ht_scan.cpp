@@ -160,6 +160,11 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.leaf_apply_ms = wavefront.leaf_apply_ms;
     attempt.leaf_proof_verify_ms = wavefront.leaf_proof_verify_ms;
     attempt.path_append_ms = wavefront.path_append_ms;
+    attempt.path_append_parent_prepare_ms = wavefront.path_append_parent_prepare_ms;
+    attempt.path_append_child_normalize_ms = wavefront.path_append_child_normalize_ms;
+    attempt.path_append_child_edges_ms = wavefront.path_append_child_edges_ms;
+    attempt.path_append_cuda_evaluate_ms = wavefront.path_append_cuda_evaluate_ms;
+    attempt.path_append_cuda_compare_ms = wavefront.path_append_cuda_compare_ms;
     attempt.hamilton_reply_ms = wavefront.hamilton_reply_ms;
     attempt.hamilton_reply_validation_ms = wavefront.hamilton_reply_validation_ms;
     attempt.hamilton_reply_cpu_enumerate_ms = wavefront.hamilton_reply_cpu_enumerate_ms;
@@ -220,6 +225,11 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.leaf_apply_ms += attempt.leaf_apply_ms;
     scan.leaf_proof_verify_ms += attempt.leaf_proof_verify_ms;
     scan.path_append_ms += attempt.path_append_ms;
+    scan.path_append_parent_prepare_ms += attempt.path_append_parent_prepare_ms;
+    scan.path_append_child_normalize_ms += attempt.path_append_child_normalize_ms;
+    scan.path_append_child_edges_ms += attempt.path_append_child_edges_ms;
+    scan.path_append_cuda_evaluate_ms += attempt.path_append_cuda_evaluate_ms;
+    scan.path_append_cuda_compare_ms += attempt.path_append_cuda_compare_ms;
     scan.hamilton_reply_ms += attempt.hamilton_reply_ms;
     scan.hamilton_reply_validation_ms += attempt.hamilton_reply_validation_ms;
     scan.hamilton_reply_cpu_enumerate_ms += attempt.hamilton_reply_cpu_enumerate_ms;

@@ -593,6 +593,11 @@ bool HtProveCommand(const Arguments& arguments) {
   double leaf_apply_ms = 0.0;
   double leaf_proof_verify_ms = 0.0;
   double path_append_ms = 0.0;
+  double path_append_parent_prepare_ms = 0.0;
+  double path_append_child_normalize_ms = 0.0;
+  double path_append_child_edges_ms = 0.0;
+  double path_append_cuda_evaluate_ms = 0.0;
+  double path_append_cuda_compare_ms = 0.0;
   double hamilton_reply_ms = 0.0;
   double hamilton_reply_validation_ms = 0.0;
   double hamilton_reply_cpu_enumerate_ms = 0.0;
@@ -690,6 +695,11 @@ bool HtProveCommand(const Arguments& arguments) {
     leaf_apply_ms = result.leaf_apply_ms;
     leaf_proof_verify_ms = result.leaf_proof_verify_ms;
     path_append_ms = result.path_append_ms;
+    path_append_parent_prepare_ms = result.path_append_parent_prepare_ms;
+    path_append_child_normalize_ms = result.path_append_child_normalize_ms;
+    path_append_child_edges_ms = result.path_append_child_edges_ms;
+    path_append_cuda_evaluate_ms = result.path_append_cuda_evaluate_ms;
+    path_append_cuda_compare_ms = result.path_append_cuda_compare_ms;
     hamilton_reply_ms = result.hamilton_reply_ms;
     hamilton_reply_validation_ms = result.hamilton_reply_validation_ms;
     hamilton_reply_cpu_enumerate_ms = result.hamilton_reply_cpu_enumerate_ms;
@@ -782,7 +792,13 @@ bool HtProveCommand(const Arguments& arguments) {
               << " leaf_scalar_search_ms=" << leaf_scalar_search_ms
               << " leaf_apply_ms=" << leaf_apply_ms
               << " leaf_proof_verify_ms=" << leaf_proof_verify_ms
-              << " path_append_ms=" << path_append_ms << " hamilton_reply_ms=" << hamilton_reply_ms
+              << " path_append_ms=" << path_append_ms
+              << " path_append_parent_prepare_ms=" << path_append_parent_prepare_ms
+              << " path_append_child_normalize_ms=" << path_append_child_normalize_ms
+              << " path_append_child_edges_ms=" << path_append_child_edges_ms
+              << " path_append_cuda_evaluate_ms=" << path_append_cuda_evaluate_ms
+              << " path_append_cuda_compare_ms=" << path_append_cuda_compare_ms
+              << " hamilton_reply_ms=" << hamilton_reply_ms
               << " hamilton_reply_validation_ms=" << hamilton_reply_validation_ms
               << " hamilton_reply_cpu_enumerate_ms=" << hamilton_reply_cpu_enumerate_ms
               << " hamilton_reply_cuda_evaluate_ms=" << hamilton_reply_cuda_evaluate_ms
@@ -814,7 +830,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V9\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V10\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
@@ -881,6 +897,11 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "leaf_apply_ms " << scan.leaf_apply_ms << '\n';
   output << "leaf_proof_verify_ms " << scan.leaf_proof_verify_ms << '\n';
   output << "path_append_ms " << scan.path_append_ms << '\n';
+  output << "path_append_parent_prepare_ms " << scan.path_append_parent_prepare_ms << '\n';
+  output << "path_append_child_normalize_ms " << scan.path_append_child_normalize_ms << '\n';
+  output << "path_append_child_edges_ms " << scan.path_append_child_edges_ms << '\n';
+  output << "path_append_cuda_evaluate_ms " << scan.path_append_cuda_evaluate_ms << '\n';
+  output << "path_append_cuda_compare_ms " << scan.path_append_cuda_compare_ms << '\n';
   output << "hamilton_reply_ms " << scan.hamilton_reply_ms << '\n';
   output << "hamilton_reply_validation_ms " << scan.hamilton_reply_validation_ms << '\n';
   output << "hamilton_reply_cpu_enumerate_ms " << scan.hamilton_reply_cpu_enumerate_ms << '\n';
@@ -912,7 +933,9 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
             "leaf_cursor_consume_ms leaf_candidate_recheck_ms "
             "leaf_completeness_fallback_ms leaf_scalar_search_ms leaf_apply_ms "
             "leaf_proof_verify_ms "
-            "path_append_ms hamilton_reply_ms hamilton_reply_validation_ms "
+            "path_append_ms path_append_parent_prepare_ms path_append_child_normalize_ms "
+            "path_append_child_edges_ms path_append_cuda_evaluate_ms "
+            "path_append_cuda_compare_ms hamilton_reply_ms hamilton_reply_validation_ms "
             "hamilton_reply_cpu_enumerate_ms hamilton_reply_cuda_evaluate_ms "
             "hamilton_reply_cuda_compare_ms "
             "end_reply_ms propagation_ms proof_extract_ms proof_verify_ms immediate_verify_ms "
@@ -950,7 +973,10 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << attempt.leaf_cursor_consume_ms << ' ' << attempt.leaf_candidate_recheck_ms << ' '
            << attempt.leaf_completeness_fallback_ms << ' ' << attempt.leaf_scalar_search_ms << ' '
            << attempt.leaf_apply_ms << ' ' << attempt.leaf_proof_verify_ms << ' '
-           << attempt.path_append_ms << ' ' << attempt.hamilton_reply_ms << ' '
+           << attempt.path_append_ms << ' ' << attempt.path_append_parent_prepare_ms << ' '
+           << attempt.path_append_child_normalize_ms << ' ' << attempt.path_append_child_edges_ms
+           << ' ' << attempt.path_append_cuda_evaluate_ms << ' '
+           << attempt.path_append_cuda_compare_ms << ' ' << attempt.hamilton_reply_ms << ' '
            << attempt.hamilton_reply_validation_ms << ' ' << attempt.hamilton_reply_cpu_enumerate_ms
            << ' ' << attempt.hamilton_reply_cuda_evaluate_ms << ' '
            << attempt.hamilton_reply_cuda_compare_ms << ' ' << attempt.end_reply_ms << ' '
