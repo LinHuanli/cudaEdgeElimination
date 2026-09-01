@@ -1827,10 +1827,11 @@ struct BatchedPathProofWork {
   bool finished{false};
 };
 
-BatchedPathProofWork InitializeBatchedPathProof(const GraphSnapshot& graph,
-                                                const NormalizedPathSystem& paths) {
+BatchedPathProofWork InitializeBatchedPathProof(const NormalizedPathSystem& paths,
+                                                const std::uint64_t snapshot_hash) {
   BatchedPathProofWork work;
-  work.proof.snapshot_hash = graph.ContentHash();
+  // 同一 batch 绑定同一不可变快照；主调方只计算一次全图哈希，避免每个 leaf 重扫 CSR。
+  work.proof.snapshot_hash = snapshot_hash;
   work.proof.path_system_hash = ComputePathSystemHash(paths);
   work.proof.path_count = static_cast<std::uint32_t>(paths.paths.size());
   if (work.proof.path_count == 0U || work.proof.path_count > kMaxTestablePathCount) {
@@ -1981,9 +1982,10 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
   {
     ScopedPhaseTimer timer(&result.setup_ms);
     ScopedPhaseTimer initialize_timer(&result.proof_initialize_ms);
+    const std::uint64_t snapshot_hash = graph.ContentHash();
     works.reserve(path_systems.size());
     for (const NormalizedPathSystem& paths : path_systems) {
-      works.push_back(InitializeBatchedPathProof(graph, paths));
+      works.push_back(InitializeBatchedPathProof(paths, snapshot_hash));
     }
   }
   const bool can_batch_costs = options.max_k >= 3U && options.max_k <= 5U &&
