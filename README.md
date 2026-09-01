@@ -6,7 +6,7 @@
 
 - TSPLIB `EUC_2D` / `CEIL_2D` 与 Concorde 稀疏边文件读取；
 - Jonker–Volgenant（JV）快速消元的 CPU 基线与 CUDA 候选生成；
-- epoch 快照、CPU 复核、最小度保护、确定性提交和 `proof-v1` 证明日志；
+- epoch 快照、CPU 复核、最小度保护、确定性提交，以及兼容 JV V1 的自包含 HT V2 证明日志；
 - `lp-epoch-v1` CSR 模型、cuOpt C API 动态 sidecar、残差与精确定点下界；
 - Concorde 受限 overlay、列—边映射、`CCbigguy` 对偶注入与完整图精确定价证书；
 - 路径系统规范化、`m<=5` CPU 生成/CUDA 查询兼容表与 `m=6,7` CPU 回退；
@@ -16,9 +16,10 @@
 - 浅层 Hamilton–Tutte `c,d` AND–OR 根证明与 CPU 复核的 CUDA 候选筛选；
 - CPU 递归 Hamilton–Tutte point/end moves、continuation arena 与全局 `recursive-ht-proof-v1`；
 - 主机 BFS 工作图、cooperative multi-block CUDA continuation 传播、跨父状态 Hamilton/end reply count/write、point/end path-append、规范 child edge SoA、增量 k-opt leaf cost block 融合、GPU 驻留缓存与 128-cell CPU long-tail，并由 CPU 完整差分复核；
+- `ht-prove` sidecar 的整批 CPU 重放、不可变快照绑定、规范度数门禁和 `ht-commit` 原子删边；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 
-尚未完成的研究项（HT epoch commit、cuOpt 退化对偶稳定化与精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。精确困难叶有 18 个 block 的硬上限，超限只返回 `unresolved`。递归 HT proof 尚未接入删边；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
+尚未完成的研究项（全图 HT 自动调度、中大型调优、cuOpt 退化对偶稳定化与精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。精确困难叶有 18 个 block 的硬上限，超限只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
 
 ## 快速开始
 
@@ -72,6 +73,18 @@ build/cuda-release/cudaee ht-verify \
   --tsp tests/data/recursive-point.tsp \
   --edges tests/data/recursive-point.edg \
   --proof artifacts/recursive-point.ht-proof
+
+# 把一个或多个同快照 sidecar 整批复核后提交，并用自包含 V2 再次独立重放
+build/cuda-release/cudaee ht-commit \
+  --tsp tests/data/recursive-point.tsp \
+  --edges tests/data/recursive-point.edg \
+  --output artifacts/recursive-point.epoch.edg \
+  --proof artifacts/recursive-point.epoch.proof \
+  --ht-proof artifacts/recursive-point.ht-proof
+build/cpu-release/cudaee verify \
+  --tsp tests/data/recursive-point.tsp \
+  --edges tests/data/recursive-point.edg \
+  --proof artifacts/recursive-point.epoch.proof
 ```
 
 所有命令会拒绝把输出写到仓库之外。

@@ -57,4 +57,4 @@ wavefront 在每个未解决父状态上：
 
 ## 后续
 
-M4.3b3b2b2a 已用同一 chunk spans 把 path-append 跨父状态合并：point flags 先返回，再只为没有 vacuous-success point move 的状态建立 end batch，详见 [frontier path append](14_Hamilton_Tutte_Frontier_Path_Append.md)。后续规范 child edge SoA、一般 leaf batching/游标、设备驻留缓存、cost long-tail 和 cooperative multi-block continuation 均已完成。规范 `NormalizedPathSystem` 对象仍由 CPU 构造并用于工作图；下一步记录超大 reply/深层资源峰值，并把 HT 证明接入不可变 epoch commit。
+M4.3b3b2b2a 已用同一 chunk spans 把 path-append 跨父状态合并：point flags 先返回，再只为没有 vacuous-success point move 的状态建立 end batch，详见 [frontier path append](14_Hamilton_Tutte_Frontier_Path_Append.md)。后续规范 child edge SoA、一般 leaf batching/游标、设备驻留缓存、cost long-tail、cooperative multi-block continuation 和 [HT epoch commit](21_Hamilton_Tutte_Epoch_Commit.md) 均已完成。规范 `NormalizedPathSystem` 对象仍由 CPU 构造并用于工作图；下一步记录超大 reply/深层资源峰值和中大型收益。

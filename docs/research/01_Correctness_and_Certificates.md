@@ -9,7 +9,7 @@
 - 度数前提：处理 `ab` 时 `deg(a),deg(b)>2`，受保护 tour/fixed edge 不参与删除。
 - 提交前再次执行最小度门禁；多个独立有效候选也不能令顶点度数降到 2 以下。
 
-`proof-v1` 记录规范化图哈希、epoch、边、方法和见证。验证器按 epoch 重放“验证—排序—提交”，任何缺失或额外记录都失败。
+JV-only `proof-v1` 记录规范化图哈希、epoch、边、方法和见证。含 HT 删除时使用自包含 `proof-v2`：outer record 绑定同一快照和目标边，并唯一引用内嵌的 recursive HT V1 continuation arena。验证器按 epoch 在图副本上重放“验证全部候选—排序—度数门禁—提交”，任何缺失、额外、重复或过期 sidecar 都失败且不发布部分图。
 
 ## 距离精确性
 

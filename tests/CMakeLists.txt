@@ -135,6 +135,31 @@ set_tests_properties(integration.ht_wavefront_verify PROPERTIES
   DEPENDS integration.ht_wavefront_prove
   LABELS "integration;hamilton-tutte;wavefront")
 
+set(HT_EPOCH_EDGES "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.epoch.edg")
+set(HT_EPOCH_PROOF "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.epoch.proof")
+add_test(
+  NAME integration.ht_epoch_commit
+  COMMAND cudaee ht-commit
+    --tsp "${HT_RECURSIVE_TSP}"
+    --edges "${HT_RECURSIVE_EDGES}"
+    --output "${HT_EPOCH_EDGES}"
+    --proof "${HT_EPOCH_PROOF}"
+    --ht-proof "${HT_WAVEFRONT_PROOF}"
+    --ht-proof "${HT_WAVEFRONT_PROOF}")
+set_tests_properties(integration.ht_epoch_commit PROPERTIES
+  DEPENDS integration.ht_wavefront_prove
+  LABELS "integration;hamilton-tutte;epoch")
+
+add_test(
+  NAME integration.ht_epoch_verify
+  COMMAND cudaee verify
+    --tsp "${HT_RECURSIVE_TSP}"
+    --edges "${HT_RECURSIVE_EDGES}"
+    --proof "${HT_EPOCH_PROOF}")
+set_tests_properties(integration.ht_epoch_verify PROPERTIES
+  DEPENDS integration.ht_epoch_commit
+  LABELS "integration;hamilton-tutte;epoch")
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
   add_test(

@@ -26,7 +26,7 @@
 | M4.3b3b2b2b2b2a GPU leaf 驻留缓存 | 完成（线程/设备本地） | 精确坐标/模板键；增长型 workspace；命中与字节指标 |
 | M4.3b3b2b2b2b2b1 CPU long-tail | 完成（128-cell 基线） | 缓存后交叉点；融合矩阵分流；CPU/CUDA proof 规范计数 |
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
-| M4.3b3b2b2b2c HT epoch commit | 待实现 | 不可变 snapshot 绑定、候选复核、确定性删除提交 |
+| M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
 | M5 中大型调优 | 待开始 | 首期不设最低加速比；pcb3038 尚未形成认证运行记录 |
 
 ## 当前基准结果
@@ -75,6 +75,8 @@ CPU long-tail：项目内稳态基准在 RTX 4000 Ada 上定位 3-opt 64/256、4
 
 Multi-block continuation：cooperative kernel 以 grid barrier 冻结并消费完成队列批次，只有 `queue_tail==state_count` 才正常终止；自动 block 数不超过 kernel 的实际 cooperative residency，显式越界闭门失败。固定 truth table 的 single/2-block 状态相同；512 个 child 跨两个 block 汇入同一 AND move 时，单失败和全成功真值均正确，513-state 自动模式选择 3 blocks。固定 recursive-point 显式 2 blocks 的 34-state 数组经 CPU 全量认证，V1 proof 与 single block 逐字节一致。
 
+HT epoch commit：`ht-commit` 可重复接收同一不可变快照上的 recursive HT sidecar，先逐份 CPU 重放，再按 `(u,v,serialized-proof)` 规范化重复目标，并在图副本上执行共用最小度门禁与 CSR 重建。实际含 HT 删除时写自包含 `CUDAEE_PROOF_V2`，outer record 唯一引用 inner HT V1；通用 `verify` 检查绑定、规范顺序、完整证明、最终哈希后才发布重放图。固定 recursive-point 的两份等价 sidecar 从 28 条边提交 1 条，哈希由 `d7bfbec67ffc9a66` 变为 `78ce8b9a9dc29473`；坏 sidecar 混入时整批零修改。JV-only 仍写原 V1。
+
 ## 安全边界
 
-`gpu-eliminate` 目前只实现 JV quick candidate search；path-system leaf 和递归 HT proof 尚未接入 epoch commit，因此也不授权删边；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。M4.3b3b2b2b2c 与 M3.1 必须标为 pending；仍严禁从未完整验证的局部结果或 cuOpt 浮点 reduced cost 直接构造删除记录。
+`gpu-eliminate` 的自动候选器目前仍只实现 JV；HT 使用显式 `ht-prove -> ht-commit` sidecar 链，尚不自动扫描全图目标。`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集；M3.1 仍为 pending。仍严禁从未完整验证的局部结果、过期 HT sidecar 或 cuOpt 浮点 reduced cost 直接构造删除记录。

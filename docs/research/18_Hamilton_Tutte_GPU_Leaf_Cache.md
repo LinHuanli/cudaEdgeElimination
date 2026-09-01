@@ -62,4 +62,4 @@ miss 数等于 `leaf_cuda_cost_batches - hits`。CPU 或 auto fallback 到 CPU �
 
 缓存内容仍只服务 GPU 候选成本；任何 cache 命中都不构成删边授权。设备异常使显式 CUDA 搜索 unresolved，`auto` 仍可回退 CPU matrix；GPU 无候选时仍逐 work 执行 CPU 全模板 completeness fallback。
 
-当前缓存为线程本地、同步 kernel 的正确性基线，没有跨线程共享或异步 stream 生命周期。后续 GPU/CPU long-tail 与 [cooperative multi-block continuation](20_Hamilton_Tutte_Multi_Block_Continuation.md)均已保持完整 proof 字节等价；下一步是 HT epoch commit。
+当前缓存为线程本地、同步 kernel 的正确性基线，没有跨线程共享或异步 stream 生命周期。后续 GPU/CPU long-tail、[cooperative multi-block continuation](20_Hamilton_Tutte_Multi_Block_Continuation.md)与[HT epoch commit](21_Hamilton_Tutte_Epoch_Commit.md)均已保持完整 proof 字节等价或独立重放。

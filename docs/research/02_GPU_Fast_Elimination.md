@@ -37,7 +37,7 @@ CPU 基线使用同样的候选顺序与谓词，但独立实现距离和遍历�
 
 组合层现已实现：`m<=5` 使用 `[inside][outside-bitset]` 的 CPU 生成表和 CUDA 查询，固定哈希见 `configs/path_compatibility_hashes_v1.txt`；所有 GPU 输出逐项接受独立 CPU 交替环复核。`m=6,7` 的查询返回明确的 `cpu-fallback-m>5`。具体布局、全量差分和安全边界见 [路径系统与兼容表实现](06_Path_System_Compatibility.md)。
 
-CLI 的 `path-table` 只生成和验证组合表清单，不触发删边。首期消元 CLI 仍仅将 JV 标记为 `supported`；尚未接入的 HS 选项返回明确的 unsupported 错误，而不是静默降级为另一算法。
+CLI 的 `path-table` 只生成和验证组合表清单，不触发删边。`gpu-eliminate` 的自动候选器仍只运行 JV；完整递归 HS/HT 通过独立的 `ht-prove` 生成 sidecar，再由 [`ht-commit`](21_Hamilton_Tutte_Epoch_Commit.md) 在不可变快照上整批 CPU 重放后提交。未证明或过期 sidecar 不会静默降级为另一算法。
 
 ## 性能测量
 

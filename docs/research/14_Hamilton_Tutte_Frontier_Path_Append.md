@@ -43,4 +43,4 @@ point/end task 分别形成一个展平数组；candidate 保存数组起点，r
 
 ## 后续
 
-设备端 append-only [规范 child edge SoA](15_Hamilton_Tutte_GPU_Child_Edge_SoA.md)、后续 leaf batching/游标、GPU 驻留缓存、CPU long-tail 与 [cooperative multi-block continuation](20_Hamilton_Tutte_Multi_Block_Continuation.md)均已完成，并通过独立 V1 proof 等价门禁。HT epoch commit 仍待实现。
+设备端 append-only [规范 child edge SoA](15_Hamilton_Tutte_GPU_Child_Edge_SoA.md)、后续 leaf batching/游标、GPU 驻留缓存、CPU long-tail、[cooperative multi-block continuation](20_Hamilton_Tutte_Multi_Block_Continuation.md)与[不可变 epoch commit](21_Hamilton_Tutte_Epoch_Commit.md)均已完成，并通过独立 proof 等价/重放门禁。

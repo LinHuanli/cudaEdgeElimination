@@ -54,4 +54,4 @@ M4.3b3b2b2b2b2b2 把 continuation 真值传播从单 block 正确性基线扩展
 
 GPU 状态数组返回后仍与 `EvaluateWavefrontCpu` 的每个状态逐项比较；cooperative kernel 只加速真值传播，不直接授权删边。工作图仍由主机构建，成功子树仍从 CPU 认证状态提取并由全局 verifier 重放。
 
-当前只支持单 GPU 同步 cooperative launch；不支持的设备保留原单 block 或 CPU fallback。下一阶段是把验证成功的 HT 候选接入不可变 snapshot/epoch 的确定性提交，并补齐中大型实例的状态峰值、cooperative occupancy 与端到端收益记录。
+当前只支持单 GPU 同步 cooperative launch；不支持的设备保留原单 block 或 CPU fallback。验证成功的 HT 候选现已接入[不可变 snapshot/epoch 的确定性提交](21_Hamilton_Tutte_Epoch_Commit.md)；下一阶段补齐中大型实例的状态峰值、cooperative occupancy、全图目标调度与端到端收益记录。

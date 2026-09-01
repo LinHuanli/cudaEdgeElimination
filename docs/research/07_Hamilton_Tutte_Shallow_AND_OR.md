@@ -67,4 +67,4 @@ d(n_0,n_1)+d(a,n)+d(b,n).
 
 ## 后续衔接
 
-M4.3b2 已在浅层根语义上加入 extra-point/extra-end 递归、continuation arena 和版本化全局证书，详见[递归 Hamilton–Tutte 证明](08_Hamilton_Tutte_Recursive_Proof.md)。当前浅层与递归 proof 都仍作为研究 API 返回，`gpu-eliminate` 仍只提交 JV 证明；GPU wavefront 调度和 epoch commit 接线属于 M4.3b3。
+M4.3b2 已在浅层根语义上加入 extra-point/extra-end 递归、continuation arena 和版本化全局证书，详见[递归 Hamilton–Tutte 证明](08_Hamilton_Tutte_Recursive_Proof.md)。`gpu-eliminate` 的自动候选仍只提交 JV；完整递归 proof 已可通过 [`ht-commit`](21_Hamilton_Tutte_Epoch_Commit.md) 进入独立的不可变 epoch，浅层 proof 本身仍不直接授权删除。

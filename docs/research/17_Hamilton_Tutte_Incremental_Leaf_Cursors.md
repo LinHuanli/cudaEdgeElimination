@@ -54,4 +54,4 @@ CPU cost backend 继续使用原 scalar 搜索，避免改变其直接全模板�
 
 ## 后续
 
-后续已完成设备驻留缓存、128-cell long-tail policy 与 [cooperative multi-block continuation](20_Hamilton_Tutte_Multi_Block_Continuation.md)。路径上下文、组合游标与 CPU witness 构造仍位于主机；下一步是 HT epoch commit。
+后续已完成设备驻留缓存、128-cell long-tail policy、[cooperative multi-block continuation](20_Hamilton_Tutte_Multi_Block_Continuation.md)与[HT epoch commit](21_Hamilton_Tutte_Epoch_Commit.md)。路径上下文、组合游标、CPU witness 构造和 sidecar 重放仍位于主机。

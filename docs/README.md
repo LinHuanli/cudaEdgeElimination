@@ -26,5 +26,6 @@
 22. [Hamilton–Tutte GPU leaf 驻留缓存](research/18_Hamilton_Tutte_GPU_Leaf_Cache.md)：精确快照/模板键、增长型工作区与可观测命中指标。
 23. [Hamilton–Tutte leaf GPU/CPU long-tail](research/19_Hamilton_Tutte_CPU_Long_Tail.md)：缓存后交叉点、128-cell 自动阈值与规范 proof 计数。
 24. [Hamilton–Tutte cooperative multi-block continuation](research/20_Hamilton_Tutte_Multi_Block_Continuation.md)：冻结队列批次、grid barrier 与 residency 门禁。
+25. [Hamilton–Tutte 不可变 epoch 提交](research/21_Hamilton_Tutte_Epoch_Commit.md)：整批 CPU 复核、V2 内嵌 sidecar 与原子确定性删边。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cuda_edge_elimination/graph.hpp"
+#include "cuda_edge_elimination/hamilton_tutte.hpp"
 #include "cuda_edge_elimination/types.hpp"
 
 #include <cstddef>
@@ -33,6 +34,8 @@ struct EliminationResult {
   std::uint64_t initial_hash{};
   std::uint64_t final_hash{};
   std::vector<ProofRecord> proof;
+  // 只有 HT record 可以引用这里的 V1 continuation arena；JV V1 输出保持不变。
+  std::vector<HtRecursiveProof> ht_proofs;
   std::vector<EpochMetrics> epochs;
 };
 
@@ -45,6 +48,10 @@ struct EliminationResult {
                                                           int* selected_device);
 
 EliminationResult RunJvElimination(GraphSnapshot* graph, Backend backend, std::uint32_t max_rounds);
+
+// 在同一不可变快照上整批复核 HT sidecars，再按规范边序执行一次原子 epoch 提交。
+EliminationResult CommitHtProofEpoch(GraphSnapshot* graph,
+                                     const std::vector<HtRecursiveProof>& proofs);
 
 void WriteProof(const std::filesystem::path& path, const EliminationResult& result);
 [[nodiscard]] EliminationResult ReadProof(const std::filesystem::path& path);

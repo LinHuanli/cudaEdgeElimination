@@ -53,4 +53,4 @@ cost matrix 的实际工作量继续由独立 `cost_cells` 记录。这样 CPU �
 
 ## 后续
 
-当前 policy 只分流 leaf cost matrix；CPU witness 构造和 exact Held–Karp 本来就在主机。后续 [cooperative multi-block continuation](20_Hamilton_Tutte_Multi_Block_Continuation.md) 已完成；下一阶段是深层/超大状态资源记录，以及验证成功候选到不可变 epoch 的确定性 commit。
+当前 policy 只分流 leaf cost matrix；CPU witness 构造和 exact Held–Karp 本来就在主机。后续 [cooperative multi-block continuation](20_Hamilton_Tutte_Multi_Block_Continuation.md)与[验证成功候选的不可变 epoch commit](21_Hamilton_Tutte_Epoch_Commit.md)已完成；下一阶段是深层/超大状态资源和中大型端到端收益记录。

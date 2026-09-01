@@ -72,4 +72,4 @@ V1 是确定性文本格式，固定记录：
 
 ## M4.3b3 衔接
 
-M4.3b3a 已在不改变 verifier 和文件格式的前提下加入主机 BFS 工作图与 CUDA 原子 continuation counters，详见 [GPU wavefront](09_Hamilton_Tutte_GPU_Wavefront.md)。后续已完成经 CPU 全量认证的 point/end path append、规范 child edge SoA、一般 leaf blocks、设备驻留缓存、CPU long-tail 与 [cooperative multi-block queue](20_Hamilton_Tutte_Multi_Block_Continuation.md)。下一步把 HT 删除接入不可变 epoch 的确定性 commit。
+M4.3b3a 已在不改变 verifier 和文件格式的前提下加入主机 BFS 工作图与 CUDA 原子 continuation counters，详见 [GPU wavefront](09_Hamilton_Tutte_GPU_Wavefront.md)。后续已完成经 CPU 全量认证的 point/end path append、规范 child edge SoA、一般 leaf blocks、设备驻留缓存、CPU long-tail、[cooperative multi-block queue](20_Hamilton_Tutte_Multi_Block_Continuation.md)与[不可变 epoch 提交](21_Hamilton_Tutte_Epoch_Commit.md)。HT V1 保持独立格式，并作为消元 V2 的内嵌 sidecar 重放。

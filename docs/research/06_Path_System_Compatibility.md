@@ -11,7 +11,7 @@
 - `m=6,7` 的 CPU 直接判定回退；
 - proper 3/4/5-opt、批量 CUDA 成本候选和有界 CPU 精确困难叶。
 
-当前可以生成并独立重放局部 leaf proof，但尚未接入 HS AND–OR 根证书和 epoch commit，因此不授权删边。只有后续 `c,d`/Hamilton reply 搜索和全局证书重放接通后，这套组合基础才能参与消元提交。
+局部 leaf proof 已接入完整 `c,d`/Hamilton AND–OR continuation arena；只有整个递归 HT V1 通过独立重放后，才可由[不可变 epoch 提交](21_Hamilton_Tutte_Epoch_Commit.md)参与删边。单独的兼容表或 leaf proof 仍不授权删除。
 
 ## 与参考实现的语义对应
 
@@ -128,7 +128,7 @@ M4 后续必须按顺序完成：
 1. 在已完成的浅层 `c,d` 根证明上实现 extra point/end 递归状态传播；
 2. 缓存坐标/模板设备常驻数据，并用多目标真实任务桶评估 kernel 粒度；
 3. 将 leaf proof 嵌入版本化完整 HS 证书，从不可变 epoch 快照递归重放；
-4. 将完整 HS 证书链接入候选阶段，继续由 epoch commit 的 CPU 门禁授权；
+4. 已将完整 HS 证书链接入 sidecar 候选阶段，并由 epoch commit 的 CPU 门禁授权；
 5. 若 18-block 子集 DP 在真实长尾不足，再接入原 LocalElimination 1-tree B&B 作为更大规模 CPU fallback。
 
 在这些门禁完成前，`gpu-eliminate` 仍只授权现有 JV 证明。

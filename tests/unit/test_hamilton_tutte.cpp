@@ -1,3 +1,4 @@
+#include "cuda_edge_elimination/elimination.hpp"
 #include "cuda_edge_elimination/hamilton_tutte.hpp"
 
 #include <algorithm>
@@ -726,6 +727,75 @@ void TestRecursivePointProof() {
   cudaee::WriteHtRecursiveProof(proof_path, result.proof);
   const cudaee::HtRecursiveProof loaded = cudaee::ReadHtRecursiveProof(proof_path);
   Check(cudaee::VerifyHtRecursiveProof(graph, loaded, &reason), reason);
+
+  // 两份相同 sidecar 必须先在同一快照上全部复核，再规范化为一次确定性删除。
+  cudaee::GraphSnapshot committed_graph = graph;
+  const cudaee::EliminationResult epoch_result =
+      cudaee::CommitHtProofEpoch(&committed_graph, {loaded, loaded});
+  Check(epoch_result.backend == "ht-sidecar-cpu" &&
+            epoch_result.initial_hash == graph.ContentHash() &&
+            epoch_result.final_hash == committed_graph.ContentHash() &&
+            epoch_result.proof.size() == 1U && epoch_result.ht_proofs.size() == 1U &&
+            epoch_result.epochs.size() == 1U && epoch_result.epochs.front().proposed == 2U &&
+            epoch_result.epochs.front().verified == 2U &&
+            epoch_result.epochs.front().committed == 1U,
+        "HT epoch verifies the immutable batch and canonicalizes duplicate targets");
+  Check(!committed_graph.HasActiveEdge(2, 4) &&
+            committed_graph.ActiveEdgeCount() + 1U == graph.ActiveEdgeCount() &&
+            epoch_result.proof.front().method == cudaee::EliminationMethod::kHamiltonTutte &&
+            epoch_result.proof.front().certificate_index == 0U,
+        "HT epoch commits only the CPU-verified target through the degree gate");
+
+  const std::filesystem::path epoch_path =
+      std::filesystem::path(CUDAEE_HT_TEST_TMP_DIR) / "recursive-point.epoch-proof";
+  cudaee::WriteProof(epoch_path, epoch_result);
+  const cudaee::EliminationResult loaded_epoch = cudaee::ReadProof(epoch_path);
+  Check(loaded_epoch.proof.size() == 1U && loaded_epoch.ht_proofs.size() == 1U &&
+            cudaee::SerializeHtRecursiveProof(loaded_epoch.ht_proofs.front()) == serialized,
+        "elimination proof V2 embeds the canonical HT V1 sidecar");
+  cudaee::GraphSnapshot replay_graph = graph;
+  const cudaee::EliminationResult replayed = cudaee::ReplayProof(&replay_graph, loaded_epoch);
+  Check(replayed.final_hash == epoch_result.final_hash && !replay_graph.HasActiveEdge(2, 4) &&
+            replayed.proof.size() == 1U && replayed.ht_proofs.size() == 1U,
+        "CPU replay independently verifies and commits the embedded HT sidecar");
+
+  cudaee::EliminationResult damaged_epoch = loaded_epoch;
+  damaged_epoch.ht_proofs.front().nodes.pop_back();
+  cudaee::GraphSnapshot replay_atomic = graph;
+  const std::uint64_t replay_atomic_hash = replay_atomic.ContentHash();
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::ReplayProof(&replay_atomic, damaged_epoch);
+        static_cast<void>(ignored);
+      },
+      "damaged embedded HT sidecar is rejected");
+  Check(replay_atomic.ContentHash() == replay_atomic_hash && replay_atomic.HasActiveEdge(2, 4),
+        "failed V2 replay leaves the caller graph unchanged");
+
+  cudaee::EliminationResult misbound_epoch = loaded_epoch;
+  misbound_epoch.proof.front().u = 1;
+  cudaee::GraphSnapshot misbound_graph = graph;
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::ReplayProof(&misbound_graph, misbound_epoch);
+        static_cast<void>(ignored);
+      },
+      "outer HT record cannot target a different edge than its sidecar");
+  Check(misbound_graph.ContentHash() == graph.ContentHash(),
+        "outer/inner binding failure leaves the graph unchanged");
+
+  cudaee::HtRecursiveProof invalid_sidecar = loaded;
+  invalid_sidecar.snapshot_hash ^= 1U;
+  cudaee::GraphSnapshot batch_atomic = graph;
+  const std::uint64_t batch_atomic_hash = batch_atomic.ContentHash();
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::CommitHtProofEpoch(&batch_atomic, {loaded, invalid_sidecar});
+        static_cast<void>(ignored);
+      },
+      "one invalid sidecar rejects the complete HT epoch");
+  Check(batch_atomic.ContentHash() == batch_atomic_hash && batch_atomic.HasActiveEdge(2, 4),
+        "failed HT candidate batch performs zero partial commits");
 
   cudaee::HtRecursiveOptions shallow_depth = options;
   shallow_depth.max_depth = 0;

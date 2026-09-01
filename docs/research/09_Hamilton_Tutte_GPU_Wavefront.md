@@ -56,4 +56,4 @@ CPU 对同一工作图按反向状态序独立计算完整 `status[]`。CUDA 返
 
 ## M4.3b3b 后续
 
-M4.3b3b1 已完成 device-persistent 完成队列和批量 path 冲突标记，具体契约见 [GPU path append](10_Hamilton_Tutte_GPU_Path_Append.md)；M4.3b3b2a1/a2 已完成 [GPU Hamilton replies](11_Hamilton_Tutte_GPU_Hamilton_Replies.md) 与 [GPU end replies](12_Hamilton_Tutte_GPU_End_Replies.md)，M4.3b3b2b1/b2a 再把 [reply 生成](13_Hamilton_Tutte_Frontier_Reply_Batching.md)与 [path append](14_Hamilton_Tutte_Frontier_Path_Append.md) 跨父状态合批。后续 child SoA、leaf batching/游标、驻留缓存、CPU long-tail 与 cooperative multi-block 均已完成。下一阶段完成中大型资源/收益门禁，并设计 HT proof sidecar 到不可变 epoch 的确定性提交。
+M4.3b3b1 已完成 device-persistent 完成队列和批量 path 冲突标记，具体契约见 [GPU path append](10_Hamilton_Tutte_GPU_Path_Append.md)；M4.3b3b2a1/a2 已完成 [GPU Hamilton replies](11_Hamilton_Tutte_GPU_Hamilton_Replies.md) 与 [GPU end replies](12_Hamilton_Tutte_GPU_End_Replies.md)，M4.3b3b2b1/b2a 再把 [reply 生成](13_Hamilton_Tutte_Frontier_Reply_Batching.md)与 [path append](14_Hamilton_Tutte_Frontier_Path_Append.md) 跨父状态合批。后续 child SoA、leaf batching/游标、驻留缓存、CPU long-tail、cooperative multi-block 和 [HT proof sidecar 的不可变 epoch 提交](21_Hamilton_Tutte_Epoch_Commit.md)均已完成。下一阶段是中大型资源/收益门禁与全图目标调度。

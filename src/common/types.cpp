@@ -18,6 +18,8 @@ std::string ToString(const EliminationMethod method) {
   switch (method) {
   case EliminationMethod::kJv:
     return "JV";
+  case EliminationMethod::kHamiltonTutte:
+    return "HT";
   }
   throw std::logic_error("未知消元方法");
 }

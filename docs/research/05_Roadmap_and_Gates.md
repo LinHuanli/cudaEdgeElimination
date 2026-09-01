@@ -63,7 +63,7 @@ M4.3b3b2b2b2b2b1 GPU/CPU long-tail 已完成：缓存后微基准确定默认 12
 
 M4.3b3b2b2b2b2b2 cooperative multi-block continuation 已完成：冻结 queue batches 通过 grid barrier 传播，自动 block 数受实际 residency 约束；512-way AND 跨 block 真值、single/multi-block 状态和完整 V1 proof 均一致。
 
-M4.3b3b2b2b2c 继续把验证成功的 HT 候选接入不可变 snapshot 的确定性 epoch commit，并记录深层/超大状态的资源上限。CPU/GPU 对完整小实例真值及证书必须一致。
+M4.3b3b2b2b2c HT epoch commit 已完成：同一不可变 snapshot 上的多个递归 proof sidecar 先整批 CPU 重放，再按规范目标和最小度门禁在图副本上原子提交；自包含 `CUDAEE_PROOF_V2` 内嵌原 HT V1 并由通用 `verify` 重放。坏/旧 sidecar 使整批零修改，JV-only 输出继续保持 V1。
 
 ## M5：中大型评测与优化
 
@@ -71,4 +71,4 @@ M4.3b3b2b2b2c 继续把验证成功的 HT 候选接入不可变 snapshot 的确�
 
 ## 当前完成定义
 
-当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append batching、M4.3b3b2b2b1 规范 child edge SoA、M4.3b3b2b2b2a frontier leaf batching、M4.3b3b2b2b2b1 一般 leaf 游标、M4.3b3b2b2b2b2a GPU leaf 驻留缓存、M4.3b3b2b2b2b2b1 CPU long-tail，以及 M4.3b3b2b2b2b2b2 cooperative multi-block continuation。M3.1 与 M4.3b3b2b2b2c 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或部分 GPU 化原型替代删除强度与完整 GPU/提交链路。
+当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append batching、M4.3b3b2b2b1 规范 child edge SoA、M4.3b3b2b2b2a frontier leaf batching、M4.3b3b2b2b2b1 一般 leaf 游标、M4.3b3b2b2b2b2a GPU leaf 驻留缓存、M4.3b3b2b2b2b2b1 CPU long-tail、M4.3b3b2b2b2b2b2 cooperative multi-block continuation，以及 M4.3b3b2b2b2c HT epoch commit。M3.1 未完成时必须在状态清单中标为 pending；中大型全图 HT 调度属于 M5，不能用小实例闭环冒充性能结论。

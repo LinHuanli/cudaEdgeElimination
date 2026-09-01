@@ -25,7 +25,7 @@
 
 namespace {
 
-using Arguments = std::map<std::string, std::string>;
+using Arguments = std::multimap<std::string, std::string>;
 
 void PrintHelp() {
   std::cout << "cudaee：可验证 TSP GPU 边消元研究工具\n\n"
@@ -33,6 +33,8 @@ void PrintHelp() {
             << "  gpu-eliminate --tsp FILE --edges FILE --output FILE --proof FILE\n"
             << "                [--backend auto|cpu|cuda] [--max-rounds N] [--manifest FILE]\n"
             << "  verify        --tsp FILE --edges FILE --proof FILE\n"
+            << "  ht-commit     --tsp FILE --edges FILE --output FILE --proof FILE\n"
+            << "                --ht-proof FILE [--ht-proof FILE ...] [--manifest FILE]\n"
             << "  lp-solve      --input FILE --output FILE [--cuopt-library FILE]\n"
             << "  lp-example    --output FILE\n"
             << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
@@ -61,11 +63,25 @@ Arguments ParseArguments(const int argc, char** argv, const int first) {
     if (index + 1 >= argc || std::string(argv[index + 1]).starts_with("--")) {
       throw std::invalid_argument("参数缺少值: " + key);
     }
-    if (!arguments.emplace(key.substr(2), argv[++index]).second) {
-      throw std::invalid_argument("参数重复: " + key);
+    key = key.substr(2);
+    if (key != "ht-proof" && arguments.contains(key)) {
+      throw std::invalid_argument("参数重复: --" + key);
     }
+    arguments.emplace(std::move(key), argv[++index]);
   }
   return arguments;
+}
+
+std::vector<std::string> Repeated(const Arguments& arguments, const std::string& name) {
+  std::vector<std::string> values;
+  const auto [begin, end] = arguments.equal_range(name);
+  for (auto iterator = begin; iterator != end; ++iterator) {
+    if (iterator->second.empty()) {
+      throw std::invalid_argument("参数 --" + name + " 的值不能为空");
+    }
+    values.push_back(iterator->second);
+  }
+  return values;
 }
 
 const std::string& Required(const Arguments& arguments, const std::string& name) {
@@ -234,6 +250,32 @@ void VerifyCommand(const Arguments& arguments) {
   std::cout << "status=VERIFIED records=" << replayed.proof.size()
             << " active_edges=" << graph.ActiveEdgeCount()
             << " final_hash=" << cudaee::HexHash(replayed.final_hash) << '\n';
+}
+
+void HtCommitCommand(const Arguments& arguments) {
+  const std::filesystem::path output_path = CheckedOutputPath(Required(arguments, "output"));
+  const std::filesystem::path proof_path = CheckedOutputPath(Required(arguments, "proof"));
+  const std::vector<std::string> sidecar_paths = Repeated(arguments, "ht-proof");
+  if (sidecar_paths.empty()) {
+    throw std::invalid_argument("ht-commit 至少需要一个 --ht-proof sidecar");
+  }
+
+  cudaee::GraphSnapshot graph =
+      cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
+  std::vector<cudaee::HtRecursiveProof> sidecars;
+  sidecars.reserve(sidecar_paths.size());
+  for (const std::string& sidecar_path : sidecar_paths) {
+    sidecars.push_back(cudaee::ReadHtRecursiveProof(sidecar_path));
+  }
+
+  cudaee::EliminationResult result = cudaee::CommitHtProofEpoch(&graph, sidecars);
+  graph.WriteActiveEdges(output_path);
+  cudaee::WriteProof(proof_path, result);
+  const std::string manifest = Optional(arguments, "manifest");
+  if (!manifest.empty()) {
+    WriteManifest(CheckedOutputPath(manifest), graph, result, arguments);
+  }
+  PrintEliminationSummary(graph, result);
 }
 
 cudaee::LpSolution LpSolveCommand(const Arguments& arguments) {
@@ -592,6 +634,8 @@ int main(const int argc, char** argv) {
       RunEliminationCommand(arguments);
     } else if (command == "verify") {
       VerifyCommand(arguments);
+    } else if (command == "ht-commit") {
+      HtCommitCommand(arguments);
     } else if (command == "lp-solve") {
       LpSolveCommand(arguments);
     } else if (command == "lp-example") {

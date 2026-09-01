@@ -26,7 +26,10 @@ struct Edge {
 
 enum class EliminationMethod : std::uint8_t {
   kJv = 1,
+  kHamiltonTutte = 2,
 };
+
+constexpr std::uint32_t kNoEliminationCertificate = UINT32_MAX;
 
 struct Candidate {
   std::int32_t edge_id{-1};
@@ -42,6 +45,8 @@ struct ProofRecord {
   std::int32_t v{-1};
   std::int32_t witness{-1};
   EliminationMethod method{EliminationMethod::kJv};
+  // HT 记录指向 EliminationResult::ht_proofs；JV 不携带嵌套证书。
+  std::uint32_t certificate_index{kNoEliminationCertificate};
 };
 
 [[nodiscard]] std::string ToString(DistanceType type);
