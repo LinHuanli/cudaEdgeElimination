@@ -1,6 +1,7 @@
 #include "cuda_edge_elimination/hamilton_tutte.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
@@ -166,6 +167,67 @@ void TestHamiltonRepliesAgainstReferenceFormula() {
   }
 }
 
+void TestHamiltonReplyBatch() {
+  std::vector<cudaee::Point> points;
+  for (std::int32_t node = 0; node < 12; ++node) {
+    const std::int64_t x = (41 * node + 17) % 109;
+    const std::int64_t y = (19 * node * node + 5 * node + 3) % 103;
+    points.push_back({static_cast<double>(x), static_cast<double>(y), x, y});
+  }
+  cudaee::GraphSnapshot graph = MakeCompleteGraph(points);
+  const std::vector<std::int32_t> centers = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 2};
+  for (const cudaee::DistanceType distance_type :
+       {cudaee::DistanceType::kEuc2D, cudaee::DistanceType::kCeil2D}) {
+    graph.distance_type = distance_type;
+    const cudaee::HtHamiltonReplyBatchResult cpu = cudaee::EvaluateHtHamiltonReplies(
+        graph, {0, 1}, centers, cudaee::PathCompatibilityBackend::kCpu);
+    Check(cpu.backend == "cpu" && cpu.cpu_verified && cpu.offsets.size() == centers.size() + 1U &&
+              cpu.offsets.front() == 0U && cpu.offsets.back() == cpu.replies.size(),
+          "CPU Hamilton reply batch metadata and offsets are complete");
+    for (std::size_t index = 0; index < centers.size(); ++index) {
+      const std::vector<cudaee::HtNeighborPair> expected =
+          cudaee::EnumerateHtHamiltonReplies(graph, {0, 1}, centers[index]);
+      const auto begin = cpu.replies.begin() + static_cast<std::ptrdiff_t>(cpu.offsets[index]);
+      const auto end = cpu.replies.begin() + static_cast<std::ptrdiff_t>(cpu.offsets[index + 1U]);
+      Check(std::vector<cudaee::HtNeighborPair>(begin, end) == expected,
+            "batched Hamilton replies preserve each center's canonical order");
+    }
+
+#ifdef CUDAEE_HAS_CUDA
+    std::string reason;
+    if (cudaee::detail::HtHamiltonReplyCudaAvailable(&reason)) {
+      const cudaee::HtHamiltonReplyBatchResult gpu = cudaee::EvaluateHtHamiltonReplies(
+          graph, {0, 1}, centers, cudaee::PathCompatibilityBackend::kCuda);
+      Check(gpu.backend == "cuda" && gpu.selected_device >= 0 && gpu.cpu_verified &&
+                gpu.offsets == cpu.offsets && gpu.replies == cpu.replies,
+            "CUDA Hamilton reply count/write exactly matches the CPU batch");
+    }
+#else
+    const cudaee::HtHamiltonReplyBatchResult fallback = cudaee::EvaluateHtHamiltonReplies(
+        graph, {0, 1}, centers, cudaee::PathCompatibilityBackend::kAuto);
+    Check(fallback.backend == "cpu-fallback" && fallback.offsets == cpu.offsets &&
+              fallback.replies == cpu.replies,
+          "Hamilton reply auto backend safely falls back in a CPU-only build");
+#endif
+  }
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::EvaluateHtHamiltonReplies(
+            graph, {0, 1}, {0}, cudaee::PathCompatibilityBackend::kCpu);
+        static_cast<void>(ignored);
+      },
+      "Hamilton reply batch rejects a target endpoint as center");
+#ifndef CUDAEE_HAS_CUDA
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::EvaluateHtHamiltonReplies(
+            graph, {0, 1}, centers, cudaee::PathCompatibilityBackend::kCuda);
+        static_cast<void>(ignored);
+      },
+      "explicit CUDA Hamilton reply batch remains unavailable in a CPU-only build");
+#endif
+}
+
 void TestCdCandidatesCpuCuda() {
 #ifdef CUDAEE_HAS_CUDA
   std::string unavailable_reason;
@@ -245,7 +307,8 @@ void TestDfsWavefrontRandomDifferential() {
         graph, target,
         {.search_options = options,
          .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
-         .path_append_backend = cudaee::PathCompatibilityBackend::kCpu});
+         .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+         .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu});
     Check(dfs.status == wavefront.status, "random DFS/wavefront truth mismatch");
     if (dfs.status == cudaee::HtSearchStatus::kProven) {
       std::string reason;
@@ -345,7 +408,8 @@ void TestNonemptyAndProof() {
       graph, {0, 5},
       {.search_options = recursive_options,
        .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
-       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu});
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu});
   Check(wavefront.status == cudaee::HtSearchStatus::kProven, wavefront.proof.reason);
   Check(wavefront.propagation_backend == "cpu" && wavefront.cpu_verified,
         "CPU wavefront propagation is recorded");
@@ -363,6 +427,12 @@ void TestNonemptyAndProof() {
   Check(cudaee::ProveEdgeByWavefrontHt(graph, {0, 5}, invalid_wavefront_options).status ==
             cudaee::HtSearchStatus::kInvalid,
         "unknown wavefront path-append backend is rejected");
+  invalid_wavefront_options.path_append_backend = cudaee::PathCompatibilityBackend::kCpu;
+  invalid_wavefront_options.hamilton_reply_backend =
+      static_cast<cudaee::PathCompatibilityBackend>(255);
+  Check(cudaee::ProveEdgeByWavefrontHt(graph, {0, 5}, invalid_wavefront_options).status ==
+            cudaee::HtSearchStatus::kInvalid,
+        "unknown wavefront Hamilton reply backend is rejected");
   Check(wavefront.proof.nodes.size() == recursive.proof.nodes.size(),
         "DFS and wavefront shallow arenas have the same size");
 
@@ -397,7 +467,8 @@ void TestNonemptyAndProof() {
       graph, {0, 5},
       {.search_options = state_budget_options,
        .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
-       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu});
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu});
   Check(wavefront_state_budget.status == cudaee::HtSearchStatus::kUnresolved,
         "wavefront state budget remains unresolved");
 
@@ -477,13 +548,18 @@ void TestRecursivePointProof() {
       graph, {2, 4},
       {.search_options = options,
        .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
-       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu});
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu});
   Check(wavefront.status == cudaee::HtSearchStatus::kProven, wavefront.proof.reason);
   Check(wavefront.moves_generated > 0U && wavefront.peak_frontier > 0U,
         "wavefront records generated moves and frontier width");
   Check(wavefront.path_append_backend == "cpu" && wavefront.path_append_cpu_verified &&
             wavefront.path_append_batches > 0U && wavefront.path_append_tasks > 0U,
         "CPU wavefront records fully verified path-append batches");
+  Check(wavefront.hamilton_reply_backend == "cpu" && wavefront.hamilton_reply_cpu_verified &&
+            wavefront.hamilton_reply_batches > 0U && wavefront.hamilton_reply_centers > 0U &&
+            wavefront.hamilton_replies_generated > 0U,
+        "CPU wavefront records fully verified Hamilton reply batches");
   Check(wavefront.proof.nodes.size() == result.proof.nodes.size(),
         "DFS and wavefront point arenas have the same size");
   Check(std::all_of(wavefront.proof.nodes.begin() + 1, wavefront.proof.nodes.end(),
@@ -498,15 +574,19 @@ void TestRecursivePointProof() {
       graph, {2, 4},
       {.search_options = options,
        .propagation_backend = cudaee::PathCompatibilityBackend::kAuto,
-       .path_append_backend = cudaee::PathCompatibilityBackend::kAuto});
+       .path_append_backend = cudaee::PathCompatibilityBackend::kAuto,
+       .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kAuto});
   Check(auto_fallback.status == cudaee::HtSearchStatus::kProven &&
-            auto_fallback.propagation_backend == "cpu" && auto_fallback.cpu_verified,
+            auto_fallback.propagation_backend == "cpu" && auto_fallback.cpu_verified &&
+            auto_fallback.hamilton_reply_backend == "cpu-fallback" &&
+            auto_fallback.hamilton_reply_cpu_verified,
         "auto wavefront safely falls back to CPU without a CUDA build");
   const cudaee::HtWavefrontResult unavailable_cuda = cudaee::ProveEdgeByWavefrontHt(
       graph, {2, 4},
       {.search_options = options,
        .propagation_backend = cudaee::PathCompatibilityBackend::kCuda,
-       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu});
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu});
   Check(unavailable_cuda.status == cudaee::HtSearchStatus::kUnresolved,
         "explicit unavailable CUDA wavefront remains unresolved");
 #endif
@@ -560,7 +640,8 @@ void TestRecursivePointProof() {
         graph, {2, 4},
         {.search_options = options,
          .propagation_backend = cudaee::PathCompatibilityBackend::kCuda,
-         .path_append_backend = cudaee::PathCompatibilityBackend::kCuda});
+         .path_append_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCuda});
     Check(cuda_wavefront.status == cudaee::HtSearchStatus::kProven, cuda_wavefront.proof.reason);
     Check(cuda_wavefront.propagation_backend == "cuda" && cuda_wavefront.selected_device >= 0 &&
               cuda_wavefront.cpu_verified,
@@ -569,6 +650,11 @@ void TestRecursivePointProof() {
               cuda_wavefront.path_append_selected_device >= 0 &&
               cuda_wavefront.path_append_cpu_verified && cuda_wavefront.path_append_tasks > 0U,
           "CUDA wavefront path-append batches are fully CPU verified");
+    Check(cuda_wavefront.hamilton_reply_backend == "cuda" &&
+              cuda_wavefront.hamilton_reply_selected_device >= 0 &&
+              cuda_wavefront.hamilton_reply_cpu_verified &&
+              cuda_wavefront.hamilton_reply_centers > 0U,
+          "CUDA wavefront Hamilton reply count/write is fully CPU verified");
     Check(cudaee::VerifyHtRecursiveProof(graph, cuda_wavefront.proof, &reason), reason);
   }
 #endif
@@ -621,7 +707,8 @@ void TestRecursiveEndProof() {
       graph, {1, 2},
       {.search_options = options,
        .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
-       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu});
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu});
   Check(wavefront.status == cudaee::HtSearchStatus::kProven, wavefront.proof.reason);
   Check(wavefront.proof.nodes.size() == result.proof.nodes.size(),
         "DFS and wavefront end arenas have the same size");
@@ -764,6 +851,7 @@ void TestCudaWavefrontTruthTable() {
 int main() {
   try {
     TestHamiltonRepliesAgainstReferenceFormula();
+    TestHamiltonReplyBatch();
     TestCdCandidatesCpuCuda();
     TestDfsWavefrontRandomDifferential();
     TestVacuousAndProofAndTamperRejection();

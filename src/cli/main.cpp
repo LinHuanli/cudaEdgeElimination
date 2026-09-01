@@ -39,6 +39,7 @@ void PrintHelp() {
       << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
       << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
       << "                [--scheduler dfs|wavefront] [--backend auto|cpu|cuda]\n"
+      << "                [--reply-backend auto|cpu|cuda]\n"
       << "                [--path-append-backend auto|cpu|cuda]\n"
       << "                [--propagation-backend auto|cpu|cuda] [--max-depth N] [HT budgets]\n"
       << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
@@ -380,11 +381,17 @@ bool HtProveCommand(const Arguments& arguments) {
   cudaee::HtRecursiveProof proof;
   std::string propagation_backend = "none";
   std::string path_append_backend = "none";
+  std::string hamilton_reply_backend = "none";
   int selected_device = -1;
   int path_append_selected_device = -1;
+  int hamilton_reply_selected_device = -1;
   bool path_append_cpu_verified = false;
+  bool hamilton_reply_cpu_verified = false;
   std::uint64_t path_append_batches = 0;
   std::uint64_t path_append_tasks = 0;
+  std::uint64_t hamilton_reply_batches = 0;
+  std::uint64_t hamilton_reply_centers = 0;
+  std::uint64_t hamilton_replies_generated = 0;
   std::uint64_t moves_generated = 0;
   std::uint64_t peak_frontier = 0;
   if (scheduler == "dfs") {
@@ -398,16 +405,24 @@ bool HtProveCommand(const Arguments& arguments) {
          .propagation_backend =
              ParsePathCompatibilityBackend(Optional(arguments, "propagation-backend", "auto")),
          .path_append_backend =
-             ParsePathCompatibilityBackend(Optional(arguments, "path-append-backend", "auto"))});
+             ParsePathCompatibilityBackend(Optional(arguments, "path-append-backend", "auto")),
+         .hamilton_reply_backend =
+             ParsePathCompatibilityBackend(Optional(arguments, "reply-backend", "auto"))});
     search_status = result.status;
     proof = std::move(result.proof);
     propagation_backend = std::move(result.propagation_backend);
     path_append_backend = std::move(result.path_append_backend);
+    hamilton_reply_backend = std::move(result.hamilton_reply_backend);
     selected_device = result.selected_device;
     path_append_selected_device = result.path_append_selected_device;
+    hamilton_reply_selected_device = result.hamilton_reply_selected_device;
     path_append_cpu_verified = result.path_append_cpu_verified;
+    hamilton_reply_cpu_verified = result.hamilton_reply_cpu_verified;
     path_append_batches = result.path_append_batches;
     path_append_tasks = result.path_append_tasks;
+    hamilton_reply_batches = result.hamilton_reply_batches;
+    hamilton_reply_centers = result.hamilton_reply_centers;
+    hamilton_replies_generated = result.hamilton_replies_generated;
     moves_generated = result.moves_generated;
     peak_frontier = result.peak_frontier;
   } else {
@@ -430,7 +445,13 @@ bool HtProveCommand(const Arguments& arguments) {
               << " path_append_device=" << path_append_selected_device
               << " path_append_batches=" << path_append_batches
               << " path_append_tasks=" << path_append_tasks
-              << " path_append_cpu_verified=" << (path_append_cpu_verified ? 1 : 0);
+              << " path_append_cpu_verified=" << (path_append_cpu_verified ? 1 : 0)
+              << " reply_backend=" << hamilton_reply_backend
+              << " reply_device=" << hamilton_reply_selected_device
+              << " reply_batches=" << hamilton_reply_batches
+              << " reply_centers=" << hamilton_reply_centers
+              << " replies_generated=" << hamilton_replies_generated
+              << " reply_cpu_verified=" << (hamilton_reply_cpu_verified ? 1 : 0);
   }
   std::cout << " reason=" << std::quoted(proof.reason) << '\n';
   if (search_status == cudaee::HtSearchStatus::kInvalid) {

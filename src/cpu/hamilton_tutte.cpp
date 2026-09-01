@@ -308,6 +308,68 @@ std::vector<HtNeighborPair> EnumerateHtHamiltonReplies(const GraphSnapshot& grap
   return replies;
 }
 
+HtHamiltonReplyBatchResult EvaluateHtHamiltonReplies(const GraphSnapshot& graph,
+                                                     const NodeEdge raw_target,
+                                                     const std::vector<std::int32_t>& centers,
+                                                     const PathCompatibilityBackend backend) {
+  std::string reason;
+  if (!ValidateHtGraph(graph, &reason)) {
+    throw std::invalid_argument(reason);
+  }
+  const NodeEdge target = CanonicalEdge(raw_target.u, raw_target.v);
+  if (!ValidateTarget(graph, target, &reason)) {
+    throw std::invalid_argument(reason);
+  }
+  if (backend != PathCompatibilityBackend::kAuto && backend != PathCompatibilityBackend::kCpu &&
+      backend != PathCompatibilityBackend::kCuda) {
+    throw std::invalid_argument("未知 HT Hamilton reply 后端");
+  }
+
+  HtHamiltonReplyBatchResult result;
+  result.offsets.reserve(centers.size() + 1U);
+  result.offsets.push_back(0U);
+  for (const std::int32_t center : centers) {
+    const std::vector<HtNeighborPair> center_replies =
+        EnumerateHtHamiltonReplies(graph, target, center);
+    if (center_replies.size() > std::numeric_limits<std::uint64_t>::max() - result.offsets.back()) {
+      throw std::overflow_error("HT Hamilton reply 总数溢出");
+    }
+    result.replies.insert(result.replies.end(), center_replies.begin(), center_replies.end());
+    result.offsets.push_back(result.offsets.back() + center_replies.size());
+  }
+  result.cpu_verified = true;
+  if (backend == PathCompatibilityBackend::kCpu) {
+    result.backend = "cpu";
+    return result;
+  }
+
+  if (!detail::HtHamiltonReplyCudaAvailable(&reason)) {
+    if (backend == PathCompatibilityBackend::kCuda) {
+      throw std::runtime_error("CUDA HT Hamilton reply 后端不可用: " + reason);
+    }
+    result.backend = "cpu-fallback";
+    return result;
+  }
+
+  detail::HtHamiltonReplyDeviceBatch cuda_batch;
+  try {
+    cuda_batch =
+        detail::EvaluateHtHamiltonRepliesCuda(graph, target, centers, &result.selected_device);
+  } catch (const std::exception&) {
+    if (backend == PathCompatibilityBackend::kCuda) {
+      throw;
+    }
+    result.selected_device = -1;
+    result.backend = "cpu-fallback";
+    return result;
+  }
+  if (cuda_batch.offsets != result.offsets || cuda_batch.replies != result.replies) {
+    throw std::logic_error("CUDA HT Hamilton replies 与 CPU 完整枚举不一致");
+  }
+  result.backend = "cuda";
+  return result;
+}
+
 std::vector<HtCdCandidate> GenerateHtCdCandidates(const GraphSnapshot& graph,
                                                   const NodeEdge raw_target,
                                                   const HtShallowOptions& options) {
