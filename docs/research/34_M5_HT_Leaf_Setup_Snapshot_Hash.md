@@ -69,3 +69,5 @@ CPU setup 的组成如下：
 ## 6. 下一切片
 
 优化后 CPU leaf 的 `cost_evaluate_ms` 为 2,345.263 ms，占 leaf 的 78.67%；其中逐 cell CPU 精确认证为 2,285.220 ms。setup 已不再适合优先做复杂线程化。下一切片应在不改变 cell 顺序、整数距离语义和 proof 计数的前提下评估 CPU cost rows 的有界并行；必须保留串行基线、逐 cell 差分和小 batch 避免线程开销的门禁。若并行调度不能在重复 clean run 中稳定获益，则撤回而转向 scorer 数据布局。
+
+该行并行实验已完成，结果见 [M5 HT CPU 精确成本矩阵行并行](35_M5_HT_CPU_Cost_Row_Parallelism.md)。

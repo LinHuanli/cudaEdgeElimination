@@ -87,6 +87,8 @@ Hamilton reply 主机优化已完成：batch 入口只验证一次图，重复 c
 
 leaf setup 画像与快照哈希复用已完成：同一 8-target 协议中，9,891 个 cursor 的 setup 有 92.57% 来自每个 leaf state 重算不可变 graph 哈希。改为每个 leaf batch 计算一次后，CPU setup 从 1.761 秒降至 0.232 秒，leaf/search 从 `4.497/4.915 s` 降至 `2.981/3.398 s`；proof、规范工作计数、最终图和受保护 tour 均不变。当前优先级转为占 leaf 78.67% 的 CPU 精确 cost matrix。
 
+CPU 精确 cost row 并行已完成：8,192 cells 以上按 task row 静态分片，最多使用 8 个可用线程；小 batch、无 OpenMP 和显式单线程均走相同串行实现。同 commit 的 1/8-thread A/B 中，CPU certify/leaf/search 从 `2.340/3.029/3.444 s` 降至 `0.701/1.442/1.867 s`。四路规范矩阵、proof、图和 tour 不变；下一步验证 CPU backend 与 leaf bucket fusion 的组合收益。
+
 M5 仍未完成：`rl5915/d15112` 的最优 tour witness、跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
