@@ -19,7 +19,7 @@
 
 ## 2. V2 计时契约
 
-`CUDAEE_HT_SCAN_REPORT_V2` 在每个 target 和 scan 总计中记录下表字段。所有时间均由 `steady_clock` 在同步 API 外围测量，只用于诊断，不序列化进 HT proof。
+`CUDAEE_HT_SCAN_REPORT_V2` 首次在每个 target 和 scan 总计中加入下表字段；后续 V3 保留全部计时并增加 leaf 批计数与桶融合开关。所有时间均由 `steady_clock` 在同步 API 外围测量，只用于诊断，不序列化进 HT proof。
 
 | 字段 | 边界 | 是否包含其他已列阶段 |
 |---|---|---|
@@ -111,3 +111,5 @@ CPU 基线中 leaf 占 search 的 `79.914%`，Hamilton reply 占 `18.375%`，pat
 6. 最终仍逐目标内部 verifier、scan 即时 verifier、batch commit verifier，并在不可变 snapshot 上一次发布。
 
 验收首先要求 CPU、旧串行 CUDA、新融合 CUDA 的工作签名、内嵌 HT proof 字节和最终图完全一致；性能门禁记录 CUDA batch 数、平均/分位 cost cells、峰值 device cache 与 search wall。只有在重复运行中稳定降低 leaf wall 和 launch 数后，才扩展到 rl5915/d15112 或多 GPU。
+
+同一 target 内的第一步融合实验及其“launch 数大降但 wall 无稳定收益”结论见 [M5 HT leaf 复杂度桶融合](27_M5_HT_Leaf_Bucket_Fusion.md)。

@@ -20,6 +20,7 @@
 - `ht-prove` sidecar 的整批 CPU 重放、不可变快照绑定、规范度数门禁和 `ht-commit` 原子删边；
 - `ht-scan` 的确定性有界目标切片、逐目标 wavefront、CPU 双重复核与 V2 原子提交；
 - HT scan V2 阶段计时，以及用 `--leaf-backend` 将 CUDA leaf cost 与 CPU 候选器解耦的混合路径；
+- 可显式启用、默认关闭的 `--fuse-leaf-buckets` 调度实验及 V3 leaf batch 计数；
 - TSPLIB 最优 tour 的严格成本、节点置换、活动边完整性与规范哈希门禁；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 
