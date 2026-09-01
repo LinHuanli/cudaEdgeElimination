@@ -36,9 +36,9 @@ CPU 始终独立扫描排序 CSR 并比较全部 offsets、边和值顺序。wav
 - 稀疏链图覆盖 degree=1 endpoint 的零长度输出；
 - 非活动内部边、同点内部边和 CPU-only 显式 CUDA 请求在 launch 前失败；
 - 固定 recursive-end 实例必须由 CPU 与全 CUDA wavefront 得到同一可验证 end proof，并确认 end batch 已实际执行；
-- 固定 recursive-point CLI 的 frontier 预取路径实际触发 2 batches、18 tasks、108 end reply edges，最终 4 节点 V1 proof 独立重放通过；
+- 固定 recursive-point CLI 的 point-first frontier 路径实际触发 1 batch、8 tasks、48 end reply edges，最终 4 节点 V1 proof 独立重放通过；
 - CPU Debug/ASan、CPU Release、CUDA Release 全套 CTest 与 Hamilton–Tutte compute-sanitizer memcheck 是提交门禁。
 
 ## 后续
 
-M4.3b3b2b1 已把同一 frontier chunk 的端点 tasks 合并；为了不改变 child 插入顺序，当前会预取后来可能被 point vacuous-success shortcut 跳过的 end replies，所以固定样例从旧逐父状态路径的 8 tasks/48 edges 增至 18 tasks/108 edges。下一步先跨 chunk 批量得到 point path-append flags，再只为确实需要 end moves 的父状态生成端点任务。图 CSR 复用、规范 child SoA、leaf 分桶和 CPU long-tail 仍待实现。
+M4.3b3b2b2a 已先跨 chunk 批量得到 point path-append flags，再只为确实需要 end moves 的父状态生成端点任务；上一阶段投机预取的 18 tasks/108 edges 因而恢复为实际需要的 8 tasks/48 edges，同时 end launches 从单状态 chunk 的 2 降为 1。图 CSR 复用、规范 child SoA、leaf 分桶和 CPU long-tail 仍待实现。

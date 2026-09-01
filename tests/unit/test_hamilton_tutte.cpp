@@ -658,8 +658,11 @@ void TestRecursivePointProof() {
                 cudaee::SerializeHtRecursiveProof(wavefront.proof),
         "frontier reply chunk size preserves the canonical recursive proof");
   Check(single_state_batches.reply_frontier_batches > wavefront.reply_frontier_batches &&
-            single_state_batches.hamilton_reply_batches > wavefront.hamilton_reply_batches,
-        "multi-parent chunks reduce reply-generation batch count");
+            single_state_batches.hamilton_reply_batches > wavefront.hamilton_reply_batches &&
+            single_state_batches.path_append_batches > wavefront.path_append_batches &&
+            single_state_batches.end_reply_tasks == wavefront.end_reply_tasks &&
+            single_state_batches.end_replies_generated == wavefront.end_replies_generated,
+        "multi-parent chunks reduce launch count without speculative end work");
 
 #ifndef CUDAEE_HAS_CUDA
   const cudaee::HtWavefrontResult auto_fallback = cudaee::ProveEdgeByWavefrontHt(

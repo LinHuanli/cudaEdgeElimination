@@ -4,7 +4,7 @@
 
 M4.3b3b2b1 将 reply 生成从“每个父状态一次调用”改为“每个 frontier chunk 一次调用”。它同时展平 point centers 和 end endpoint tasks，复用既有 Hamilton/end count-write API；CPU 仍完整枚举并认证每一个区间。
 
-本阶段不改 leaf engine、不把规范 child 写到设备，也不跨父状态合并 path-append。目标是先证明跨状态索引、回填与资源切块不会改变工作图或证书，再复用同一映射扩展后续 kernel。
+在 M4.3b3b2b1 交付时，本阶段不改 leaf engine、不把规范 child 写到设备，也不跨父状态合并 path-append。目标是先证明跨状态索引、回填与资源切块不会改变工作图或证书，再复用同一映射扩展后续 kernel；后续 path-append 扩展见 [frontier path append](14_Hamilton_Tutte_Frontier_Path_Append.md)。
 
 ## chunk 调度
 
@@ -47,14 +47,14 @@ frontier state order
 |---|---:|---:|
 | frontier chunks | 7 | 2 |
 | Hamilton batches | 9 | 4 |
-| end batches | 7 | 2 |
-| path-append batches | 9 | 9 |
+| end batches | 2 | 1 |
+| path-append batches | 9 | 3 |
 | V1 proof | 相同 | 相同 |
 
 当前数据只能说明 launch 合并和语义等价，不能说明端到端加速。样例规模很小，CPU 全量复核与设备图重复传输仍可能占主导。
 
-## 投机 end 预取
+## point-first end 筛选
 
-为保持父状态的 child 插入顺序，chunk 在知道 point move 是否 vacuous-success 之前就预取 end replies。因此固定样例的 end 工作量由旧逐父状态路径实际使用的 8 tasks/48 edges 增至 18 tasks/108 edges。多出的结果不会进入工作图，但会计入真实性能指标。
+初版 frontier reply batching 为保持父状态的 child 插入顺序，在知道 point move 是否 vacuous-success 之前预取 end replies，固定样例一度从 8 tasks/48 edges 增至 18 tasks/108 edges。M4.3b3b2b2a 已先跨 chunk 计算 point path-append flags，筛掉必然 shortcut 的 states 后才生成 end replies；当前工作量恢复为 8/48，且 child 仍按原顺序物化。
 
-M4.3b3b2b2 将先把 point path-append 跨 chunk 合批，取得全部 point flags 后筛掉 shortcut states，再生成 end tasks；随后再按相同 span 映射批量写出规范 child SoA。该优化必须继续保持 `N=1`/批量 proof 逐字节一致。
+后续将按相同 span 映射批量写出规范 child SoA。该优化必须继续保持 `N=1`/批量 proof 逐字节一致。

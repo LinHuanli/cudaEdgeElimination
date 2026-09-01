@@ -57,4 +57,4 @@ wavefront 在每个未解决父状态上：
 
 ## 后续
 
-当前 node records 和规范 children 仍由 CPU 构造，path-append 仍是每个父状态最多 point/end 两个 batch。M4.3b3b2a1/a2 已完成 root/point Hamilton reply 和 end reply 的 count/write，M4.3b3b2b1 已先把 reply 生成跨 frontier chunk 合并；下一步用相同 chunk 回填索引合并 path-append，并在 GPU 上写出规范 child SoA。小桶、超大 reply、深层状态与精确 DP 进入 CPU long-tail。只有完整小实例差分、显存峰值和端到端收益均过门禁后，HT 证明才会接入不可变 epoch commit。
+M4.3b3b2b2a 已用同一 chunk spans 把 path-append 跨父状态合并：point flags 先返回，再只为没有 vacuous-success point move 的状态建立 end batch，详见 [frontier path append](14_Hamilton_Tutte_Frontier_Path_Append.md)。当前 node records 和规范 children 仍由 CPU 构造；下一步在 GPU 上写出规范 child SoA，并让小桶、超大 reply、深层状态与精确 DP 进入 CPU long-tail。只有完整小实例差分、显存峰值和端到端收益均过门禁后，HT 证明才会接入不可变 epoch commit。
