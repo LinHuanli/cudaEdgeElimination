@@ -370,6 +370,73 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonReplies(const GraphSnapshot& graph,
   return result;
 }
 
+HtEndReplyBatchResult EvaluateHtEndReplies(const GraphSnapshot& graph,
+                                           const std::vector<HtEndReplyTask>& tasks,
+                                           const PathCompatibilityBackend backend) {
+  std::string reason;
+  if (!ValidateHtGraph(graph, &reason)) {
+    throw std::invalid_argument(reason);
+  }
+  if (backend != PathCompatibilityBackend::kAuto && backend != PathCompatibilityBackend::kCpu &&
+      backend != PathCompatibilityBackend::kCuda) {
+    throw std::invalid_argument("未知 HT end reply 后端");
+  }
+
+  HtEndReplyBatchResult result;
+  result.offsets.reserve(tasks.size() + 1U);
+  result.offsets.push_back(0U);
+  for (const HtEndReplyTask& task : tasks) {
+    if (task.endpoint < 0 || task.endpoint >= graph.dimension || task.internal_neighbor < 0 ||
+        task.internal_neighbor >= graph.dimension || task.endpoint == task.internal_neighbor ||
+        !graph.HasActiveEdge(task.endpoint, task.internal_neighbor)) {
+      throw std::invalid_argument("HT end reply task 必须指定一条活动的路径内部边");
+    }
+    const std::int32_t begin = graph.row_offsets[static_cast<std::size_t>(task.endpoint)];
+    const std::int32_t end = graph.row_offsets[static_cast<std::size_t>(task.endpoint) + 1U];
+    const std::uint64_t reply_count = static_cast<std::uint64_t>(end - begin - 1);
+    if (reply_count > std::numeric_limits<std::uint64_t>::max() - result.offsets.back()) {
+      throw std::overflow_error("HT end reply 总数溢出");
+    }
+    for (std::int32_t offset = begin; offset < end; ++offset) {
+      const std::int32_t neighbor = graph.neighbors[static_cast<std::size_t>(offset)];
+      if (neighbor != task.internal_neighbor) {
+        result.replies.push_back(CanonicalEdge(task.endpoint, neighbor));
+      }
+    }
+    result.offsets.push_back(result.offsets.back() + reply_count);
+  }
+  result.cpu_verified = true;
+  if (backend == PathCompatibilityBackend::kCpu) {
+    result.backend = "cpu";
+    return result;
+  }
+
+  if (!detail::HtEndReplyCudaAvailable(&reason)) {
+    if (backend == PathCompatibilityBackend::kCuda) {
+      throw std::runtime_error("CUDA HT end reply 后端不可用: " + reason);
+    }
+    result.backend = "cpu-fallback";
+    return result;
+  }
+
+  detail::HtEndReplyDeviceBatch cuda_batch;
+  try {
+    cuda_batch = detail::EvaluateHtEndRepliesCuda(graph, tasks, &result.selected_device);
+  } catch (const std::exception&) {
+    if (backend == PathCompatibilityBackend::kCuda) {
+      throw;
+    }
+    result.selected_device = -1;
+    result.backend = "cpu-fallback";
+    return result;
+  }
+  if (cuda_batch.offsets != result.offsets || cuda_batch.replies != result.replies) {
+    throw std::logic_error("CUDA HT end replies 与 CPU 完整枚举不一致");
+  }
+  result.backend = "cuda";
+  return result;
+}
+
 std::vector<HtCdCandidate> GenerateHtCdCandidates(const GraphSnapshot& graph,
                                                   const NodeEdge raw_target,
                                                   const HtShallowOptions& options) {

@@ -16,4 +16,16 @@ HtHamiltonReplyDeviceBatch EvaluateHtHamiltonRepliesCuda(const GraphSnapshot&, c
   throw std::runtime_error("当前二进制未编译 CUDA HT reply 后端");
 }
 
+bool HtEndReplyCudaAvailable(std::string* const reason) {
+  if (reason != nullptr) {
+    *reason = "当前二进制未编译 CUDA 后端";
+  }
+  return false;
+}
+
+HtEndReplyDeviceBatch EvaluateHtEndRepliesCuda(const GraphSnapshot&,
+                                               const std::vector<HtEndReplyTask>&, int*) {
+  throw std::runtime_error("当前二进制未编译 CUDA HT end reply 后端");
+}
+
 } // namespace cudaee::detail

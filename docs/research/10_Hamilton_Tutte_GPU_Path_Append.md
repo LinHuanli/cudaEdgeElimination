@@ -57,4 +57,4 @@ wavefront 在每个未解决父状态上：
 
 ## 后续
 
-当前 node records 和规范 children 仍由 CPU 构造，每个父状态最多发起 point/end 两个 batch。M4.3b3b2a 已完成 point/root Hamilton reply 的 count/write；下一步按 `(depth,path_count,reply bucket)` 合并整个 frontier，并在 GPU 上写出规范 child SoA。小桶、超大 reply、深层状态与精确 DP 进入 CPU long-tail。只有完整小实例差分、显存峰值和端到端收益均过门禁后，HT 证明才会接入不可变 epoch commit。
+当前 node records 和规范 children 仍由 CPU 构造，每个父状态最多发起 point/end 两个 batch。M4.3b3b2a1/a2 已完成 root/point Hamilton reply 和 end reply 的 count/write；下一步按 `(depth,path_count,reply bucket)` 合并整个 frontier，并在 GPU 上写出规范 child SoA。小桶、超大 reply、深层状态与精确 DP 进入 CPU long-tail。只有完整小实例差分、显存峰值和端到端收益均过门禁后，HT 证明才会接入不可变 epoch commit。

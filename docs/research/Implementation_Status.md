@@ -16,8 +16,9 @@
 | M4.3b2 递归 HT 语义与证书 | 完成（CPU 研究 API/CLI） | extra point/end；continuation arena；全局 proof V1；`ht-prove`/`ht-verify` 严格重放 |
 | M4.3b3a 混合 GPU wavefront | 完成（研究 API/CLI） | 主机 BFS；CUDA 原子 continuation counters；单-block device-persistent queue；CPU 全状态差分 |
 | M4.3b3b1 GPU path append | 完成（候选器） | point/end 状态内合批；稀疏分量/度数 kernel；CPU 规范子状态逐项认证 |
-| M4.3b3b2a GPU Hamilton replies | 完成（候选器） | 多中心 count/write；确定性 CSR 区间；CPU 完整列表逐元素认证 |
-| M4.3b3b2b 全设备 wavefront 与提交 | 待实现 | end reply/规范状态写出、批量叶、多 block/CPU long-tail、epoch commit |
+| M4.3b3b2a1 GPU Hamilton replies | 完成（候选器） | 多中心 count/write；确定性 CSR 区间；CPU 完整列表逐元素认证 |
+| M4.3b3b2a2 GPU end replies | 完成（候选器） | 多端点 count/write；空区间/重复 task；CPU 完整边列表认证 |
+| M4.3b3b2b 全设备 wavefront 与提交 | 待实现 | 规范状态写出、跨 frontier/批量叶、多 block/CPU long-tail、epoch commit |
 | M5 中大型调优 | 待开始 | 首期不设最低加速比；pcb3038 尚未形成认证运行记录 |
 
 ## 当前基准结果
@@ -47,6 +48,8 @@ CPU 精确困难叶：将每条 forced outside edge 收缩为可双向访问的 
 GPU path append：规范父路径展平为 `(node,component,degree)`，一个线程检查一个 point/end task。point 中心必须是新节点；两个连接点度数均小于 2 且不能来自同一分量。end 必须从现有端点出发，另一端只能是新节点或其他分量端点。同一父状态的全部 point 候选合为一个 batch、全部 end 候选合为另一个 batch；CPU 对每项仍执行 `NormalizePathSystem`，只有 flags 全等才使用 CPU 生成的规范 child。固定双父状态 11-task 表覆盖合并、成环、内部节点、重复边与新节点；实际 point CLI 运行生成 34 states、18 moves、84 replies，峰值 frontier 27，append 为 9 batches/84 tasks，最终压缩为 4 节点证明。这些是正确性样例，不是性能结论。
 
 GPU Hamilton replies：CUDA 对每个中心先 count，再由主机建立 `uint64_t` 前缀区间，最后按排序 CSR 的确定顺序 write。整数平方根实现与 CPU 的 `EUC_2D`/`CEIL_2D` 精确边界一致；根 `c,d` 两中心合批，递归 point 的全部候选中心在单个父状态内合批。CPU 始终重新枚举完整 offsets 和 reply 列表并逐元素比较，只有 CPU 列表进入工作图。12 点完整图覆盖两种距离、重复中心和 CPU-only 回退；固定 point CLI 为 9 batches、16 centers、46 surviving pairs，证明规模和重放结果保持不变。这些仍是正确性指标，不代表端到端加速。
+
+GPU end replies：同一父状态的全部路径 front/back 端点合为一个 batch；每个线程从端点排序 CSR 排除内部邻点，经主机 `uint64_t` 前缀和后把规范活动边写入独占区间。CPU 重新扫描完整 offsets/edges，只有 CPU 列表进入候选排序和工作图。9 点完整图覆盖相反 endpoint 方向与重复 task，稀疏链覆盖 degree=1 的零长度区间；固定 recursive-end proof 同时要求 CPU 与全 CUDA wavefront 成功并由同一 V1 verifier 重放。固定 point CLI 还实际记录 2 batches、8 tasks、48 end reply edges。
 
 ## 安全边界
 

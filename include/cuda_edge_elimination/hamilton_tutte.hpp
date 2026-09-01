@@ -61,6 +61,22 @@ struct HtHamiltonReplyBatchResult {
   bool cpu_verified{false};
 };
 
+struct HtEndReplyTask {
+  std::int32_t endpoint{-1};
+  std::int32_t internal_neighbor{-1};
+
+  auto operator<=>(const HtEndReplyTask&) const = default;
+};
+
+struct HtEndReplyBatchResult {
+  // 第 i 个 task 的确定性活动边区间为 [offsets[i], offsets[i+1])。
+  std::vector<std::uint64_t> offsets;
+  std::vector<NodeEdge> replies;
+  std::string backend;
+  int selected_device{-1};
+  bool cpu_verified{false};
+};
+
 struct HtShallowOptions {
   // 0 表示使用除目标端点外的全部节点；只影响候选强度，不影响证明正确性。
   std::uint32_t max_neighborhood{25};
@@ -166,7 +182,7 @@ struct HtWavefrontOptions {
   PathCompatibilityBackend propagation_backend{PathCompatibilityBackend::kAuto};
   // 只控制递归 point/end reply 的批量路径冲突标记；CPU 始终规范化并逐项认证。
   PathCompatibilityBackend path_append_backend{PathCompatibilityBackend::kAuto};
-  // 只控制 c,d/point 中心的 Hamilton 邻边对 count/write；CPU 始终完整枚举并比较。
+  // 控制 c,d/point Hamilton 邻边对与 end 活动边的 count/write；CPU 始终完整比较。
   PathCompatibilityBackend hamilton_reply_backend{PathCompatibilityBackend::kAuto};
 };
 
@@ -187,6 +203,12 @@ struct HtWavefrontResult {
   std::uint64_t hamilton_reply_batches{};
   std::uint64_t hamilton_reply_centers{};
   std::uint64_t hamilton_replies_generated{};
+  std::string end_reply_backend{"none"};
+  int end_reply_selected_device{-1};
+  bool end_reply_cpu_verified{false};
+  std::uint64_t end_reply_batches{};
+  std::uint64_t end_reply_tasks{};
+  std::uint64_t end_replies_generated{};
   std::uint64_t moves_generated{};
   std::uint64_t peak_frontier{};
 };
@@ -260,6 +282,11 @@ EvaluateHtHamiltonReplies(const GraphSnapshot& graph, NodeEdge target_edge,
                           const std::vector<std::int32_t>& centers,
                           PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto);
 
+// 批量枚举 end move 的活动边 replies；每项排除指向路径内部的唯一邻边。
+[[nodiscard]] HtEndReplyBatchResult
+EvaluateHtEndReplies(const GraphSnapshot& graph, const std::vector<HtEndReplyTask>& tasks,
+                     PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto);
+
 // 依次尝试 c,d OR move；一个 move 只有在全部 Hamilton replies 有叶证明时才成功。
 [[nodiscard]] HtShallowResult ProveEdgeByShallowHt(const GraphSnapshot& graph, NodeEdge target_edge,
                                                    const HtShallowOptions& options = {});
@@ -306,6 +333,11 @@ struct HtHamiltonReplyDeviceBatch {
   std::vector<HtNeighborPair> replies;
 };
 
+struct HtEndReplyDeviceBatch {
+  std::vector<std::uint64_t> offsets;
+  std::vector<NodeEdge> replies;
+};
+
 [[nodiscard]] bool HtCdCudaAvailable(std::string* reason);
 [[nodiscard]] std::vector<std::uint8_t>
 ScreenHtCdCandidatesCuda(const GraphSnapshot& graph, NodeEdge target_edge,
@@ -316,6 +348,11 @@ ScreenHtCdCandidatesCuda(const GraphSnapshot& graph, NodeEdge target_edge,
 [[nodiscard]] HtHamiltonReplyDeviceBatch
 EvaluateHtHamiltonRepliesCuda(const GraphSnapshot& graph, NodeEdge target_edge,
                               const std::vector<std::int32_t>& centers, int* selected_device);
+
+[[nodiscard]] bool HtEndReplyCudaAvailable(std::string* reason);
+[[nodiscard]] HtEndReplyDeviceBatch
+EvaluateHtEndRepliesCuda(const GraphSnapshot& graph, const std::vector<HtEndReplyTask>& tasks,
+                         int* selected_device);
 
 [[nodiscard]] bool HtWavefrontCudaAvailable(std::string* reason);
 [[nodiscard]] std::vector<std::uint8_t>

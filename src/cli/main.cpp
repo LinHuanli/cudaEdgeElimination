@@ -392,6 +392,12 @@ bool HtProveCommand(const Arguments& arguments) {
   std::uint64_t hamilton_reply_batches = 0;
   std::uint64_t hamilton_reply_centers = 0;
   std::uint64_t hamilton_replies_generated = 0;
+  std::string end_reply_backend = "none";
+  int end_reply_selected_device = -1;
+  bool end_reply_cpu_verified = false;
+  std::uint64_t end_reply_batches = 0;
+  std::uint64_t end_reply_tasks = 0;
+  std::uint64_t end_replies_generated = 0;
   std::uint64_t moves_generated = 0;
   std::uint64_t peak_frontier = 0;
   if (scheduler == "dfs") {
@@ -423,6 +429,12 @@ bool HtProveCommand(const Arguments& arguments) {
     hamilton_reply_batches = result.hamilton_reply_batches;
     hamilton_reply_centers = result.hamilton_reply_centers;
     hamilton_replies_generated = result.hamilton_replies_generated;
+    end_reply_backend = std::move(result.end_reply_backend);
+    end_reply_selected_device = result.end_reply_selected_device;
+    end_reply_cpu_verified = result.end_reply_cpu_verified;
+    end_reply_batches = result.end_reply_batches;
+    end_reply_tasks = result.end_reply_tasks;
+    end_replies_generated = result.end_replies_generated;
     moves_generated = result.moves_generated;
     peak_frontier = result.peak_frontier;
   } else {
@@ -451,7 +463,13 @@ bool HtProveCommand(const Arguments& arguments) {
               << " reply_batches=" << hamilton_reply_batches
               << " reply_centers=" << hamilton_reply_centers
               << " replies_generated=" << hamilton_replies_generated
-              << " reply_cpu_verified=" << (hamilton_reply_cpu_verified ? 1 : 0);
+              << " reply_cpu_verified=" << (hamilton_reply_cpu_verified ? 1 : 0)
+              << " end_reply_backend=" << end_reply_backend
+              << " end_reply_device=" << end_reply_selected_device
+              << " end_reply_batches=" << end_reply_batches
+              << " end_reply_tasks=" << end_reply_tasks
+              << " end_replies_generated=" << end_replies_generated
+              << " end_reply_cpu_verified=" << (end_reply_cpu_verified ? 1 : 0);
   }
   std::cout << " reason=" << std::quoted(proof.reason) << '\n';
   if (search_status == cudaee::HtSearchStatus::kInvalid) {

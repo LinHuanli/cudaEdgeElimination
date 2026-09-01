@@ -38,20 +38,6 @@ NormalizedPathSystem AddPaths(const NormalizedPathSystem& state, const std::vect
   return NormalizePathSystem(raw, dimension);
 }
 
-std::vector<NodeEdge> EnumerateEndReplies(const GraphSnapshot& graph, const std::int32_t endpoint,
-                                          const std::int32_t internal_neighbor) {
-  std::vector<NodeEdge> replies;
-  const std::int32_t begin = graph.row_offsets[static_cast<std::size_t>(endpoint)];
-  const std::int32_t end = graph.row_offsets[static_cast<std::size_t>(endpoint) + 1U];
-  for (std::int32_t offset = begin; offset < end; ++offset) {
-    const std::int32_t neighbor = graph.neighbors[static_cast<std::size_t>(offset)];
-    if (neighbor != internal_neighbor) {
-      replies.push_back(CanonicalEdge(endpoint, neighbor));
-    }
-  }
-  return replies;
-}
-
 struct PointCandidate {
   std::int32_t node{-1};
   std::vector<HtNeighborPair> replies;
@@ -106,26 +92,14 @@ std::vector<std::int32_t> BuildPointCandidateNodes(const GraphSnapshot& graph,
   return nodes;
 }
 
-std::vector<EndCandidate> BuildEndCandidates(const GraphSnapshot& graph,
-                                             const NormalizedPathSystem& state,
-                                             const HtRecursiveOptions& options) {
-  std::vector<EndCandidate> candidates;
-  candidates.reserve(2U * state.paths.size());
+std::vector<HtEndReplyTask> BuildEndReplyTasks(const NormalizedPathSystem& state) {
+  std::vector<HtEndReplyTask> tasks;
+  tasks.reserve(2U * state.paths.size());
   for (const Path& path : state.paths) {
-    candidates.push_back(
-        {path.front(), path[1], EnumerateEndReplies(graph, path.front(), path[1])});
-    candidates.push_back({path.back(), path[path.size() - 2U],
-                          EnumerateEndReplies(graph, path.back(), path[path.size() - 2U])});
+    tasks.push_back({path.front(), path[1]});
+    tasks.push_back({path.back(), path[path.size() - 2U]});
   }
-  std::sort(candidates.begin(), candidates.end(),
-            [](const EndCandidate& lhs, const EndCandidate& rhs) {
-              return std::tuple{lhs.replies.size(), lhs.endpoint, lhs.internal_neighbor} <
-                     std::tuple{rhs.replies.size(), rhs.endpoint, rhs.internal_neighbor};
-            });
-  if (options.max_end_candidates != 0U && candidates.size() > options.max_end_candidates) {
-    candidates.resize(options.max_end_candidates);
-  }
-  return candidates;
+  return tasks;
 }
 
 struct WaveMove {
@@ -156,6 +130,9 @@ struct WaveBuildContext {
   bool hamilton_reply_failed{false};
   bool hamilton_reply_invalid{false};
   std::string hamilton_reply_reason;
+  bool end_reply_failed{false};
+  bool end_reply_invalid{false};
+  std::string end_reply_reason;
 };
 
 bool MoveReplyCountAllowed(const WaveBuildContext& context, const std::uint64_t count) {
@@ -339,6 +316,94 @@ std::optional<std::vector<PointCandidate>> BuildPointCandidates(WaveBuildContext
   return candidates;
 }
 
+void RecordEndReplyBatch(WaveBuildContext* const context, const HtEndReplyBatchResult& batch,
+                         const std::size_t task_count) {
+  if (task_count == 0U) {
+    return;
+  }
+  HtWavefrontResult& result = *context->result;
+  if (result.end_reply_batches == std::numeric_limits<std::uint64_t>::max() ||
+      task_count > std::numeric_limits<std::uint64_t>::max() - result.end_reply_tasks ||
+      batch.replies.size() >
+          std::numeric_limits<std::uint64_t>::max() - result.end_replies_generated) {
+    throw std::overflow_error("HT end reply 批处理统计溢出");
+  }
+  ++result.end_reply_batches;
+  result.end_reply_tasks += static_cast<std::uint64_t>(task_count);
+  result.end_replies_generated += static_cast<std::uint64_t>(batch.replies.size());
+  result.end_reply_cpu_verified = result.end_reply_batches == 1U
+                                      ? batch.cpu_verified
+                                      : result.end_reply_cpu_verified && batch.cpu_verified;
+  if (result.end_reply_backend == "none") {
+    result.end_reply_backend = batch.backend;
+  } else if (result.end_reply_backend != batch.backend) {
+    result.end_reply_backend = "mixed";
+  }
+  if (batch.selected_device >= 0) {
+    result.end_reply_selected_device = batch.selected_device;
+  }
+}
+
+std::optional<HtEndReplyBatchResult>
+EvaluateEndReplyBatch(WaveBuildContext* const context, const std::vector<HtEndReplyTask>& tasks) {
+  try {
+    HtEndReplyBatchResult batch =
+        EvaluateHtEndReplies(*context->graph, tasks, context->hamilton_reply_backend);
+    RecordEndReplyBatch(context, batch, tasks.size());
+    return batch;
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::logic_error& error) {
+    context->end_reply_invalid = true;
+    context->end_reply_reason = error.what();
+  } catch (const std::exception& error) {
+    context->end_reply_failed = true;
+    context->end_reply_reason = error.what();
+  }
+  return std::nullopt;
+}
+
+std::vector<NodeEdge> CopyEndReplySlice(const HtEndReplyBatchResult& batch,
+                                        const std::size_t task_index) {
+  if (task_index + 1U >= batch.offsets.size() ||
+      batch.offsets[task_index] > batch.offsets[task_index + 1U] ||
+      batch.offsets[task_index + 1U] > batch.replies.size()) {
+    throw std::logic_error("HT end reply batch offset 非法");
+  }
+  const auto begin = batch.replies.begin() + static_cast<std::ptrdiff_t>(batch.offsets[task_index]);
+  const auto end =
+      batch.replies.begin() + static_cast<std::ptrdiff_t>(batch.offsets[task_index + 1U]);
+  return {begin, end};
+}
+
+std::optional<std::vector<EndCandidate>> BuildEndCandidates(WaveBuildContext* const context,
+                                                            const NormalizedPathSystem& state) {
+  const std::vector<HtEndReplyTask> tasks = BuildEndReplyTasks(state);
+  if (tasks.empty()) {
+    return std::vector<EndCandidate>{};
+  }
+  const std::optional<HtEndReplyBatchResult> batch = EvaluateEndReplyBatch(context, tasks);
+  if (!batch.has_value()) {
+    return std::nullopt;
+  }
+  std::vector<EndCandidate> candidates;
+  candidates.reserve(tasks.size());
+  for (std::size_t index = 0; index < tasks.size(); ++index) {
+    candidates.push_back(
+        {tasks[index].endpoint, tasks[index].internal_neighbor, CopyEndReplySlice(*batch, index)});
+  }
+  std::sort(candidates.begin(), candidates.end(),
+            [](const EndCandidate& lhs, const EndCandidate& rhs) {
+              return std::tuple{lhs.replies.size(), lhs.endpoint, lhs.internal_neighbor} <
+                     std::tuple{rhs.replies.size(), rhs.endpoint, rhs.internal_neighbor};
+            });
+  if (context->options->max_end_candidates != 0U &&
+      candidates.size() > context->options->max_end_candidates) {
+    candidates.resize(context->options->max_end_candidates);
+  }
+  return candidates;
+}
+
 bool AppendNormalizedChild(WaveBuildContext* const context, NormalizedPathSystem child,
                            const std::uint32_t child_depth, HtTreeReply* const reply,
                            std::vector<WaveState>* const states) {
@@ -472,8 +537,11 @@ bool GenerateEndMoves(WaveBuildContext* const context, const std::uint32_t state
   std::vector<HtPathAppendTask> append_tasks;
   std::uint64_t planned_replies = 0U;
   bool budget_blocked = false;
-  for (const EndCandidate& candidate :
-       BuildEndCandidates(*context->graph, parent, *context->options)) {
+  const std::optional<std::vector<EndCandidate>> candidates = BuildEndCandidates(context, parent);
+  if (!candidates.has_value()) {
+    return false;
+  }
+  for (const EndCandidate& candidate : *candidates) {
     if (!MoveReplyCountAllowed(*context, candidate.replies.size())) {
       continue;
     }
@@ -895,7 +963,10 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
                            .path_append_reason = {},
                            .hamilton_reply_failed = false,
                            .hamilton_reply_invalid = false,
-                           .hamilton_reply_reason = {}};
+                           .hamilton_reply_reason = {},
+                           .end_reply_failed = false,
+                           .end_reply_invalid = false,
+                           .end_reply_reason = {}};
   try {
     for (const HtCdCandidate& candidate : candidates.candidates) {
       ++proof.cd_candidates_tested;
@@ -939,6 +1010,16 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
         if (context.hamilton_reply_failed) {
           result.status = HtSearchStatus::kUnresolved;
           proof.reason = "HT Hamilton reply 后端失败: " + context.hamilton_reply_reason;
+          return result;
+        }
+        if (context.end_reply_invalid) {
+          result.status = HtSearchStatus::kInvalid;
+          proof.reason = "HT end reply CPU/CUDA 复核失败: " + context.end_reply_reason;
+          return result;
+        }
+        if (context.end_reply_failed) {
+          result.status = HtSearchStatus::kUnresolved;
+          proof.reason = "HT end reply 后端失败: " + context.end_reply_reason;
           return result;
         }
         break;

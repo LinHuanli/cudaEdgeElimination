@@ -2,7 +2,7 @@
 
 ## 范围与证明边界
 
-M4.3b3b2a 将规则一致、计算量随节点度数二次增长的 Hamilton 邻边对枚举迁到 CUDA。给定目标边 `ab` 和多个中心 `c_i`，公开入口
+M4.3b3b2a1 将规则一致、计算量随节点度数二次增长的 Hamilton 邻边对枚举迁到 CUDA。给定目标边 `ab` 和多个中心 `c_i`，公开入口
 
 ```cpp
 EvaluateHtHamiltonReplies(graph, target, centers, backend)
@@ -56,4 +56,4 @@ point 候选先按目标边中点距离形成候选中心列表，再批量枚�
 
 ## 未完成项
 
-end move 只是从端点 CSR 排除内部邻居，当前仍由 CPU 枚举；规范 child、leaf engine 和工作图所有权也仍在主机。M4.3b3b2b 将优先把 root/point/end 任务跨同层 frontier 合并，再实现设备端规范子状态 SoA、按桶 leaf batches、多 block continuation 和 CPU long-tail。所有设备输出继续先通过 CPU 全量差分，直至独立证书重放与 epoch commit 链路完成。
+M4.3b3b2a2 已把 end move 的 CSR 提取迁到同一 CUDA 模块，见 [GPU end replies](12_Hamilton_Tutte_GPU_End_Replies.md)。规范 child、leaf engine 和工作图所有权仍在主机。M4.3b3b2b 将优先把 root/point/end 任务跨同层 frontier 合并，再实现设备端规范子状态 SoA、按桶 leaf batches、多 block continuation 和 CPU long-tail。所有设备输出继续先通过 CPU 全量差分，直至独立证书重放与 epoch commit 链路完成。

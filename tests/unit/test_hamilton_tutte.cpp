@@ -228,6 +228,80 @@ void TestHamiltonReplyBatch() {
 #endif
 }
 
+void TestEndReplyBatch() {
+  std::vector<cudaee::Point> points;
+  for (std::int32_t node = 0; node < 9; ++node) {
+    points.push_back({static_cast<double>(node * 7), static_cast<double>((node * node + 3) % 17),
+                      node * 7, (node * node + 3) % 17});
+  }
+  const cudaee::GraphSnapshot graph = MakeCompleteGraph(points);
+  const std::vector<cudaee::HtEndReplyTask> tasks = {{0, 1}, {1, 0}, {8, 3}, {0, 1}};
+  const cudaee::HtEndReplyBatchResult cpu =
+      cudaee::EvaluateHtEndReplies(graph, tasks, cudaee::PathCompatibilityBackend::kCpu);
+  Check(cpu.backend == "cpu" && cpu.cpu_verified && cpu.offsets.size() == tasks.size() + 1U &&
+            cpu.offsets.front() == 0U && cpu.offsets.back() == cpu.replies.size(),
+        "CPU end reply batch metadata and offsets are complete");
+  for (std::size_t index = 0; index < tasks.size(); ++index) {
+    std::vector<cudaee::NodeEdge> expected;
+    for (std::int32_t neighbor = 0; neighbor < graph.dimension; ++neighbor) {
+      if (neighbor != tasks[index].endpoint && neighbor != tasks[index].internal_neighbor) {
+        expected.push_back(CanonicalEdge(tasks[index].endpoint, neighbor));
+      }
+    }
+    const auto begin = cpu.replies.begin() + static_cast<std::ptrdiff_t>(cpu.offsets[index]);
+    const auto end = cpu.replies.begin() + static_cast<std::ptrdiff_t>(cpu.offsets[index + 1U]);
+    Check(std::vector<cudaee::NodeEdge>(begin, end) == expected,
+          "batched end replies preserve CSR neighbor order");
+  }
+  const cudaee::GraphSnapshot leaf_graph = MakeGraph(points, {{0, 1}, {1, 2}, {2, 3}, {3, 4}});
+  const cudaee::HtEndReplyBatchResult empty_cpu =
+      cudaee::EvaluateHtEndReplies(leaf_graph, {{0, 1}}, cudaee::PathCompatibilityBackend::kCpu);
+  Check(empty_cpu.offsets == std::vector<std::uint64_t>({0U, 0U}) && empty_cpu.replies.empty(),
+        "degree-one endpoint produces an empty but complete end reply slice");
+
+#ifdef CUDAEE_HAS_CUDA
+  std::string reason;
+  if (cudaee::detail::HtEndReplyCudaAvailable(&reason)) {
+    const cudaee::HtEndReplyBatchResult gpu =
+        cudaee::EvaluateHtEndReplies(graph, tasks, cudaee::PathCompatibilityBackend::kCuda);
+    Check(gpu.backend == "cuda" && gpu.selected_device >= 0 && gpu.cpu_verified &&
+              gpu.offsets == cpu.offsets && gpu.replies == cpu.replies,
+          "CUDA end reply count/write exactly matches the CPU batch");
+    const cudaee::HtEndReplyBatchResult empty_gpu =
+        cudaee::EvaluateHtEndReplies(leaf_graph, {{0, 1}}, cudaee::PathCompatibilityBackend::kCuda);
+    Check(empty_gpu.offsets == empty_cpu.offsets && empty_gpu.replies.empty(),
+          "CUDA end reply count/write preserves an empty reply slice");
+  }
+#else
+  const cudaee::HtEndReplyBatchResult fallback =
+      cudaee::EvaluateHtEndReplies(graph, tasks, cudaee::PathCompatibilityBackend::kAuto);
+  Check(fallback.backend == "cpu-fallback" && fallback.offsets == cpu.offsets &&
+            fallback.replies == cpu.replies,
+        "end reply auto backend safely falls back in a CPU-only build");
+  CheckThrows(
+      [&] {
+        const auto ignored =
+            cudaee::EvaluateHtEndReplies(graph, tasks, cudaee::PathCompatibilityBackend::kCuda);
+        static_cast<void>(ignored);
+      },
+      "explicit CUDA end reply batch remains unavailable in a CPU-only build");
+#endif
+  CheckThrows(
+      [&] {
+        const auto ignored =
+            cudaee::EvaluateHtEndReplies(graph, {{2, 2}}, cudaee::PathCompatibilityBackend::kCpu);
+        static_cast<void>(ignored);
+      },
+      "end reply batch rejects the endpoint as its own internal neighbor");
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::EvaluateHtEndReplies(leaf_graph, {{0, 2}},
+                                                          cudaee::PathCompatibilityBackend::kCpu);
+        static_cast<void>(ignored);
+      },
+      "end reply batch rejects an inactive internal edge");
+}
+
 void TestCdCandidatesCpuCuda() {
 #ifdef CUDAEE_HAS_CUDA
   std::string unavailable_reason;
@@ -714,7 +788,33 @@ void TestRecursiveEndProof() {
         "DFS and wavefront end arenas have the same size");
   Check(wavefront.proof.nodes[1].move_type == cudaee::HtMoveType::kEnd,
         "wavefront proof genuinely uses an end move");
+  Check(wavefront.end_reply_backend == "cpu" && wavefront.end_reply_cpu_verified &&
+            wavefront.end_reply_batches > 0U && wavefront.end_reply_tasks > 0U &&
+            wavefront.end_replies_generated > 0U,
+        "CPU wavefront records fully verified end reply batches");
   Check(cudaee::VerifyHtRecursiveProof(graph, wavefront.proof, &reason), reason);
+
+#ifdef CUDAEE_HAS_CUDA
+  std::string unavailable_reason;
+  if (cudaee::detail::HtWavefrontCudaAvailable(&unavailable_reason) &&
+      cudaee::detail::HtPathAppendCudaAvailable(&unavailable_reason) &&
+      cudaee::detail::HtHamiltonReplyCudaAvailable(&unavailable_reason) &&
+      cudaee::detail::HtEndReplyCudaAvailable(&unavailable_reason)) {
+    const cudaee::HtWavefrontResult cuda_wavefront = cudaee::ProveEdgeByWavefrontHt(
+        graph, {1, 2},
+        {.search_options = options,
+         .propagation_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .path_append_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCuda});
+    Check(cuda_wavefront.status == cudaee::HtSearchStatus::kProven, cuda_wavefront.proof.reason);
+    Check(cuda_wavefront.end_reply_backend == "cuda" &&
+              cuda_wavefront.end_reply_selected_device >= 0 &&
+              cuda_wavefront.end_reply_cpu_verified && cuda_wavefront.end_reply_batches > 0U &&
+              cuda_wavefront.end_reply_tasks > 0U,
+          "CUDA wavefront end reply count/write is fully CPU verified");
+    Check(cudaee::VerifyHtRecursiveProof(graph, cuda_wavefront.proof, &reason), reason);
+  }
+#endif
 
   cudaee::HtRecursiveOptions no_depth = options;
   no_depth.max_depth = 0;
@@ -852,6 +952,7 @@ int main() {
   try {
     TestHamiltonRepliesAgainstReferenceFormula();
     TestHamiltonReplyBatch();
+    TestEndReplyBatch();
     TestCdCandidatesCpuCuda();
     TestDfsWavefrontRandomDifferential();
     TestVacuousAndProofAndTamperRejection();

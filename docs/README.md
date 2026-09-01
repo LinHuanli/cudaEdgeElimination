@@ -17,5 +17,6 @@
 13. [Hamilton–Tutte GPU wavefront](research/09_Hamilton_Tutte_GPU_Wavefront.md)：BFS 工作图、CUDA continuation counters、CPU 全量差分与资源边界。
 14. [Hamilton–Tutte GPU path append](research/10_Hamilton_Tutte_GPU_Path_Append.md)：point/end 批量冲突标记、规范子状态与 CPU 差分契约。
 15. [Hamilton–Tutte GPU Hamilton replies](research/11_Hamilton_Tutte_GPU_Hamilton_Replies.md)：多中心邻边对 count/write、确定性 CSR 输出与 CPU 完整枚举复核。
+16. [Hamilton–Tutte GPU end replies](research/12_Hamilton_Tutte_GPU_End_Replies.md)：端点活动边 count/write、零长度区间与 wavefront 集成契约。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。
