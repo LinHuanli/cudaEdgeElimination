@@ -654,6 +654,108 @@ void TestRecursivePointProof() {
         "wavefront proof genuinely uses point moves");
   Check(cudaee::VerifyHtRecursiveProof(graph, wavefront.proof, &reason), reason);
 
+  const std::vector<std::int32_t> canonical_targets =
+      cudaee::SelectHtTargetEdgeIds(graph, cudaee::HtTargetOrder::kCanonical);
+  const std::vector<std::int32_t> weighted_targets =
+      cudaee::SelectHtTargetEdgeIds(graph, cudaee::HtTargetOrder::kWeightDescending);
+  Check(canonical_targets.size() == graph.edges.size() &&
+            weighted_targets.size() == graph.edges.size(),
+        "HT scan selects every active degree-safe target");
+  for (std::size_t index = 1U; index < canonical_targets.size(); ++index) {
+    const cudaee::Edge& previous =
+        graph.edges[static_cast<std::size_t>(canonical_targets[index - 1U])];
+    const cudaee::Edge& current = graph.edges[static_cast<std::size_t>(canonical_targets[index])];
+    Check(std::pair{previous.u, previous.v} < std::pair{current.u, current.v},
+          "HT canonical target order follows endpoints");
+  }
+  for (std::size_t index = 1U; index < weighted_targets.size(); ++index) {
+    const cudaee::Edge& previous =
+        graph.edges[static_cast<std::size_t>(weighted_targets[index - 1U])];
+    const cudaee::Edge& current = graph.edges[static_cast<std::size_t>(weighted_targets[index])];
+    Check(previous.weight > current.weight ||
+              (previous.weight == current.weight &&
+               std::pair{previous.u, previous.v} < std::pair{current.u, current.v}),
+          "HT weighted target order has canonical tie-breaks");
+  }
+
+  const auto selected_target = std::find_if(
+      weighted_targets.begin(), weighted_targets.end(), [&](const std::int32_t edge_id) {
+        const cudaee::Edge& edge = graph.edges[static_cast<std::size_t>(edge_id)];
+        return edge.u == 2 && edge.v == 4;
+      });
+  Check(selected_target != weighted_targets.end(), "HT scan contains pinned target");
+  cudaee::HtScanOptions scan_options;
+  scan_options.wavefront_options = {.search_options = options,
+                                    .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
+                                    .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+                                    .hamilton_reply_backend =
+                                        cudaee::PathCompatibilityBackend::kCpu};
+  scan_options.target_offset =
+      static_cast<std::uint64_t>(std::distance(weighted_targets.begin(), selected_target));
+  scan_options.max_targets = 1U;
+  scan_options.target_order = cudaee::HtTargetOrder::kWeightDescending;
+  cudaee::GraphSnapshot scanned_graph = graph;
+  const cudaee::HtScanResult scan = cudaee::RunHtScanEpoch(&scanned_graph, scan_options);
+  Check(scan.eligible_targets == graph.edges.size() && scan.attempts.size() == 1U &&
+            scan.proven_targets == 1U && scan.unresolved_targets == 0U &&
+            scan.attempts.front().target_edge == cudaee::NodeEdge{2, 4} &&
+            scan.attempts.front().status == cudaee::HtSearchStatus::kProven &&
+            scan.attempts.front().propagation_backend == "cpu" &&
+            scan.attempts.front().propagation_cpu_verified &&
+            scan.attempts.front().leaf_cpu_verified && scan.states_expanded > 0U &&
+            scan.moves_generated > 0U && scan.search_ms >= 0.0,
+        "HT scan deterministically searches the requested bounded slice");
+  Check(scan.elimination.backend == "ht-wavefront-scan-cpu-verified" &&
+            scan.elimination.proof.size() == 1U && scan.elimination.ht_proofs.size() == 1U &&
+            !scanned_graph.HasActiveEdge(2, 4),
+        "HT scan atomically commits its independently verified proof batch");
+  cudaee::GraphSnapshot scan_replay_graph = graph;
+  const cudaee::EliminationResult scan_replay =
+      cudaee::ReplayProof(&scan_replay_graph, scan.elimination);
+  Check(scan_replay.final_hash == scan.elimination.final_hash &&
+            scan_replay_graph.ContentHash() == scanned_graph.ContentHash(),
+        "HT scan outer V2 proof independently replays");
+
+  cudaee::HtScanOptions invalid_scan_options = scan_options;
+  invalid_scan_options.max_targets = 0U;
+  cudaee::GraphSnapshot rejected_scan_graph = graph;
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::RunHtScanEpoch(&rejected_scan_graph, invalid_scan_options);
+        static_cast<void>(ignored);
+      },
+      "HT scan rejects an unbounded zero target budget");
+  Check(rejected_scan_graph.ContentHash() == graph.ContentHash(),
+        "invalid HT scan options leave the graph unchanged");
+
+  cudaee::HtScanOptions completed_scan_options = scan_options;
+  completed_scan_options.target_offset = weighted_targets.size();
+  cudaee::GraphSnapshot completed_scan_graph = graph;
+  const cudaee::HtScanResult completed_scan =
+      cudaee::RunHtScanEpoch(&completed_scan_graph, completed_scan_options);
+  Check(completed_scan.attempts.empty() && completed_scan.proven_targets == 0U &&
+            completed_scan.elimination.proof.empty() &&
+            completed_scan.elimination.final_hash == graph.ContentHash() &&
+            completed_scan_graph.ContentHash() == graph.ContentHash(),
+        "HT scan accepts the exact end offset as an empty target slice");
+  cudaee::GraphSnapshot completed_replay_graph = graph;
+  const cudaee::EliminationResult completed_replay =
+      cudaee::ReplayProof(&completed_replay_graph, completed_scan.elimination);
+  Check(completed_replay.final_hash == graph.ContentHash(),
+        "empty end slice still produces a replayable proof container");
+
+  cudaee::HtScanOptions past_end_options = completed_scan_options;
+  ++past_end_options.target_offset;
+  cudaee::GraphSnapshot past_end_graph = graph;
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::RunHtScanEpoch(&past_end_graph, past_end_options);
+        static_cast<void>(ignored);
+      },
+      "HT scan rejects a checkpoint past the deterministic target list");
+  Check(past_end_graph.ContentHash() == graph.ContentHash(),
+        "past-end HT scan leaves the graph unchanged");
+
   const cudaee::HtWavefrontResult single_state_batches = cudaee::ProveEdgeByWavefrontHt(
       graph, {2, 4},
       {.search_options = options,
@@ -901,6 +1003,26 @@ void TestRecursivePointProof() {
               cuda_wavefront.hamilton_reply_centers > 0U,
           "CUDA wavefront Hamilton reply count/write is fully CPU verified");
     Check(cudaee::VerifyHtRecursiveProof(graph, cuda_wavefront.proof, &reason), reason);
+
+    cudaee::HtScanOptions cuda_scan_options = scan_options;
+    cuda_scan_options.wavefront_options = {
+        .search_options = cuda_wavefront_options,
+        .propagation_backend = cudaee::PathCompatibilityBackend::kCuda,
+        .path_append_backend = cudaee::PathCompatibilityBackend::kCuda,
+        .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCuda};
+    cudaee::GraphSnapshot cuda_scanned_graph = graph;
+    const cudaee::HtScanResult cuda_scan =
+        cudaee::RunHtScanEpoch(&cuda_scanned_graph, cuda_scan_options);
+    Check(cuda_scan.proven_targets == 1U && cuda_scan.elimination.proof.size() == 1U &&
+              cuda_scan.elimination.ht_proofs.size() == 1U &&
+              cuda_scan.attempts.front().propagation_backend == "cuda" &&
+              cuda_scan.attempts.front().selected_device >= 0 &&
+              cuda_scan.attempts.front().propagation_cpu_verified &&
+              cuda_scan.attempts.front().leaf_cpu_verified &&
+              cuda_scanned_graph.ContentHash() == scanned_graph.ContentHash() &&
+              cudaee::SerializeHtRecursiveProof(cuda_scan.elimination.ht_proofs.front()) ==
+                  cudaee::SerializeHtRecursiveProof(scan.elimination.ht_proofs.front()),
+          "CUDA HT scan keeps CPU target order, proof bytes and committed graph");
   }
 #endif
 }

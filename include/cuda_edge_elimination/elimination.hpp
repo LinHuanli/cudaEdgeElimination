@@ -58,6 +58,66 @@ struct EliminationResult {
   std::vector<EpochMetrics> epochs;
 };
 
+enum class HtTargetOrder : std::uint8_t {
+  kCanonical,
+  kWeightDescending,
+};
+
+struct HtScanOptions {
+  HtWavefrontOptions wavefront_options{};
+  // offset 在筛掉非活动边和度数门禁后、完成确定性排序的目标序列上解释。
+  std::uint64_t target_offset{};
+  // 全图搜索必须显式有界；0 非法。
+  std::uint64_t max_targets{64U};
+  HtTargetOrder target_order{HtTargetOrder::kWeightDescending};
+};
+
+struct HtScanAttempt {
+  std::int32_t edge_id{-1};
+  NodeEdge target_edge;
+  HtSearchStatus status{HtSearchStatus::kInvalid};
+  std::uint64_t states_expanded{};
+  std::uint64_t replies_expanded{};
+  std::uint64_t leaf_calls{};
+  std::uint64_t moves_generated{};
+  std::uint64_t peak_frontier{};
+  std::string propagation_backend{"none"};
+  int selected_device{-1};
+  std::uint32_t propagation_blocks{};
+  bool propagation_cooperative{false};
+  bool propagation_cpu_verified{false};
+  std::string leaf_cost_backend{"none"};
+  int leaf_cost_selected_device{-1};
+  bool leaf_cpu_verified{false};
+  std::uint64_t leaf_cost_cells{};
+  std::uint64_t leaf_cuda_cost_batches{};
+  std::uint64_t leaf_cpu_long_tail_cells{};
+  std::uint64_t peak_leaf_device_cache_bytes{};
+  std::uint64_t path_append_tasks{};
+  std::uint64_t hamilton_replies_generated{};
+  std::uint64_t end_replies_generated{};
+  double search_ms{};
+  std::string reason;
+};
+
+struct HtScanResult {
+  EliminationResult elimination;
+  std::uint64_t eligible_targets{};
+  std::uint64_t target_offset{};
+  std::uint64_t proven_targets{};
+  std::uint64_t unresolved_targets{};
+  std::uint64_t states_expanded{};
+  std::uint64_t replies_expanded{};
+  std::uint64_t leaf_calls{};
+  std::uint64_t moves_generated{};
+  std::uint64_t leaf_cost_cells{};
+  std::uint64_t leaf_cuda_cost_batches{};
+  std::uint64_t leaf_cpu_long_tail_cells{};
+  std::uint64_t peak_leaf_device_cache_bytes{};
+  double search_ms{};
+  std::vector<HtScanAttempt> attempts;
+};
+
 [[nodiscard]] std::vector<Candidate> FindJvCandidatesCpu(const GraphSnapshot& graph);
 [[nodiscard]] bool VerifyJvCandidate(const GraphSnapshot& graph, const Candidate& candidate,
                                      std::string* reason);
@@ -70,6 +130,13 @@ struct EliminationResult {
 void ClearJvCudaCache();
 
 EliminationResult RunJvElimination(GraphSnapshot* graph, Backend backend, std::uint32_t max_rounds);
+
+// 返回稳定 edge id；排序不依赖输入边数组的原始排列。
+[[nodiscard]] std::vector<std::int32_t> SelectHtTargetEdgeIds(const GraphSnapshot& graph,
+                                                              HtTargetOrder order);
+
+// 在一个不可变快照上顺序搜索有界目标，最后通过 CommitHtProofEpoch 原子发布一次。
+[[nodiscard]] HtScanResult RunHtScanEpoch(GraphSnapshot* graph, const HtScanOptions& options);
 
 // 在同一不可变快照上整批复核 HT sidecars，再按规范边序执行一次原子 epoch 提交。
 EliminationResult CommitHtProofEpoch(GraphSnapshot* graph,

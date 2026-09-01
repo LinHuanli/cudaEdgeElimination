@@ -29,30 +29,35 @@ namespace {
 using Arguments = std::multimap<std::string, std::string>;
 
 void PrintHelp() {
-  std::cout << "cudaee：可验证 TSP GPU 边消元研究工具\n\n"
-            << "命令：\n"
-            << "  gpu-eliminate --tsp FILE --edges FILE --output FILE --proof FILE\n"
-            << "                [--backend auto|cpu|cuda] [--max-rounds N] [--manifest FILE]\n"
-            << "  verify        --tsp FILE --edges FILE --proof FILE\n"
-            << "  tour-check    --tsp FILE --edges FILE --tour FILE --expected-cost COST\n"
-            << "  ht-commit     --tsp FILE --edges FILE --output FILE --proof FILE\n"
-            << "                --ht-proof FILE [--ht-proof FILE ...] [--manifest FILE]\n"
-            << "  lp-solve      --input FILE --output FILE [--cuopt-library FILE]\n"
-            << "  lp-example    --output FILE\n"
-            << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
-            << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
-            << "                [--scheduler dfs|wavefront] [--backend auto|cpu|cuda]\n"
-            << "                [--reply-backend auto|cpu|cuda]\n"
-            << "                [--reply-frontier-batch-states N]\n"
-            << "                [--leaf-frontier-batch-states N]\n"
-            << "                [--cost-batch-size N] [--cuda-min-cost-cells N]\n"
-            << "                [--path-append-backend auto|cpu|cuda]\n"
-            << "                [--propagation-backend auto|cpu|cuda] [--propagation-blocks N]\n"
-            << "                [--max-depth N] [HT budgets]\n"
-            << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
-            << "  pipeline      与 gpu-eliminate 相同，可附加 --lp-epoch FILE\n"
-            << "                --lp-solution FILE [--cuopt-library FILE]\n\n"
-            << "所有输出必须位于源码仓库内；不支持或验证失败时不会删除边。\n";
+  std::cout
+      << "cudaee：可验证 TSP GPU 边消元研究工具\n\n"
+      << "命令：\n"
+      << "  gpu-eliminate --tsp FILE --edges FILE --output FILE --proof FILE\n"
+      << "                [--backend auto|cpu|cuda] [--max-rounds N] [--manifest FILE]\n"
+      << "  verify        --tsp FILE --edges FILE --proof FILE\n"
+      << "  tour-check    --tsp FILE --edges FILE --tour FILE --expected-cost COST\n"
+      << "  ht-commit     --tsp FILE --edges FILE --output FILE --proof FILE\n"
+      << "                --ht-proof FILE [--ht-proof FILE ...] [--manifest FILE]\n"
+      << "  lp-solve      --input FILE --output FILE [--cuopt-library FILE]\n"
+      << "  lp-example    --output FILE\n"
+      << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
+      << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
+      << "                [--scheduler dfs|wavefront] [--backend auto|cpu|cuda]\n"
+      << "                [--reply-backend auto|cpu|cuda]\n"
+      << "                [--reply-frontier-batch-states N]\n"
+      << "                [--leaf-frontier-batch-states N]\n"
+      << "                [--cost-batch-size N] [--cuda-min-cost-cells N]\n"
+      << "                [--path-append-backend auto|cpu|cuda]\n"
+      << "                [--propagation-backend auto|cpu|cuda] [--propagation-blocks N]\n"
+      << "                [--max-depth N] [HT budgets]\n"
+      << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
+      << "  ht-scan       --tsp FILE --edges FILE --output FILE --proof FILE --report FILE\n"
+      << "                --max-targets N [--target-offset N]\n"
+      << "                [--target-order weight-desc|canonical]\n"
+      << "                [--protected-tour FILE --expected-cost COST] [HT wavefront options]\n"
+      << "  pipeline      与 gpu-eliminate 相同，可附加 --lp-epoch FILE\n"
+      << "                --lp-solution FILE [--cuopt-library FILE]\n\n"
+      << "所有输出必须位于源码仓库内；不支持或验证失败时不会删除边。\n";
 }
 
 Arguments ParseArguments(const int argc, char** argv, const int first) {
@@ -397,13 +402,7 @@ void PathTableCommand(const Arguments& arguments) {
             << " cpu_verified=1\n";
 }
 
-bool HtProveCommand(const Arguments& arguments) {
-  const std::filesystem::path proof_path = CheckedOutputPath(Required(arguments, "proof"));
-  const cudaee::GraphSnapshot graph =
-      cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
-  const cudaee::NodeEdge target{RequiredInteger<std::int32_t>(arguments, "u"),
-                                RequiredInteger<std::int32_t>(arguments, "v")};
-
+cudaee::HtRecursiveOptions ParseHtRecursiveOptions(const Arguments& arguments) {
   cudaee::HtRecursiveOptions options;
   cudaee::HtShallowOptions& root = options.root_options;
   root.max_neighborhood =
@@ -449,6 +448,59 @@ bool HtProveCommand(const Arguments& arguments) {
       OptionalInteger<std::uint32_t>(arguments, "max-end-candidates", options.max_end_candidates);
   options.enable_point_moves = ParseBooleanOption(arguments, "enable-point", true);
   options.enable_end_moves = ParseBooleanOption(arguments, "enable-end", true);
+  return options;
+}
+
+cudaee::HtWavefrontOptions
+ParseHtWavefrontOptions(const Arguments& arguments,
+                        const cudaee::HtRecursiveOptions& search_options) {
+  return {.search_options = search_options,
+          .reply_frontier_batch_states =
+              OptionalInteger<std::uint32_t>(arguments, "reply-frontier-batch-states", 256U),
+          .leaf_frontier_batch_states =
+              OptionalInteger<std::uint32_t>(arguments, "leaf-frontier-batch-states", 256U),
+          .propagation_backend =
+              ParsePathCompatibilityBackend(Optional(arguments, "propagation-backend", "auto")),
+          .propagation_blocks = OptionalInteger<std::uint32_t>(arguments, "propagation-blocks", 0U),
+          .path_append_backend =
+              ParsePathCompatibilityBackend(Optional(arguments, "path-append-backend", "auto")),
+          .hamilton_reply_backend =
+              ParsePathCompatibilityBackend(Optional(arguments, "reply-backend", "auto"))};
+}
+
+cudaee::HtTargetOrder ParseHtTargetOrder(const std::string& value) {
+  if (value == "canonical") {
+    return cudaee::HtTargetOrder::kCanonical;
+  }
+  if (value == "weight-desc") {
+    return cudaee::HtTargetOrder::kWeightDescending;
+  }
+  throw std::invalid_argument("--target-order 必须是 weight-desc 或 canonical");
+}
+
+const char* HtTargetOrderName(const cudaee::HtTargetOrder order) {
+  return order == cudaee::HtTargetOrder::kCanonical ? "canonical" : "weight-desc";
+}
+
+const char* HtSearchStatusName(const cudaee::HtSearchStatus status) {
+  switch (status) {
+  case cudaee::HtSearchStatus::kProven:
+    return "PROVEN";
+  case cudaee::HtSearchStatus::kUnresolved:
+    return "UNRESOLVED";
+  case cudaee::HtSearchStatus::kInvalid:
+    return "INVALID";
+  }
+  return "INVALID";
+}
+
+bool HtProveCommand(const Arguments& arguments) {
+  const std::filesystem::path proof_path = CheckedOutputPath(Required(arguments, "proof"));
+  const cudaee::GraphSnapshot graph =
+      cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
+  const cudaee::NodeEdge target{RequiredInteger<std::int32_t>(arguments, "u"),
+                                RequiredInteger<std::int32_t>(arguments, "v")};
+  const cudaee::HtRecursiveOptions options = ParseHtRecursiveOptions(arguments);
 
   const std::string scheduler = Optional(arguments, "scheduler", "dfs");
   cudaee::HtSearchStatus search_status = cudaee::HtSearchStatus::kInvalid;
@@ -505,20 +557,8 @@ bool HtProveCommand(const Arguments& arguments) {
     search_status = result.status;
     proof = std::move(result.proof);
   } else if (scheduler == "wavefront") {
-    cudaee::HtWavefrontResult result = cudaee::ProveEdgeByWavefrontHt(
-        graph, target,
-        {.search_options = options,
-         .reply_frontier_batch_states =
-             OptionalInteger<std::uint32_t>(arguments, "reply-frontier-batch-states", 256U),
-         .leaf_frontier_batch_states =
-             OptionalInteger<std::uint32_t>(arguments, "leaf-frontier-batch-states", 256U),
-         .propagation_backend =
-             ParsePathCompatibilityBackend(Optional(arguments, "propagation-backend", "auto")),
-         .propagation_blocks = OptionalInteger<std::uint32_t>(arguments, "propagation-blocks", 0U),
-         .path_append_backend =
-             ParsePathCompatibilityBackend(Optional(arguments, "path-append-backend", "auto")),
-         .hamilton_reply_backend =
-             ParsePathCompatibilityBackend(Optional(arguments, "reply-backend", "auto"))});
+    cudaee::HtWavefrontResult result =
+        cudaee::ProveEdgeByWavefrontHt(graph, target, ParseHtWavefrontOptions(arguments, options));
     search_status = result.status;
     proof = std::move(result.proof);
     propagation_backend = std::move(result.propagation_backend);
@@ -573,10 +613,7 @@ bool HtProveCommand(const Arguments& arguments) {
   }
 
   cudaee::WriteHtRecursiveProof(proof_path, proof);
-  const char* const status = search_status == cudaee::HtSearchStatus::kProven       ? "PROVEN"
-                             : search_status == cudaee::HtSearchStatus::kUnresolved ? "UNRESOLVED"
-                                                                                    : "INVALID";
-  std::cout << "status=" << status << " scheduler=" << scheduler
+  std::cout << "status=" << HtSearchStatusName(search_status) << " scheduler=" << scheduler
             << " target=" << proof.target_edge.u << '-' << proof.target_edge.v
             << " nodes=" << proof.nodes.size() << " states=" << proof.states_expanded
             << " replies=" << proof.replies_expanded << " leaf_calls=" << proof.leaf_calls;
@@ -635,6 +672,156 @@ bool HtProveCommand(const Arguments& arguments) {
   return search_status == cudaee::HtSearchStatus::kProven;
 }
 
+std::string SingleLine(std::string value) {
+  std::replace_if(
+      value.begin(), value.end(),
+      [](const char character) {
+        return character == '\n' || character == '\r' || character == '\t';
+      },
+      ' ');
+  return value;
+}
+
+void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanResult& scan,
+                       const cudaee::HtScanOptions& options,
+                       const cudaee::ProtectedTourCheck* const protected_tour) {
+  std::ofstream output(path);
+  if (!output) {
+    throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
+  }
+  output << "CUDAEE_HT_SCAN_REPORT_V1\n";
+  output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
+  output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
+  output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
+  output << "eligible_targets " << scan.eligible_targets << '\n';
+  output << "target_offset " << scan.target_offset << '\n';
+  output << "target_end_offset " << scan.target_offset + scan.attempts.size() << '\n';
+  output << "max_targets " << options.max_targets << '\n';
+  output << "attempted_targets " << scan.attempts.size() << '\n';
+  output << "proven_targets " << scan.proven_targets << '\n';
+  output << "unresolved_targets " << scan.unresolved_targets << '\n';
+  output << "committed_targets " << scan.elimination.proof.size() << '\n';
+  output << "states_expanded " << scan.states_expanded << '\n';
+  output << "replies_expanded " << scan.replies_expanded << '\n';
+  output << "leaf_calls " << scan.leaf_calls << '\n';
+  output << "moves_generated " << scan.moves_generated << '\n';
+  output << "leaf_cost_cells " << scan.leaf_cost_cells << '\n';
+  output << "leaf_cuda_cost_batches " << scan.leaf_cuda_cost_batches << '\n';
+  output << "leaf_cpu_long_tail_cells " << scan.leaf_cpu_long_tail_cells << '\n';
+  output << "peak_leaf_device_cache_bytes " << scan.peak_leaf_device_cache_bytes << '\n';
+  output << "protected_tour_checked " << (protected_tour != nullptr ? 1 : 0) << '\n';
+  if (protected_tour != nullptr) {
+    output << "protected_tour_cost " << protected_tour->cost << '\n';
+    output << "protected_tour_hash " << cudaee::HexHash(protected_tour->tour_hash) << '\n';
+  }
+  output << "search_ms " << std::fixed << std::setprecision(6) << scan.search_ms << '\n';
+  output << "attempt_fields index edge_id u v status states replies leaf_calls moves "
+            "peak_frontier propagation_backend device blocks cooperative propagation_verified "
+            "leaf_backend leaf_device leaf_verified leaf_cells leaf_cuda_batches "
+            "leaf_cpu_long_tail_cells peak_leaf_cache_bytes path_append_tasks hamilton_replies "
+            "end_replies search_ms reason\n";
+  for (std::size_t index = 0U; index < scan.attempts.size(); ++index) {
+    const cudaee::HtScanAttempt& attempt = scan.attempts[index];
+    output << "attempt " << index << ' ' << attempt.edge_id << ' ' << attempt.target_edge.u << ' '
+           << attempt.target_edge.v << ' ' << HtSearchStatusName(attempt.status) << ' '
+           << attempt.states_expanded << ' ' << attempt.replies_expanded << ' '
+           << attempt.leaf_calls << ' ' << attempt.moves_generated << ' ' << attempt.peak_frontier
+           << ' ' << attempt.propagation_backend << ' ' << attempt.selected_device << ' '
+           << attempt.propagation_blocks << ' ' << (attempt.propagation_cooperative ? 1 : 0) << ' '
+           << (attempt.propagation_cpu_verified ? 1 : 0) << ' ' << attempt.leaf_cost_backend << ' '
+           << attempt.leaf_cost_selected_device << ' ' << (attempt.leaf_cpu_verified ? 1 : 0) << ' '
+           << attempt.leaf_cost_cells << ' ' << attempt.leaf_cuda_cost_batches << ' '
+           << attempt.leaf_cpu_long_tail_cells << ' ' << attempt.peak_leaf_device_cache_bytes << ' '
+           << attempt.path_append_tasks << ' ' << attempt.hamilton_replies_generated << ' '
+           << attempt.end_replies_generated << ' ' << attempt.search_ms << ' '
+           << std::quoted(SingleLine(attempt.reason)) << '\n';
+  }
+  output << "END\n";
+  if (!output) {
+    throw std::runtime_error("写入 HT scan 报告失败: " + path.string());
+  }
+}
+
+void HtScanCommand(const Arguments& arguments) {
+  const std::filesystem::path output_path = CheckedOutputPath(Required(arguments, "output"));
+  const std::filesystem::path proof_path = CheckedOutputPath(Required(arguments, "proof"));
+  const std::filesystem::path report_path = CheckedOutputPath(Required(arguments, "report"));
+  cudaee::GraphSnapshot graph =
+      cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
+
+  cudaee::HtScanOptions options;
+  options.wavefront_options =
+      ParseHtWavefrontOptions(arguments, ParseHtRecursiveOptions(arguments));
+  options.target_offset = OptionalInteger<std::uint64_t>(arguments, "target-offset", 0U);
+  options.max_targets = RequiredInteger<std::uint64_t>(arguments, "max-targets");
+  options.target_order = ParseHtTargetOrder(Optional(arguments, "target-order", "weight-desc"));
+  if (arguments.contains("scheduler") && Optional(arguments, "scheduler") != "wavefront") {
+    throw std::invalid_argument("ht-scan 只支持 wavefront scheduler");
+  }
+
+  const std::string protected_tour_path = Optional(arguments, "protected-tour");
+  const bool has_protected_tour = !protected_tour_path.empty();
+  const bool has_expected_cost = arguments.contains("expected-cost");
+  if (has_protected_tour != has_expected_cost) {
+    throw std::invalid_argument("ht-scan 的 --protected-tour 与 --expected-cost 必须同时提供");
+  }
+  std::vector<std::int32_t> protected_tour_nodes;
+  cudaee::ProtectedTourCheck protected_tour_check;
+  const cudaee::ProtectedTourCheck* protected_tour_report = nullptr;
+  std::int64_t protected_tour_cost = -1;
+  if (has_protected_tour) {
+    protected_tour_cost = RequiredInteger<std::int64_t>(arguments, "expected-cost");
+    if (protected_tour_cost < 0) {
+      throw std::invalid_argument("ht-scan 的 --expected-cost 不得为负数");
+    }
+    protected_tour_nodes = cudaee::ReadTsplibTour(protected_tour_path, graph.dimension);
+    protected_tour_check = cudaee::CheckProtectedTour(graph, protected_tour_nodes);
+    if (protected_tour_check.cost != protected_tour_cost ||
+        protected_tour_check.missing_edges != 0U) {
+      throw std::runtime_error("HT scan 初始图未通过受保护 tour 门禁");
+    }
+    protected_tour_report = &protected_tour_check;
+  }
+
+  const cudaee::HtScanResult scan = cudaee::RunHtScanEpoch(&graph, options);
+  if (!protected_tour_nodes.empty()) {
+    const cudaee::ProtectedTourCheck final_check =
+        cudaee::CheckProtectedTour(graph, protected_tour_nodes);
+    if (final_check.cost != protected_tour_cost || final_check.missing_edges != 0U ||
+        final_check.tour_hash != protected_tour_check.tour_hash) {
+      throw std::runtime_error("HT scan 最终图未通过受保护 tour 门禁；未写出结果");
+    }
+  }
+  graph.WriteActiveEdges(output_path);
+  cudaee::WriteProof(proof_path, scan.elimination);
+  WriteHtScanReport(report_path, scan, options, protected_tour_report);
+  const std::string manifest = Optional(arguments, "manifest");
+  if (!manifest.empty()) {
+    WriteManifest(CheckedOutputPath(manifest), graph, scan.elimination, arguments);
+  }
+
+  for (std::size_t index = 0U; index < scan.attempts.size(); ++index) {
+    const cudaee::HtScanAttempt& attempt = scan.attempts[index];
+    std::cout << "target_index=" << scan.target_offset + index << " edge_id=" << attempt.edge_id
+              << " target=" << attempt.target_edge.u << '-' << attempt.target_edge.v
+              << " status=" << HtSearchStatusName(attempt.status)
+              << " states=" << attempt.states_expanded << " replies=" << attempt.replies_expanded
+              << " leaf_calls=" << attempt.leaf_calls
+              << " propagation_backend=" << attempt.propagation_backend
+              << " selected_device=" << attempt.selected_device
+              << " leaf_cost_backend=" << attempt.leaf_cost_backend
+              << " leaf_cost_cells=" << attempt.leaf_cost_cells << " search_ms=" << std::fixed
+              << std::setprecision(3) << attempt.search_ms
+              << " reason=" << std::quoted(SingleLine(attempt.reason)) << '\n';
+  }
+  std::cout << "scan_status=OK target_order=" << HtTargetOrderName(options.target_order)
+            << " eligible=" << scan.eligible_targets << " attempted=" << scan.attempts.size()
+            << " proven=" << scan.proven_targets << " unresolved=" << scan.unresolved_targets
+            << " committed=" << scan.elimination.proof.size() << " search_ms=" << scan.search_ms
+            << " protected_tour_checked=" << (protected_tour_report != nullptr ? 1 : 0) << '\n';
+  PrintEliminationSummary(graph, scan.elimination);
+}
+
 void HtVerifyCommand(const Arguments& arguments) {
   const cudaee::GraphSnapshot graph =
       cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
@@ -675,6 +862,8 @@ int main(const int argc, char** argv) {
       if (!HtProveCommand(arguments)) {
         return 3;
       }
+    } else if (command == "ht-scan") {
+      HtScanCommand(arguments);
     } else if (command == "ht-verify") {
       HtVerifyCommand(arguments);
     } else if (command == "pipeline") {

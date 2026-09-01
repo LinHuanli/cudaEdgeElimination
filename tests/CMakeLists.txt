@@ -174,6 +174,51 @@ set_tests_properties(integration.ht_epoch_verify PROPERTIES
   DEPENDS integration.ht_epoch_commit
   LABELS "integration;hamilton-tutte;epoch")
 
+set(HT_SCAN_EDGES "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.scan.edg")
+set(HT_SCAN_PROOF "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.scan.proof")
+set(HT_SCAN_REPORT "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.scan.report")
+add_test(
+  NAME integration.ht_scan
+  COMMAND cudaee ht-scan
+    --tsp "${HT_RECURSIVE_TSP}"
+    --edges "${HT_RECURSIVE_EDGES}"
+    --output "${HT_SCAN_EDGES}"
+    --proof "${HT_SCAN_PROOF}"
+    --report "${HT_SCAN_REPORT}"
+    --protected-tour "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tour"
+    --expected-cost 395
+    --max-targets 1
+    --target-offset 14
+    --target-order canonical
+    --backend cpu
+    --reply-backend cpu
+    --path-append-backend cpu
+    --propagation-backend cpu
+    --max-neighborhood 0
+    --max-cd-candidates 8
+    --max-candidate-degree 0
+    --max-root-replies 1000
+    --max-k 3
+    --max-deletion-sets 1
+    --max-depth 1
+    --max-states 20000
+    --max-total-replies 200000
+    --max-replies-per-move 1000
+    --max-point-candidates 5
+    --max-end-candidates 5)
+set_tests_properties(integration.ht_scan PROPERTIES
+  LABELS "integration;hamilton-tutte;scan")
+
+add_test(
+  NAME integration.ht_scan_verify
+  COMMAND cudaee verify
+    --tsp "${HT_RECURSIVE_TSP}"
+    --edges "${HT_RECURSIVE_EDGES}"
+    --proof "${HT_SCAN_PROOF}")
+set_tests_properties(integration.ht_scan_verify PROPERTIES
+  DEPENDS integration.ht_scan
+  LABELS "integration;hamilton-tutte;scan")
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
   add_test(
