@@ -5,6 +5,17 @@ target_compile_options(cudaee_unit PRIVATE -Wall -Wextra -Wconversion -Wshadow -
 
 add_test(NAME unit.core COMMAND cudaee_unit)
 
+add_executable(cudaee_hamilton_tutte_unit unit/test_hamilton_tutte.cpp)
+target_link_libraries(cudaee_hamilton_tutte_unit PRIVATE cudaee_core)
+target_compile_options(cudaee_hamilton_tutte_unit PRIVATE
+  -Wall -Wextra -Wconversion -Wshadow -Wformat=2)
+add_test(NAME unit.hamilton_tutte COMMAND cudaee_hamilton_tutte_unit)
+if(CUDAEE_ENABLE_CUDA)
+  set_tests_properties(unit.hamilton_tutte PROPERTIES LABELS "correctness;hamilton-tutte;gpu")
+else()
+  set_tests_properties(unit.hamilton_tutte PROPERTIES LABELS "correctness;hamilton-tutte")
+endif()
+
 add_library(elimtsp_swap_oracle OBJECT "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/src/swap.c")
 target_include_directories(elimtsp_swap_oracle PRIVATE
   "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/src")

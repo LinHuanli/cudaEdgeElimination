@@ -35,7 +35,9 @@ M4.2b 批量 CUDA k-opt cost 候选器已完成：GPU 输出完整 template 成�
 
 M4.3a 有界困难叶 CPU fallback 已完成：收缩 forced outside matching 后用 Held–Karp 子集 DP 精确求解局部巡回，找到的任意阶交换由通用 verifier 重放。默认禁用，最多 18 个 block；规模或内存超限保持 `unresolved`，不会被解释为无改善。
 
-M4.3b 继续实现 HS `c,d` AND–OR 搜索和全局证书重放。只有整条证书链完成后才把 HS 候选接入 epoch commit。
+M4.3b1 浅层 HS 根证明已完成：确定性生成 `c,d` OR moves，对固定 move 完整枚举两个中心的 Hamilton 邻边对笛卡尔积，并逐叶重放；CUDA `c,d` flags 返回前与 CPU 逐项核对。
+
+M4.3b2 继续实现 extra point/end 递归 AND–OR wavefront 和全局证书重放。只有整条证书链完成后才把 HS 候选接入 epoch commit。
 
 ## M5：中大型评测与优化
 
@@ -43,4 +45,4 @@ M4.3b 继续实现 HS `c,d` AND–OR 搜索和全局证书重放。只有整条�
 
 ## 当前完成定义
 
-当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器和 M4.3a 有界精确困难叶。M3.1 与 M4.3b 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或局部叶 proof 替代删除强度与 HS 全链路。
+当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶和 M4.3b1 浅层 HT。M3.1 与 M4.3b2 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或浅层 proof 替代删除强度与递归 HS 全链路。

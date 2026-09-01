@@ -125,9 +125,9 @@ DP 只产生候选巡回，不绕过证明边界：实现从候选巡回与原�
 
 M4 后续必须按顺序完成：
 
-1. 实现 HS `c,d` 候选与 AND–OR 状态传播；
-2. 缓存坐标/模板设备常驻数据，并用真实任务桶评估 kernel 粒度；
-3. 将 leaf proof 嵌入完整 HS 证书，从不可变 epoch 快照递归重放；
+1. 在已完成的浅层 `c,d` 根证明上实现 extra point/end 递归状态传播；
+2. 缓存坐标/模板设备常驻数据，并用多目标真实任务桶评估 kernel 粒度；
+3. 将 leaf proof 嵌入版本化完整 HS 证书，从不可变 epoch 快照递归重放；
 4. 将完整 HS 证书链接入候选阶段，继续由 epoch commit 的 CPU 门禁授权；
 5. 若 18-block 子集 DP 在真实长尾不足，再接入原 LocalElimination 1-tree B&B 作为更大规模 CPU fallback。
 
