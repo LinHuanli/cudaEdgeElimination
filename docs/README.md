@@ -37,5 +37,6 @@
 33. [M5 HT leaf 不可变组合表缓存](research/29_M5_HT_Immutable_Leaf_Tables.md)：matching/reconnect 延迟只读缓存、完整门禁与 8-target 约 29% search 降幅。
 34. [M5 HT leaf CPU completeness 画像](research/30_M5_HT_Leaf_Completeness_Profiling.md)：V5/V6 consume 细分、99% fallback 主路径与 CPU 精确矩阵快路径门禁。
 35. [M5 HT leaf CPU 精确成本矩阵认证](research/31_M5_HT_CPU_Exact_Cost_Matrix.md)：逐 cell CPU/CUDA 认证、固定数组 scorer、零通用 fallback 与 8-target 端到端收益。
+36. [M5 HT leaf CPU matrix 公平基线](research/32_M5_HT_CPU_Matrix_Baseline.md)：显式 CPU cursor、投机 block 规范计数修复、V8 四路门禁与 GPU 净收益复评。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

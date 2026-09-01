@@ -110,3 +110,5 @@ bucket fusion 只比普通 hybrid leaf 快约 `1.006×`，仍不足以更改默�
 4. 只有在公平 CPU matrix 基线下仍有收益，才继续优化 GPU 或跨目标融合。
 
 之后的主要候选是减少每次 leaf 的 path proof/cursor setup、让 CPU 认证与 CUDA 执行重叠，或在更大任务上重新测量 GPU 交叉点；任何异步化都必须保留矩阵级 CPU 差分和 fail-closed 语义。
+
+该 CPU backend 切片已由提交 `9fa301d` 完成。公平基线表明 CPU matrix 比三条 CUDA 路径都快，完整结果和新 Hamilton reply 瓶颈见 [M5 HT leaf CPU matrix 公平基线](32_M5_HT_CPU_Matrix_Baseline.md)。本节保留原门禁作为实施记录。

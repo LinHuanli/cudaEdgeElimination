@@ -28,7 +28,7 @@
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
-| M5 中大型调优 | 进行中（JV 三轮 + HT matrix fast path） | 51,309,996 cells 全部 CPU 认证；旧 fallback 为 0；HT hybrid search `2.097×` |
+| M5 中大型调优 | 进行中（JV 三轮 + HT 公平 matrix 基线） | 51,309,996 cells 四路 CPU 认证；CPU matrix search `11.015 s` 最快；Hamilton reply 成为主瓶颈 |
 
 ## 当前基准结果
 
@@ -53,6 +53,8 @@ M5 HT 不可变表缓存绑定 `589bca0`：线程安全延迟缓存复用 path-c
 M5 HT completeness 画像绑定 `ee4f3aa`：V5 report/V6 summary 显示 727,635 个 CUDA cost rows 中 726,648 个（`99.864%`）进入 CPU 全模板 fallback，51,179,094/51,309,996 cells（`99.745%`）被通用重连器重新穷举。混合 consume 中 candidate/fallback 为 `0.057/15.107 s`，fallback 占 `99.033%`。三条 CUDA leaf 路径计数、proof、图和 tour 均一致；下一步以 CPU 独立精确矩阵替换昂贵的通用无改善认证，不降低 completeness。
 
 M5 HT CPU 精确矩阵认证绑定 `48d68dc`：固定数组 scorer 对 CUDA cost matrix 的 51,309,996 cells 全部进行独立 CPU 整数认证，差异立即失败关闭；987 个严格改善模板仍由通用 CPU 路径重建完整 witness，旧 completeness fallback 降为 0。相同 8-target clean run 中，hybrid cursor consume 从 `15.255 s` 降至 `0.126 s`，leaf/search 为 `5.011/11.586 s`，相对 CPU scalar 达到 `3.571×/2.097×`；all-CUDA/fused search 分别为 `11.673/11.499 s`。四路工作签名、最终图哈希 `fe11f98414b04c0e`、proof 重放和 pcb3038 最优 tour 门禁完全一致。下一步让 CPU backend 复用相同矩阵 fast path，建立公平基线。
+
+M5 HT CPU matrix 公平基线绑定 `9fa301d`：显式 CPU leaf 进入相同增量 cursor，并修复 cost block 尾部未消费 rows 被计入 proof 的既有规范计数问题。随机 direct/auto/CPU-matrix 三路现与 CPU scalar proof 逐字节一致。8-target clean run 中 CPU matrix leaf/search 为 `4.491/11.015 s`，优于 all-CUDA `4.848/11.730 s`、hybrid `5.034/11.430 s` 和 fused `4.974/11.594 s`；四路 51,309,996 cells、727,635 consumed rows、987 个候选、最终图和 tour 均一致。同步全量 CPU 认证下 GPU 没有净 leaf 加速，下一画像转向占 CPU search `55.19%` 的 Hamilton reply。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 

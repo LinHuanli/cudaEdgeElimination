@@ -33,7 +33,7 @@ M4.3b3b2b2b2b1 将 frontier leaf batching 从单 deletion-set 扩展到任意 `m
 
 任何时刻每个游标最多保留一个 block。不同游标可以处于不同 `k`；调度器每轮最多产生 k=3/4/5 三个矩阵，不会为了对齐而跳过或重排单游标工作。
 
-当前 CPU cost backend 仍使用原 scalar 搜索，避免在未完成 proof/性能门禁前改变默认基线；这是紧接[矩阵认证快路径](31_M5_HT_CPU_Exact_Cost_Matrix.md)之后的待优化项。`auto` 的 CUDA batch 失败会整批转 CPU matrix；显式 CUDA 失败使对应游标 unresolved，之后仍允许配置的 CPU exact fallback。成功 proof 最终再次进入独立 `VerifyPathSystemKOptProof`。
+CPU cost backend 现已使用相同增量 cursor 和精确矩阵；直接单 path API 的 CPU scalar 路径保留为独立 proof oracle。block 可以投机计算尾部 rows，但 `deletion_sets_tested` 只在 row 实际进入 consumer 时增加，预算边界和首次 witness 因而与 scalar 逐字节一致。完整门禁见 [CPU matrix 公平基线](32_M5_HT_CPU_Matrix_Baseline.md)。`auto` 的 CUDA batch 失败会整批转 CPU matrix；显式 CUDA 失败使对应游标 unresolved，之后仍允许配置的 CPU exact fallback。成功 proof 最终再次进入独立 `VerifyPathSystemKOptProof`。
 
 ## 等价与回归
 
