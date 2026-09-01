@@ -1,0 +1,15 @@
+# NVIDIA packages are resolved from https://pypi.nvidia.com by tools/bootstrap.sh.
+cuda-toolkit==13.3.1
+libcuopt-cu13==26.8.0
+librmm-cu13==26.8.0
+nvidia-cublas==13.6.0.2
+nvidia-cuda-nvrtc==13.3.33
+nvidia-cuda-runtime==13.3.29
+nvidia-cudss-cu13==0.7.1.6
+nvidia-curand==10.4.3.29
+nvidia-cusolver==12.2.6.9
+nvidia-cusparse==12.8.2.51
+nvidia-nccl-cu13==2.31.2
+nvidia-nvjitlink==13.3.33
+nvidia-nvtx==13.3.29
+rapids-logger==0.2.3

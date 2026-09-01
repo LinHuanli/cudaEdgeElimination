@@ -1,0 +1,268 @@
+diff --git a/INCLUDE/lp.h b/INCLUDE/lp.h
+index 8ad6b9b..e547147 100644
+--- a/INCLUDE/lp.h
++++ b/INCLUDE/lp.h
+@@ -81,6 +81,8 @@ int
+     CClp_getweight (CClp *lp, int nrows, int *rmatbeg, int *rmatind,
+             double *rmatval, double *weight),
+     CClp_dump_lp (CClp *lp, const char *fname),
++    CClp_dump_lp_epoch (CClp *lp, const char *fname, int edge_count,
++            const int *edge_u, const int *edge_v),
+     CClp_getgoodlist (CClp *lp, int *goodlist, int *goodlen_p,
+             double *downpen, double *uppen),
+     CClp_strongbranch (CClp *lp, int *candidatelist, int ncand,
+diff --git a/LP/lpqsopt.c b/LP/lpqsopt.c
+index 060995a..0c0f366 100644
+--- a/LP/lpqsopt.c
++++ b/LP/lpqsopt.c
+@@ -293,6 +293,34 @@ struct CClp_info {
+ #define SOLVER_WARMSTART_NAME "QSO"
+ 
+ 
++/* cudaEdgeElimination 的 lp-epoch-v1 使用 FNV-1a 绑定模型和列映射。 */
++static void cudaee_hash_bytes (unsigned long long *hash, const void *data,
++        size_t size)
++{
++    const unsigned char *p = (const unsigned char *) data;
++    size_t i;
++
++    for (i = 0; i < size; i++) {
++        *hash ^= (unsigned long long) p[i];
++        *hash *= 1099511628211ULL;
++    }
++}
++
++static void cudaee_hash_int (unsigned long long *hash, int value)
++{
++    cudaee_hash_bytes (hash, (const void *) &value, sizeof (value));
++}
++
++static void cudaee_hash_double (unsigned long long *hash, double value)
++{
++    cudaee_hash_bytes (hash, (const void *) &value, sizeof (value));
++}
++
++static void cudaee_hash_char (unsigned long long *hash, char value)
++{
++    cudaee_hash_bytes (hash, (const void *) &value, sizeof (value));
++}
++
+ static void
+     init_warmstart (CClp_warmstart *w),
+     lp_message (void);
+@@ -1426,6 +1454,174 @@ CLEANUP:
+     return rval;
+ }
+ 
++int CClp_dump_lp_epoch (CClp *lp, const char *fname, int edge_count,
++        const int *edge_u, const int *edge_v)
++{
++    int rval = 0;
++    int nrows, ncols, objsense, nnz = 0;
++    int i, j, offset;
++    int *rowcnt = (int *) NULL;
++    int *rowbeg = (int *) NULL;
++    int *rowind = (int *) NULL;
++    double *rowval = (double *) NULL;
++    double *rhs = (double *) NULL;
++    char *sense = (char *) NULL;
++    double *obj = (double *) NULL;
++    double *lower = (double *) NULL;
++    double *upper = (double *) NULL;
++    FILE *out = (FILE *) NULL;
++    unsigned long long hash = 14695981039346656037ULL;
++    double objective_offset = 0.0;
++    char variable_type = 'C';
++
++    if (!lp || !lp->p || !fname || !fname[0]) {
++        fprintf (stderr, "CClp_dump_lp_epoch: invalid argument\n");
++        return 1;
++    }
++    nrows = QSget_rowcount (lp->p);
++    ncols = QSget_colcount (lp->p);
++    if (nrows < 0 || ncols < 0 || edge_count != ncols || !edge_u || !edge_v) {
++        fprintf (stderr, "CClp_dump_lp_epoch: column-edge map mismatch\n");
++        return 1;
++    }
++    rval = QSget_objsense (lp->p, &objsense);
++    if (rval || objsense != QS_MIN) {
++        fprintf (stderr, "CClp_dump_lp_epoch: only minimization is supported\n");
++        rval = 1; goto CLEANUP;
++    }
++    obj = CC_SAFE_MALLOC (ncols, double);
++    lower = CC_SAFE_MALLOC (ncols, double);
++    upper = CC_SAFE_MALLOC (ncols, double);
++    if ((!obj && ncols) || (!lower && ncols) || (!upper && ncols)) {
++        fprintf (stderr, "CClp_dump_lp_epoch: out of memory\n");
++        rval = 1; goto CLEANUP;
++    }
++    rval = QSget_obj (lp->p, obj);
++    if (rval) {
++        fprintf (stderr, "CClp_dump_lp_epoch: QSget_obj failed\n");
++        goto CLEANUP;
++    }
++    rval = QSget_bounds (lp->p, lower, upper);
++    if (rval) {
++        fprintf (stderr, "CClp_dump_lp_epoch: QSget_bounds failed\n");
++        goto CLEANUP;
++    }
++    rval = QSget_rows (lp->p, &rowcnt, &rowbeg, &rowind, &rowval,
++                       &rhs, &sense, (char ***) NULL);
++    if (rval) {
++        fprintf (stderr, "CClp_dump_lp_epoch: QSget_rows failed\n");
++        goto CLEANUP;
++    }
++    for (i = 0; i < nrows; i++) nnz += rowcnt[i];
++
++    out = fopen (fname, "w");
++    if (!out) {
++        perror ("CClp_dump_lp_epoch fopen");
++        rval = 1; goto CLEANUP;
++    }
++    fprintf (out, "CUDAEE_LP_EPOCH_V1\n");
++    fprintf (out, "rows %d\n", nrows);
++    fprintf (out, "columns %d\n", ncols);
++    fprintf (out, "objective_sense %d\n", objsense);
++    fprintf (out, "objective_offset %.17g\n", objective_offset);
++
++    fprintf (out, "objective %d", ncols);
++    for (i = 0; i < ncols; i++) fprintf (out, " %.17g", obj[i]);
++    fprintf (out, "\n");
++
++    fprintf (out, "row_offsets %d", nrows + 1);
++    offset = 0;
++    for (i = 0; i < nrows; i++) {
++        fprintf (out, " %d", offset);
++        offset += rowcnt[i];
++    }
++    fprintf (out, " %d\n", offset);
++
++    fprintf (out, "column_indices %d", nnz);
++    for (i = 0; i < nrows; i++) {
++        for (j = 0; j < rowcnt[i]; j++) {
++            fprintf (out, " %d", rowind[rowbeg[i] + j]);
++        }
++    }
++    fprintf (out, "\n");
++
++    fprintf (out, "values %d", nnz);
++    for (i = 0; i < nrows; i++) {
++        for (j = 0; j < rowcnt[i]; j++) {
++            fprintf (out, " %.17g", rowval[rowbeg[i] + j]);
++        }
++    }
++    fprintf (out, "\n");
++
++    fprintf (out, "senses %d", nrows);
++    for (i = 0; i < nrows; i++) fprintf (out, " %c", sense[i]);
++    fprintf (out, "\n");
++    fprintf (out, "rhs %d", nrows);
++    for (i = 0; i < nrows; i++) fprintf (out, " %.17g", rhs[i]);
++    fprintf (out, "\n");
++    fprintf (out, "lower_bounds %d", ncols);
++    for (i = 0; i < ncols; i++) fprintf (out, " %.17g", lower[i]);
++    fprintf (out, "\n");
++    fprintf (out, "upper_bounds %d", ncols);
++    for (i = 0; i < ncols; i++) fprintf (out, " %.17g", upper[i]);
++    fprintf (out, "\n");
++    fprintf (out, "variable_types %d", ncols);
++    for (i = 0; i < ncols; i++) fprintf (out, " C");
++    fprintf (out, "\n");
++    fprintf (out, "edge_u %d", ncols);
++    for (i = 0; i < ncols; i++) fprintf (out, " %d", edge_u[i]);
++    fprintf (out, "\n");
++    fprintf (out, "edge_v %d", ncols);
++    for (i = 0; i < ncols; i++) fprintf (out, " %d", edge_v[i]);
++    fprintf (out, "\n");
++
++    cudaee_hash_int (&hash, nrows);
++    cudaee_hash_int (&hash, ncols);
++    cudaee_hash_int (&hash, objsense);
++    cudaee_hash_double (&hash, objective_offset);
++    for (i = 0; i < ncols; i++) cudaee_hash_double (&hash, obj[i]);
++    offset = 0;
++    for (i = 0; i < nrows; i++) {
++        cudaee_hash_int (&hash, offset); offset += rowcnt[i];
++    }
++    cudaee_hash_int (&hash, offset);
++    for (i = 0; i < nrows; i++) {
++        for (j = 0; j < rowcnt[i]; j++)
++            cudaee_hash_int (&hash, rowind[rowbeg[i] + j]);
++    }
++    for (i = 0; i < nrows; i++) {
++        for (j = 0; j < rowcnt[i]; j++)
++            cudaee_hash_double (&hash, rowval[rowbeg[i] + j]);
++    }
++    for (i = 0; i < nrows; i++) cudaee_hash_char (&hash, sense[i]);
++    for (i = 0; i < nrows; i++) cudaee_hash_double (&hash, rhs[i]);
++    for (i = 0; i < ncols; i++) cudaee_hash_double (&hash, lower[i]);
++    for (i = 0; i < ncols; i++) cudaee_hash_double (&hash, upper[i]);
++    for (i = 0; i < ncols; i++) cudaee_hash_char (&hash, variable_type);
++    for (i = 0; i < ncols; i++) cudaee_hash_int (&hash, edge_u[i]);
++    for (i = 0; i < ncols; i++) cudaee_hash_int (&hash, edge_v[i]);
++    fprintf (out, "hash %016llx\n", hash);
++    fprintf (out, "END\n");
++    if (fclose (out)) {
++        perror ("CClp_dump_lp_epoch fclose");
++        rval = 1;
++    }
++    out = (FILE *) NULL;
++
++CLEANUP:
++    if (out) fclose (out);
++    CC_IFFREE (obj, double);
++    CC_IFFREE (lower, double);
++    CC_IFFREE (upper, double);
++    if (rowcnt) QSfree (rowcnt);
++    if (rowbeg) QSfree (rowbeg);
++    if (rowind) QSfree (rowind);
++    if (rowval) QSfree (rowval);
++    if (rhs) QSfree (rhs);
++    if (sense) QSfree (sense);
++    return rval;
++}
++
+ int CClp_getgoodlist (CClp *lp, int *goodlist, int *goodlen_p,
+         double *downpen, double *uppen)
+ {
+diff --git a/TSP/control.c b/TSP/control.c
+index 551284c..4239cd7 100644
+--- a/TSP/control.c
++++ b/TSP/control.c
+@@ -2156,5 +2156,36 @@ CLEANUP:
+         fprintf (stderr, "failure in cutting_loop\n");
+     }
++    /* 显式环境钩子：只在成功且模型稳定时导出，不改变默认 Concorde 行为。 */
++    if (!rval) {
++        const char *cudaee_epoch_out = getenv ("CUDAEE_LP_EPOCH_OUT");
++        if (cudaee_epoch_out && cudaee_epoch_out[0]) {
++            int i;
++            int *edge_u = (int *) NULL;
++            int *edge_v = (int *) NULL;
++            if (CClp_ncols (lp->lp) != lp->graph.ecount) {
++                fprintf (stderr, "cudaee epoch: LP column-edge map mismatch\n");
++                rval = 1;
++            } else {
++                edge_u = CC_SAFE_MALLOC (lp->graph.ecount, int);
++                edge_v = CC_SAFE_MALLOC (lp->graph.ecount, int);
++                if ((!edge_u || !edge_v) && lp->graph.ecount) {
++                    fprintf (stderr, "cudaee epoch: out of memory\n");
++                    rval = 1;
++                } else {
++                    for (i = 0; i < lp->graph.ecount; i++) {
++                        edge_u[i] = lp->graph.edges[i].ends[0];
++                        edge_v[i] = lp->graph.edges[i].ends[1];
++                    }
++                    rval = CClp_dump_lp_epoch (lp->lp, cudaee_epoch_out,
++                               lp->graph.ecount, edge_u, edge_v);
++                    if (rval) fprintf (stderr, "cudaee epoch export failed\n");
++                }
++            }
++            CC_IFFREE (edge_u, int);
++            CC_IFFREE (edge_v, int);
++        }
++    }
++
+     if (!silent) {
+         CCutil_stop_timer (&lp->stats.cutting_loop, 1);
+         printf ("Number of outside rounds: %d\n", outside);

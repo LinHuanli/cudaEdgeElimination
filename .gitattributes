@@ -5,3 +5,4 @@
 *.py text eol=lf
 *.tsp text eol=lf
 *.edg text eol=lf
+*.patch text eol=lf whitespace=-trailing-space

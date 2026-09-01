@@ -1,0 +1,21 @@
+name: cpu-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Configure
+        run: cmake --preset cpu-release
+      - name: Build
+        run: cmake --build --preset cpu-release --parallel 2
+      - name: Test
+        run: ctest --preset cpu-release
+      - name: Repository policy
+        run: python3 tools/check_workspace.py

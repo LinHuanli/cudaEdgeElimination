@@ -1,0 +1,11 @@
+{
+  "schema": "cudaee-config-v1",
+  "algorithm": "JV",
+  "candidate_nodes": 10,
+  "quicker_cd_search": true,
+  "max_rounds": 100,
+  "backend": "auto",
+  "minimum_degree": 2,
+  "cpu_verification": "required",
+  "deterministic_commit": true
+}
