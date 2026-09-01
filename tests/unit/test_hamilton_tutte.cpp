@@ -645,6 +645,10 @@ void TestRecursivePointProof() {
             wavefront.leaf_cost_batches > 0U && wavefront.leaf_cost_tasks > 0U &&
             wavefront.leaf_cost_cells > 0U && wavefront.leaf_cursor_searches_started > 0U &&
             wavefront.leaf_cpu_certified_cost_cells == wavefront.leaf_cost_cells &&
+            wavefront.leaf_cpu_parallel_cost_batches <= wavefront.leaf_cost_batches &&
+            wavefront.leaf_cpu_parallel_cost_cells <= wavefront.leaf_cost_cells &&
+            wavefront.peak_leaf_cpu_cost_threads >= 1U &&
+            wavefront.peak_leaf_cpu_cost_threads <= 8U &&
             wavefront.leaf_cost_rows_consumed == wavefront.leaf_cost_tasks &&
             wavefront.leaf_cpu_completeness_rows == 0U && wavefront.leaf_scalar_searches == 0U,
         "CPU wavefront records deterministic CPU-matrix leaf batches");
@@ -755,6 +759,9 @@ void TestRecursivePointProof() {
             scan.leaf_bucket_count == timed_attempt.leaf_bucket_count &&
             scan.peak_leaf_frontier_batch == timed_attempt.peak_leaf_frontier_batch &&
             scan.leaf_cursor_searches_started == timed_attempt.leaf_cursor_searches_started &&
+            scan.leaf_cpu_parallel_cost_batches == timed_attempt.leaf_cpu_parallel_cost_batches &&
+            scan.leaf_cpu_parallel_cost_cells == timed_attempt.leaf_cpu_parallel_cost_cells &&
+            scan.peak_leaf_cpu_cost_threads == timed_attempt.peak_leaf_cpu_cost_threads &&
             scan.hamilton_reply_batches == timed_attempt.hamilton_reply_batches &&
             scan.hamilton_reply_centers == timed_attempt.hamilton_reply_centers &&
             scan.hamilton_reply_unique_centers == timed_attempt.hamilton_reply_unique_centers &&

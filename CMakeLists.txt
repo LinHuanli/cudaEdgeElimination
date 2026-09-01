@@ -4,6 +4,7 @@ project(cudaEdgeElimination VERSION 0.1.0 LANGUAGES CXX C)
 
 option(CUDAEE_ENABLE_CUDA "编译 CUDA JV 候选后端" ON)
 option(CUDAEE_ENABLE_SANITIZERS "启用 AddressSanitizer/UndefinedBehaviorSanitizer" OFF)
+option(CUDAEE_ENABLE_OPENMP "启用 CPU 精确成本矩阵并行" ON)
 option(CUDAEE_BUILD_TESTS "编译测试" ON)
 option(CUDAEE_BUILD_BENCHMARKS "编译研究基准" OFF)
 
@@ -13,6 +14,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(ZLIB QUIET)
+if(CUDAEE_ENABLE_OPENMP)
+  find_package(OpenMP QUIET COMPONENTS CXX)
+endif()
 
 set(CUDAEE_SOURCES
     src/common/types.cpp
@@ -62,6 +66,11 @@ target_include_directories(cudaee_core PUBLIC include)
 target_compile_features(cudaee_core PUBLIC cxx_std_20)
 target_compile_definitions(cudaee_core PUBLIC CUDAEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(cudaee_core PUBLIC ${CMAKE_DL_LIBS})
+
+if(CUDAEE_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
+  target_link_libraries(cudaee_core PRIVATE OpenMP::OpenMP_CXX)
+  target_compile_definitions(cudaee_core PRIVATE CUDAEE_HAS_OPENMP=1)
+endif()
 
 if(ZLIB_FOUND)
   target_link_libraries(cudaee_core PRIVATE ZLIB::ZLIB)

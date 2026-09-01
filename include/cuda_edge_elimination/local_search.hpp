@@ -71,6 +71,7 @@ struct KOptCostBatchResult {
   int selected_device{-1};
   KOptCudaCacheUsage cuda_cache;
   bool cpu_verified{false};
+  std::uint32_t cpu_threads_used{1U};
   double cpu_certify_ms{};
 };
 
@@ -163,6 +164,9 @@ struct PathSystemKOptBatchResult {
   std::uint64_t cpu_completeness_rows{};
   std::uint64_t cpu_completeness_templates{};
   std::uint64_t cpu_certified_cost_cells{};
+  std::uint64_t cpu_parallel_cost_batches{};
+  std::uint64_t cpu_parallel_cost_cells{};
+  std::uint32_t peak_cpu_cost_threads{1U};
   // 同步 wall time 只用于诊断，不进入 leaf proof。
   double setup_ms{};
   double proof_initialize_ms{};

@@ -131,6 +131,9 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.leaf_cpu_completeness_rows = wavefront.leaf_cpu_completeness_rows;
     attempt.leaf_cpu_completeness_templates = wavefront.leaf_cpu_completeness_templates;
     attempt.leaf_cpu_certified_cost_cells = wavefront.leaf_cpu_certified_cost_cells;
+    attempt.leaf_cpu_parallel_cost_batches = wavefront.leaf_cpu_parallel_cost_batches;
+    attempt.leaf_cpu_parallel_cost_cells = wavefront.leaf_cpu_parallel_cost_cells;
+    attempt.peak_leaf_cpu_cost_threads = wavefront.peak_leaf_cpu_cost_threads;
     attempt.peak_leaf_device_cache_bytes = wavefront.peak_leaf_device_cache_bytes;
     attempt.path_append_tasks = wavefront.path_append_tasks;
     attempt.hamilton_reply_batches = wavefront.hamilton_reply_batches;
@@ -188,6 +191,10 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.leaf_cpu_completeness_rows += attempt.leaf_cpu_completeness_rows;
     scan.leaf_cpu_completeness_templates += attempt.leaf_cpu_completeness_templates;
     scan.leaf_cpu_certified_cost_cells += attempt.leaf_cpu_certified_cost_cells;
+    scan.leaf_cpu_parallel_cost_batches += attempt.leaf_cpu_parallel_cost_batches;
+    scan.leaf_cpu_parallel_cost_cells += attempt.leaf_cpu_parallel_cost_cells;
+    scan.peak_leaf_cpu_cost_threads =
+        std::max(scan.peak_leaf_cpu_cost_threads, attempt.peak_leaf_cpu_cost_threads);
     scan.peak_leaf_device_cache_bytes =
         std::max(scan.peak_leaf_device_cache_bytes, attempt.peak_leaf_device_cache_bytes);
     scan.hamilton_reply_batches += attempt.hamilton_reply_batches;

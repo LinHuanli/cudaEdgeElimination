@@ -15,6 +15,16 @@ if [[ ! "${max_targets}" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
+cpu_cost_threads="${CUDAEE_CPU_COST_THREADS:-8}"
+if [[ ! "${cpu_cost_threads}" =~ ^[1-8]$ ]]; then
+  echo "错误：CUDAEE_CPU_COST_THREADS 必须位于 [1,8]。" >&2
+  exit 2
+fi
+export OMP_NUM_THREADS="${cpu_cost_threads}"
+export OMP_DYNAMIC=FALSE
+export OMP_PROC_BIND=spread
+export OMP_PLACES=cores
+
 config="${repo_root}/configs/m5_jv_instances.tsv"
 row="$(awk -F '\t' -v name="${instance}" '$1 == name { print; found = 1 } END { if (!found) exit 1 }' "${config}")" || {
   echo "错误：${config} 中没有实例 ${instance}。" >&2
@@ -303,6 +313,18 @@ cpu_leaf_cpu_certified_cells="$(read_field "${run_dir}/cpu.report" leaf_cpu_cert
 cuda_leaf_cpu_certified_cells="$(read_field "${run_dir}/cuda.report" leaf_cpu_certified_cost_cells)"
 hybrid_leaf_cpu_certified_cells="$(read_field "${run_dir}/hybrid.report" leaf_cpu_certified_cost_cells)"
 fused_leaf_cpu_certified_cells="$(read_field "${run_dir}/fused.report" leaf_cpu_certified_cost_cells)"
+cpu_leaf_parallel_batches="$(read_field "${run_dir}/cpu.report" leaf_cpu_parallel_cost_batches)"
+cuda_leaf_parallel_batches="$(read_field "${run_dir}/cuda.report" leaf_cpu_parallel_cost_batches)"
+hybrid_leaf_parallel_batches="$(read_field "${run_dir}/hybrid.report" leaf_cpu_parallel_cost_batches)"
+fused_leaf_parallel_batches="$(read_field "${run_dir}/fused.report" leaf_cpu_parallel_cost_batches)"
+cpu_leaf_parallel_cells="$(read_field "${run_dir}/cpu.report" leaf_cpu_parallel_cost_cells)"
+cuda_leaf_parallel_cells="$(read_field "${run_dir}/cuda.report" leaf_cpu_parallel_cost_cells)"
+hybrid_leaf_parallel_cells="$(read_field "${run_dir}/hybrid.report" leaf_cpu_parallel_cost_cells)"
+fused_leaf_parallel_cells="$(read_field "${run_dir}/fused.report" leaf_cpu_parallel_cost_cells)"
+cpu_peak_leaf_threads="$(read_field "${run_dir}/cpu.report" peak_leaf_cpu_cost_threads)"
+cuda_peak_leaf_threads="$(read_field "${run_dir}/cuda.report" peak_leaf_cpu_cost_threads)"
+hybrid_peak_leaf_threads="$(read_field "${run_dir}/hybrid.report" peak_leaf_cpu_cost_threads)"
+fused_peak_leaf_threads="$(read_field "${run_dir}/fused.report" peak_leaf_cpu_cost_threads)"
 cpu_leaf_cursor_searches="$(read_field "${run_dir}/cpu.report" leaf_cursor_searches_started)"
 cuda_leaf_cursor_searches="$(read_field "${run_dir}/cuda.report" leaf_cursor_searches_started)"
 hybrid_leaf_cursor_searches="$(read_field "${run_dir}/hybrid.report" leaf_cursor_searches_started)"
@@ -310,6 +332,12 @@ fused_leaf_cursor_searches="$(read_field "${run_dir}/fused.report" leaf_cursor_s
 if [[ "${cpu_leaf_cursor_searches}" != "${cuda_leaf_cursor_searches}" ||
       "${cpu_leaf_cursor_searches}" != "${hybrid_leaf_cursor_searches}" ||
       "${cpu_leaf_cursor_searches}" != "${fused_leaf_cursor_searches}" ||
+      "${cpu_leaf_parallel_batches}" != "${cuda_leaf_parallel_batches}" ||
+      "${cpu_leaf_parallel_batches}" != "${hybrid_leaf_parallel_batches}" ||
+      "${cpu_leaf_parallel_cells}" != "${cuda_leaf_parallel_cells}" ||
+      "${cpu_leaf_parallel_cells}" != "${hybrid_leaf_parallel_cells}" ||
+      "${cpu_peak_leaf_threads}" != "${cuda_peak_leaf_threads}" ||
+      "${cpu_peak_leaf_threads}" != "${hybrid_peak_leaf_threads}" ||
       "${cpu_leaf_cost_rows}" != "${cuda_leaf_cost_rows}" ||
       "${cpu_leaf_cost_rows}" != "${hybrid_leaf_cost_rows}" ||
       "${cuda_leaf_cost_rows}" != "${fused_leaf_cost_rows}" ||
@@ -557,6 +585,10 @@ manifest="${run_dir}/run-manifest-v1"
   echo "leaf_frontier_batch_states 256"
   echo "cost_batch_size 4096"
   echo "cuda_min_cost_cells 128"
+  echo "cpu_cost_threads ${cpu_cost_threads}"
+  echo "omp_dynamic FALSE"
+  echo "omp_proc_bind spread"
+  echo "omp_places cores"
   echo "physical_gpu ${physical_gpu}"
   echo "compiler $(c++ --version | awk 'NR == 1')"
   echo "nvcc $(nvcc --version | awk '/release/ { print; exit }')"
@@ -567,7 +599,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V10"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V11"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -670,6 +702,18 @@ summary="${run_dir}/summary.txt"
   echo "leaf_cpu_completeness_rows ${cpu_leaf_completeness_rows}"
   echo "leaf_cpu_completeness_templates ${cpu_leaf_completeness_templates}"
   echo "leaf_cpu_certified_cost_cells ${cpu_leaf_cpu_certified_cells}"
+  echo "cpu_leaf_parallel_cost_batches ${cpu_leaf_parallel_batches}"
+  echo "cuda_leaf_parallel_cost_batches ${cuda_leaf_parallel_batches}"
+  echo "hybrid_leaf_parallel_cost_batches ${hybrid_leaf_parallel_batches}"
+  echo "fused_leaf_parallel_cost_batches ${fused_leaf_parallel_batches}"
+  echo "cpu_leaf_parallel_cost_cells ${cpu_leaf_parallel_cells}"
+  echo "cuda_leaf_parallel_cost_cells ${cuda_leaf_parallel_cells}"
+  echo "hybrid_leaf_parallel_cost_cells ${hybrid_leaf_parallel_cells}"
+  echo "fused_leaf_parallel_cost_cells ${fused_leaf_parallel_cells}"
+  echo "cpu_peak_leaf_cpu_cost_threads ${cpu_peak_leaf_threads}"
+  echo "cuda_peak_leaf_cpu_cost_threads ${cuda_peak_leaf_threads}"
+  echo "hybrid_peak_leaf_cpu_cost_threads ${hybrid_peak_leaf_threads}"
+  echo "fused_peak_leaf_cpu_cost_threads ${fused_peak_leaf_threads}"
   echo "leaf_speedup ${leaf_speedup}"
   echo "hybrid_leaf_speedup ${hybrid_leaf_speedup}"
   echo "fused_leaf_speedup_vs_hybrid ${fused_leaf_speedup}"

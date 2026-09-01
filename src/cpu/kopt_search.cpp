@@ -22,11 +22,17 @@
 #include <utility>
 #include <vector>
 
+#ifdef CUDAEE_HAS_OPENMP
+#include <omp.h>
+#endif
+
 namespace cudaee {
 namespace {
 
 using EdgeSet = std::set<NodeEdge>;
 constexpr std::array<std::size_t, 3U> kKOptTemplateCounts = {4U, 25U, 208U};
+constexpr std::size_t kKOptCpuParallelMinCells = 8192U;
+constexpr int kKOptCpuMaxThreads = 8;
 
 using SteadyClock = std::chrono::steady_clock;
 
@@ -777,19 +783,55 @@ private:
   std::array<std::int64_t, 100U> port_distances_{};
 };
 
-std::vector<std::int64_t>
-EvaluateKOptTemplateCostsCpu(const GraphSnapshot& graph, const std::uint32_t k,
-                             const std::vector<KOptCostTask>& tasks,
-                             const std::vector<EndpointMatching>& reconnect_templates) {
-  std::vector<std::int64_t> costs;
-  costs.reserve(tasks.size() * reconnect_templates.size());
-  for (const KOptCostTask& task : tasks) {
-    KOptCostTaskCpuScorer scorer(graph, k, task);
-    for (const EndpointMatching& reconnect_template : reconnect_templates) {
-      costs.push_back(scorer.Score(reconnect_template));
+std::vector<std::int64_t> EvaluateKOptTemplateCostsCpu(
+    const GraphSnapshot& graph, const std::uint32_t k, const std::vector<KOptCostTask>& tasks,
+    const std::vector<EndpointMatching>& reconnect_templates, std::uint32_t* const threads_used) {
+  const std::size_t template_count = reconnect_templates.size();
+  const std::size_t cell_count = tasks.size() * template_count;
+  std::vector<std::int64_t> costs(cell_count);
+  *threads_used = 1U;
+  const auto score_task = [&](const std::size_t task_index) {
+    KOptCostTaskCpuScorer scorer(graph, k, tasks[task_index]);
+    const std::size_t row_begin = task_index * template_count;
+    for (std::size_t template_index = 0U; template_index < template_count; ++template_index) {
+      // 每个 task 独占连续 row；静态调度只改变计算时序，不改变规范矩阵布局。
+      costs[row_begin + template_index] = scorer.Score(reconnect_templates[template_index]);
     }
+  };
+#ifdef CUDAEE_HAS_OPENMP
+  const int thread_limit =
+      std::min({kKOptCpuMaxThreads, omp_get_max_threads(), omp_get_num_procs()});
+  if (thread_limit > 1 && cell_count >= kKOptCpuParallelMinCells) {
+#pragma omp parallel num_threads(thread_limit)
+    {
+#pragma omp single
+      {
+        *threads_used = static_cast<std::uint32_t>(omp_get_num_threads());
+      }
+#pragma omp for schedule(static)
+      for (std::size_t task_index = 0U; task_index < tasks.size(); ++task_index) {
+        score_task(task_index);
+      }
+    }
+    return costs;
+  }
+#endif
+  for (std::size_t task_index = 0U; task_index < tasks.size(); ++task_index) {
+    score_task(task_index);
   }
   return costs;
+}
+
+void RecordKOptCpuParallelism(PathSystemKOptBatchResult* const result,
+                              const KOptCostBatchResult& costs) {
+  result->peak_cpu_cost_threads = std::max(result->peak_cpu_cost_threads, costs.cpu_threads_used);
+  if (costs.cpu_threads_used <= 1U) {
+    return;
+  }
+  if (!AddWithoutOverflow(&result->cpu_parallel_cost_batches, 1U) ||
+      !AddWithoutOverflow(&result->cpu_parallel_cost_cells, costs.added_costs.size())) {
+    throw std::overflow_error("path-system k-opt CPU 并行统计溢出");
+  }
 }
 
 void ExpectToken(std::istream* const input, const std::string_view expected) {
@@ -989,7 +1031,7 @@ KOptCostBatchResult EvaluateKOptTemplateCosts(const GraphSnapshot& graph, const 
         graph, table, tasks, &result.selected_device, &result.cuda_cache);
     const SteadyClock::time_point cpu_begin = SteadyClock::now();
     const std::vector<std::int64_t> cpu_costs =
-        EvaluateKOptTemplateCostsCpu(graph, k, tasks, table.templates);
+        EvaluateKOptTemplateCostsCpu(graph, k, tasks, table.templates, &result.cpu_threads_used);
     const auto mismatch = std::mismatch(result.added_costs.begin(), result.added_costs.end(),
                                         cpu_costs.begin(), cpu_costs.end());
     result.cpu_certify_ms = ElapsedMilliseconds(cpu_begin);
@@ -1003,7 +1045,8 @@ KOptCostBatchResult EvaluateKOptTemplateCosts(const GraphSnapshot& graph, const 
     result.cpu_verified = true;
   } else {
     const SteadyClock::time_point cpu_begin = SteadyClock::now();
-    result.added_costs = EvaluateKOptTemplateCostsCpu(graph, k, tasks, table.templates);
+    result.added_costs =
+        EvaluateKOptTemplateCostsCpu(graph, k, tasks, table.templates, &result.cpu_threads_used);
     result.cpu_certify_ms = ElapsedMilliseconds(cpu_begin);
     result.backend = "cpu";
     result.cpu_verified = true;
@@ -2119,6 +2162,7 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
           throw std::overflow_error("path-system k-opt CPU 认证 cell 统计溢出");
         }
         result.cost_cpu_certify_ms += costs.cpu_certify_ms;
+        RecordKOptCpuParallelism(&result, costs);
         RecordKOptBatchBackend(&result, costs.backend, costs.selected_device);
         RecordKOptCudaCache(&result, costs);
         if (cpu_long_tail) {

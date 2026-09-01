@@ -103,6 +103,9 @@ struct HtScanAttempt {
   std::uint64_t leaf_cpu_completeness_rows{};
   std::uint64_t leaf_cpu_completeness_templates{};
   std::uint64_t leaf_cpu_certified_cost_cells{};
+  std::uint64_t leaf_cpu_parallel_cost_batches{};
+  std::uint64_t leaf_cpu_parallel_cost_cells{};
+  std::uint32_t peak_leaf_cpu_cost_threads{1U};
   std::uint64_t peak_leaf_device_cache_bytes{};
   std::uint64_t path_append_tasks{};
   std::uint64_t hamilton_reply_batches{};
@@ -168,6 +171,9 @@ struct HtScanResult {
   std::uint64_t leaf_cpu_completeness_rows{};
   std::uint64_t leaf_cpu_completeness_templates{};
   std::uint64_t leaf_cpu_certified_cost_cells{};
+  std::uint64_t leaf_cpu_parallel_cost_batches{};
+  std::uint64_t leaf_cpu_parallel_cost_cells{};
+  std::uint32_t peak_leaf_cpu_cost_threads{1U};
   std::uint64_t peak_leaf_device_cache_bytes{};
   std::uint64_t hamilton_reply_batches{};
   std::uint64_t hamilton_reply_centers{};

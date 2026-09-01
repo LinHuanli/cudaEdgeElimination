@@ -3,7 +3,7 @@
 ## 固定环境
 
 - Linux x86_64，NVIDIA 驱动支持 CUDA 13；
-- CMake >= 3.27、Ninja、C++20 编译器；
+- CMake >= 3.27、Ninja、C++20 编译器，以及可选的 OpenMP C++ runtime；
 - CUDA toolkit 13.x，目标 `sm_89`；
 - 项目内 `.venv` 安装 `libcuopt-cu13==26.8.0`；
 - ElimTSP 子模块固定提交 `d7bacf0d...`；
@@ -27,6 +27,8 @@
 - `lp-release`：与 cuda-release 相同，运行时从 `.venv` 动态加载 cuOpt。
 
 所有 preset 把输出放在 `build/<preset>`。`compile_commands.json` 只建立仓库内符号链接或由编辑器直接读取 build 文件。
+
+`CUDAEE_ENABLE_OPENMP=ON` 时，8,192 个 cost cells 以上的 CPU 精确矩阵按 task row 静态分片；找不到 OpenMP 时安全退回串行。正式 HT benchmark 固定 `OMP_DYNAMIC=FALSE`、`OMP_PROC_BIND=spread`、`OMP_PLACES=cores`，并把 `CUDAEE_CPU_COST_THREADS`（默认 8，范围 1–8）写入 manifest。线程只改变独立 row 的计算时序，不改变矩阵布局和 proof 消费顺序。
 
 ## 运行清单
 

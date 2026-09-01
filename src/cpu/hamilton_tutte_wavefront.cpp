@@ -926,6 +926,12 @@ void RecordLeafBatch(WaveBuildContext* const context, const PathSystemKOptBatchR
                 "CPU completeness templates");
   AddLeafMetric(&result.leaf_cpu_certified_cost_cells, batch.cpu_certified_cost_cells,
                 "CPU certified cost cells");
+  AddLeafMetric(&result.leaf_cpu_parallel_cost_batches, batch.cpu_parallel_cost_batches,
+                "CPU parallel cost batches");
+  AddLeafMetric(&result.leaf_cpu_parallel_cost_cells, batch.cpu_parallel_cost_cells,
+                "CPU parallel cost cells");
+  result.peak_leaf_cpu_cost_threads =
+      std::max(result.peak_leaf_cpu_cost_threads, batch.peak_cpu_cost_threads);
   result.leaf_setup_ms += batch.setup_ms;
   result.leaf_proof_initialize_ms += batch.proof_initialize_ms;
   result.leaf_coverage_scan_ms += batch.coverage_scan_ms;

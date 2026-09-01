@@ -550,6 +550,9 @@ bool HtProveCommand(const Arguments& arguments) {
   std::uint64_t leaf_cpu_completeness_rows = 0;
   std::uint64_t leaf_cpu_completeness_templates = 0;
   std::uint64_t leaf_cpu_certified_cost_cells = 0;
+  std::uint64_t leaf_cpu_parallel_cost_batches = 0;
+  std::uint64_t leaf_cpu_parallel_cost_cells = 0;
+  std::uint32_t peak_leaf_cpu_cost_threads = 1U;
   std::uint64_t hamilton_reply_batches = 0;
   std::uint64_t hamilton_reply_centers = 0;
   std::uint64_t hamilton_reply_unique_centers = 0;
@@ -641,6 +644,9 @@ bool HtProveCommand(const Arguments& arguments) {
     leaf_cpu_completeness_rows = result.leaf_cpu_completeness_rows;
     leaf_cpu_completeness_templates = result.leaf_cpu_completeness_templates;
     leaf_cpu_certified_cost_cells = result.leaf_cpu_certified_cost_cells;
+    leaf_cpu_parallel_cost_batches = result.leaf_cpu_parallel_cost_batches;
+    leaf_cpu_parallel_cost_cells = result.leaf_cpu_parallel_cost_cells;
+    peak_leaf_cpu_cost_threads = result.peak_leaf_cpu_cost_threads;
     hamilton_reply_batches = result.hamilton_reply_batches;
     hamilton_reply_centers = result.hamilton_reply_centers;
     hamilton_reply_unique_centers = result.hamilton_reply_unique_centers;
@@ -731,6 +737,9 @@ bool HtProveCommand(const Arguments& arguments) {
               << " leaf_cpu_completeness_rows=" << leaf_cpu_completeness_rows
               << " leaf_cpu_completeness_templates=" << leaf_cpu_completeness_templates
               << " leaf_cpu_certified_cost_cells=" << leaf_cpu_certified_cost_cells
+              << " leaf_cpu_parallel_cost_batches=" << leaf_cpu_parallel_cost_batches
+              << " leaf_cpu_parallel_cost_cells=" << leaf_cpu_parallel_cost_cells
+              << " peak_leaf_cpu_cost_threads=" << peak_leaf_cpu_cost_threads
               << " reply_backend=" << hamilton_reply_backend
               << " reply_device=" << hamilton_reply_selected_device
               << " reply_batches=" << hamilton_reply_batches
@@ -795,7 +804,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V8\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V9\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
@@ -827,6 +836,9 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "leaf_cpu_completeness_rows " << scan.leaf_cpu_completeness_rows << '\n';
   output << "leaf_cpu_completeness_templates " << scan.leaf_cpu_completeness_templates << '\n';
   output << "leaf_cpu_certified_cost_cells " << scan.leaf_cpu_certified_cost_cells << '\n';
+  output << "leaf_cpu_parallel_cost_batches " << scan.leaf_cpu_parallel_cost_batches << '\n';
+  output << "leaf_cpu_parallel_cost_cells " << scan.leaf_cpu_parallel_cost_cells << '\n';
+  output << "peak_leaf_cpu_cost_threads " << scan.peak_leaf_cpu_cost_threads << '\n';
   output << "peak_leaf_device_cache_bytes " << scan.peak_leaf_device_cache_bytes << '\n';
   output << "hamilton_reply_batches " << scan.hamilton_reply_batches << '\n';
   output << "hamilton_reply_centers " << scan.hamilton_reply_centers << '\n';
@@ -879,6 +891,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
             "leaf_cursor_searches leaf_cuda_batches "
             "leaf_cpu_long_tail_cells leaf_cost_rows leaf_candidate_rechecks "
             "leaf_completeness_rows leaf_completeness_templates leaf_cpu_certified_cells "
+            "leaf_cpu_parallel_batches leaf_cpu_parallel_cells peak_leaf_cpu_threads "
             "peak_leaf_cache_bytes "
             "path_append_tasks hamilton_reply_batches hamilton_reply_centers "
             "hamilton_reply_unique_centers hamilton_reply_neighbor_pairs hamilton_replies "
@@ -912,6 +925,8 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << attempt.leaf_candidate_templates_rechecked << ' '
            << attempt.leaf_cpu_completeness_rows << ' ' << attempt.leaf_cpu_completeness_templates
            << ' ' << attempt.leaf_cpu_certified_cost_cells << ' '
+           << attempt.leaf_cpu_parallel_cost_batches << ' ' << attempt.leaf_cpu_parallel_cost_cells
+           << ' ' << attempt.peak_leaf_cpu_cost_threads << ' '
            << attempt.peak_leaf_device_cache_bytes << ' ' << attempt.path_append_tasks << ' '
            << attempt.hamilton_reply_batches << ' ' << attempt.hamilton_reply_centers << ' '
            << attempt.hamilton_reply_unique_centers << ' '
