@@ -159,6 +159,13 @@ run_scan() {
       --backend cpu --leaf-backend cuda --reply-backend cpu --path-append-backend cpu \
       --propagation-backend cpu --fuse-leaf-buckets 1 \
       >"${stdout_file}" 2>"${stderr_file}"
+  elif [[ "${backend}" == "cpu-fused" ]]; then
+    "${binary}" ht-scan \
+      --tsp "${tsp}" --edges "${jv_edges}" --output "${output}" --proof "${proof}" \
+      --report "${report}" "${tour_arguments[@]}" "${ht_arguments[@]}" \
+      --backend cpu --reply-backend cpu --path-append-backend cpu \
+      --propagation-backend cpu --fuse-leaf-buckets 1 \
+      >"${stdout_file}" 2>"${stderr_file}"
   else
     "${binary}" ht-scan \
       --tsp "${tsp}" --edges "${jv_edges}" --output "${output}" --proof "${proof}" \
@@ -181,6 +188,8 @@ run_scan() {
 
 echo "运行 ${instance} HT scan CPU，targets=${max_targets} offset=${target_offset}"
 run_scan cpu "${cpu_binary}"
+echo "运行 ${instance} HT scan CPU fused leaf buckets"
+run_scan cpu-fused "${cpu_binary}"
 echo "运行 ${instance} HT scan CUDA，物理 GPU ${physical_gpu}"
 run_scan cuda "${cuda_binary}"
 echo "运行 ${instance} HT scan hybrid，物理 GPU ${physical_gpu}"
@@ -189,10 +198,13 @@ echo "运行 ${instance} HT scan fused leaf buckets，物理 GPU ${physical_gpu}
 run_scan fused "${cuda_binary}"
 
 cmp "${run_dir}/cpu.edg" "${run_dir}/cuda.edg"
+cmp "${run_dir}/cpu.edg" "${run_dir}/cpu-fused.edg"
 cmp "${run_dir}/cpu.edg" "${run_dir}/hybrid.edg"
 cmp "${run_dir}/cpu.edg" "${run_dir}/fused.edg"
 awk '$1 == "attempt" { print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }' \
   "${run_dir}/cpu.report" >"${run_dir}/cpu.work-signature"
+awk '$1 == "attempt" { print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }' \
+  "${run_dir}/cpu-fused.report" >"${run_dir}/cpu-fused.work-signature"
 awk '$1 == "attempt" { print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }' \
   "${run_dir}/cuda.report" >"${run_dir}/cuda.work-signature"
 awk '$1 == "attempt" { print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }' \
@@ -200,6 +212,7 @@ awk '$1 == "attempt" { print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }' \
 awk '$1 == "attempt" { print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11 }' \
   "${run_dir}/fused.report" >"${run_dir}/fused.work-signature"
 cmp "${run_dir}/cpu.work-signature" "${run_dir}/cuda.work-signature"
+cmp "${run_dir}/cpu.work-signature" "${run_dir}/cpu-fused.work-signature"
 cmp "${run_dir}/cpu.work-signature" "${run_dir}/hybrid.work-signature"
 cmp "${run_dir}/cpu.work-signature" "${run_dir}/fused.work-signature"
 
@@ -208,16 +221,20 @@ read_field() {
 }
 
 cpu_search_ms="$(read_field "${run_dir}/cpu.report" search_ms)"
+cpu_fused_search_ms="$(read_field "${run_dir}/cpu-fused.report" search_ms)"
 cuda_search_ms="$(read_field "${run_dir}/cuda.report" search_ms)"
 hybrid_search_ms="$(read_field "${run_dir}/hybrid.report" search_ms)"
 fused_search_ms="$(read_field "${run_dir}/fused.report" search_ms)"
 cpu_candidate_ms="$(read_field "${run_dir}/cpu.report" candidate_ms)"
+cpu_fused_candidate_ms="$(read_field "${run_dir}/cpu-fused.report" candidate_ms)"
 cuda_candidate_ms="$(read_field "${run_dir}/cuda.report" candidate_ms)"
 hybrid_candidate_ms="$(read_field "${run_dir}/hybrid.report" candidate_ms)"
 cpu_work_graph_ms="$(read_field "${run_dir}/cpu.report" work_graph_ms)"
+cpu_fused_work_graph_ms="$(read_field "${run_dir}/cpu-fused.report" work_graph_ms)"
 cuda_work_graph_ms="$(read_field "${run_dir}/cuda.report" work_graph_ms)"
 hybrid_work_graph_ms="$(read_field "${run_dir}/hybrid.report" work_graph_ms)"
 cpu_leaf_ms="$(read_field "${run_dir}/cpu.report" leaf_ms)"
+cpu_fused_leaf_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_ms)"
 cuda_leaf_ms="$(read_field "${run_dir}/cuda.report" leaf_ms)"
 hybrid_leaf_ms="$(read_field "${run_dir}/hybrid.report" leaf_ms)"
 fused_leaf_ms="$(read_field "${run_dir}/fused.report" leaf_ms)"
@@ -225,13 +242,17 @@ hybrid_leaf_cuda_batches="$(read_field "${run_dir}/hybrid.report" leaf_cuda_cost
 fused_leaf_cuda_batches="$(read_field "${run_dir}/fused.report" leaf_cuda_cost_batches)"
 hybrid_leaf_frontier_batches="$(read_field "${run_dir}/hybrid.report" leaf_frontier_batches)"
 fused_leaf_frontier_batches="$(read_field "${run_dir}/fused.report" leaf_frontier_batches)"
+cpu_fused_leaf_frontier_batches="$(read_field "${run_dir}/cpu-fused.report" leaf_frontier_batches)"
 hybrid_leaf_bucket_count="$(read_field "${run_dir}/hybrid.report" leaf_bucket_count)"
 fused_leaf_bucket_count="$(read_field "${run_dir}/fused.report" leaf_bucket_count)"
+cpu_fused_leaf_bucket_count="$(read_field "${run_dir}/cpu-fused.report" leaf_bucket_count)"
 hybrid_leaf_cells="$(read_field "${run_dir}/hybrid.report" leaf_cost_cells)"
 fused_leaf_cells="$(read_field "${run_dir}/fused.report" leaf_cost_cells)"
 cpu_leaf_cells="$(read_field "${run_dir}/cpu.report" leaf_cost_cells)"
+cpu_fused_leaf_cells="$(read_field "${run_dir}/cpu-fused.report" leaf_cost_cells)"
 cuda_leaf_cells="$(read_field "${run_dir}/cuda.report" leaf_cost_cells)"
-if [[ "${cpu_leaf_cells}" != "${cuda_leaf_cells}" ||
+if [[ "${cpu_leaf_cells}" != "${cpu_fused_leaf_cells}" ||
+      "${cpu_leaf_cells}" != "${cuda_leaf_cells}" ||
       "${cpu_leaf_cells}" != "${hybrid_leaf_cells}" ||
       "${cpu_leaf_cells}" != "${fused_leaf_cells}" ]]; then
   echo "leaf bucket 融合改变了 cost cell 工作量" >&2
@@ -251,6 +272,20 @@ cpu_leaf_completeness_fallback_ms="$(read_field "${run_dir}/cpu.report" leaf_com
 cpu_leaf_scalar_search_ms="$(read_field "${run_dir}/cpu.report" leaf_scalar_search_ms)"
 cpu_leaf_apply_ms="$(read_field "${run_dir}/cpu.report" leaf_apply_ms)"
 cpu_leaf_proof_verify_ms="$(read_field "${run_dir}/cpu.report" leaf_proof_verify_ms)"
+cpu_fused_leaf_setup_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_setup_ms)"
+cpu_fused_leaf_proof_initialize_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_proof_initialize_ms)"
+cpu_fused_leaf_coverage_scan_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_coverage_scan_ms)"
+cpu_fused_leaf_cursor_construct_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_cursor_construct_ms)"
+cpu_fused_leaf_cursor_prepare_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_cursor_prepare_ms)"
+cpu_fused_leaf_cost_evaluate_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_cost_evaluate_ms)"
+cpu_fused_leaf_cost_cpu_certify_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_cost_cpu_certify_ms)"
+cpu_fused_leaf_cost_scatter_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_cost_scatter_ms)"
+cpu_fused_leaf_cursor_consume_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_cursor_consume_ms)"
+cpu_fused_leaf_candidate_recheck_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_candidate_recheck_ms)"
+cpu_fused_leaf_completeness_fallback_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_completeness_fallback_ms)"
+cpu_fused_leaf_scalar_search_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_scalar_search_ms)"
+cpu_fused_leaf_apply_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_apply_ms)"
+cpu_fused_leaf_proof_verify_ms="$(read_field "${run_dir}/cpu-fused.report" leaf_proof_verify_ms)"
 cuda_leaf_setup_ms="$(read_field "${run_dir}/cuda.report" leaf_setup_ms)"
 cuda_leaf_proof_initialize_ms="$(read_field "${run_dir}/cuda.report" leaf_proof_initialize_ms)"
 cuda_leaf_coverage_scan_ms="$(read_field "${run_dir}/cuda.report" leaf_coverage_scan_ms)"
@@ -294,42 +329,52 @@ fused_leaf_scalar_search_ms="$(read_field "${run_dir}/fused.report" leaf_scalar_
 fused_leaf_apply_ms="$(read_field "${run_dir}/fused.report" leaf_apply_ms)"
 fused_leaf_proof_verify_ms="$(read_field "${run_dir}/fused.report" leaf_proof_verify_ms)"
 cpu_leaf_cost_rows="$(read_field "${run_dir}/cpu.report" leaf_cost_rows_consumed)"
+cpu_fused_leaf_cost_rows="$(read_field "${run_dir}/cpu-fused.report" leaf_cost_rows_consumed)"
 cuda_leaf_cost_rows="$(read_field "${run_dir}/cuda.report" leaf_cost_rows_consumed)"
 hybrid_leaf_cost_rows="$(read_field "${run_dir}/hybrid.report" leaf_cost_rows_consumed)"
 fused_leaf_cost_rows="$(read_field "${run_dir}/fused.report" leaf_cost_rows_consumed)"
 cpu_leaf_candidate_rechecks="$(read_field "${run_dir}/cpu.report" leaf_candidate_templates_rechecked)"
+cpu_fused_leaf_candidate_rechecks="$(read_field "${run_dir}/cpu-fused.report" leaf_candidate_templates_rechecked)"
 cuda_leaf_candidate_rechecks="$(read_field "${run_dir}/cuda.report" leaf_candidate_templates_rechecked)"
 hybrid_leaf_candidate_rechecks="$(read_field "${run_dir}/hybrid.report" leaf_candidate_templates_rechecked)"
 fused_leaf_candidate_rechecks="$(read_field "${run_dir}/fused.report" leaf_candidate_templates_rechecked)"
 cpu_leaf_completeness_rows="$(read_field "${run_dir}/cpu.report" leaf_cpu_completeness_rows)"
+cpu_fused_leaf_completeness_rows="$(read_field "${run_dir}/cpu-fused.report" leaf_cpu_completeness_rows)"
 cuda_leaf_completeness_rows="$(read_field "${run_dir}/cuda.report" leaf_cpu_completeness_rows)"
 hybrid_leaf_completeness_rows="$(read_field "${run_dir}/hybrid.report" leaf_cpu_completeness_rows)"
 fused_leaf_completeness_rows="$(read_field "${run_dir}/fused.report" leaf_cpu_completeness_rows)"
 cpu_leaf_completeness_templates="$(read_field "${run_dir}/cpu.report" leaf_cpu_completeness_templates)"
+cpu_fused_leaf_completeness_templates="$(read_field "${run_dir}/cpu-fused.report" leaf_cpu_completeness_templates)"
 cuda_leaf_completeness_templates="$(read_field "${run_dir}/cuda.report" leaf_cpu_completeness_templates)"
 hybrid_leaf_completeness_templates="$(read_field "${run_dir}/hybrid.report" leaf_cpu_completeness_templates)"
 fused_leaf_completeness_templates="$(read_field "${run_dir}/fused.report" leaf_cpu_completeness_templates)"
 cpu_leaf_cpu_certified_cells="$(read_field "${run_dir}/cpu.report" leaf_cpu_certified_cost_cells)"
+cpu_fused_leaf_cpu_certified_cells="$(read_field "${run_dir}/cpu-fused.report" leaf_cpu_certified_cost_cells)"
 cuda_leaf_cpu_certified_cells="$(read_field "${run_dir}/cuda.report" leaf_cpu_certified_cost_cells)"
 hybrid_leaf_cpu_certified_cells="$(read_field "${run_dir}/hybrid.report" leaf_cpu_certified_cost_cells)"
 fused_leaf_cpu_certified_cells="$(read_field "${run_dir}/fused.report" leaf_cpu_certified_cost_cells)"
 cpu_leaf_parallel_batches="$(read_field "${run_dir}/cpu.report" leaf_cpu_parallel_cost_batches)"
+cpu_fused_leaf_parallel_batches="$(read_field "${run_dir}/cpu-fused.report" leaf_cpu_parallel_cost_batches)"
 cuda_leaf_parallel_batches="$(read_field "${run_dir}/cuda.report" leaf_cpu_parallel_cost_batches)"
 hybrid_leaf_parallel_batches="$(read_field "${run_dir}/hybrid.report" leaf_cpu_parallel_cost_batches)"
 fused_leaf_parallel_batches="$(read_field "${run_dir}/fused.report" leaf_cpu_parallel_cost_batches)"
 cpu_leaf_parallel_cells="$(read_field "${run_dir}/cpu.report" leaf_cpu_parallel_cost_cells)"
+cpu_fused_leaf_parallel_cells="$(read_field "${run_dir}/cpu-fused.report" leaf_cpu_parallel_cost_cells)"
 cuda_leaf_parallel_cells="$(read_field "${run_dir}/cuda.report" leaf_cpu_parallel_cost_cells)"
 hybrid_leaf_parallel_cells="$(read_field "${run_dir}/hybrid.report" leaf_cpu_parallel_cost_cells)"
 fused_leaf_parallel_cells="$(read_field "${run_dir}/fused.report" leaf_cpu_parallel_cost_cells)"
 cpu_peak_leaf_threads="$(read_field "${run_dir}/cpu.report" peak_leaf_cpu_cost_threads)"
+cpu_fused_peak_leaf_threads="$(read_field "${run_dir}/cpu-fused.report" peak_leaf_cpu_cost_threads)"
 cuda_peak_leaf_threads="$(read_field "${run_dir}/cuda.report" peak_leaf_cpu_cost_threads)"
 hybrid_peak_leaf_threads="$(read_field "${run_dir}/hybrid.report" peak_leaf_cpu_cost_threads)"
 fused_peak_leaf_threads="$(read_field "${run_dir}/fused.report" peak_leaf_cpu_cost_threads)"
 cpu_leaf_cursor_searches="$(read_field "${run_dir}/cpu.report" leaf_cursor_searches_started)"
+cpu_fused_leaf_cursor_searches="$(read_field "${run_dir}/cpu-fused.report" leaf_cursor_searches_started)"
 cuda_leaf_cursor_searches="$(read_field "${run_dir}/cuda.report" leaf_cursor_searches_started)"
 hybrid_leaf_cursor_searches="$(read_field "${run_dir}/hybrid.report" leaf_cursor_searches_started)"
 fused_leaf_cursor_searches="$(read_field "${run_dir}/fused.report" leaf_cursor_searches_started)"
-if [[ "${cpu_leaf_cursor_searches}" != "${cuda_leaf_cursor_searches}" ||
+if [[ "${cpu_leaf_cursor_searches}" != "${cpu_fused_leaf_cursor_searches}" ||
+      "${cpu_leaf_cursor_searches}" != "${cuda_leaf_cursor_searches}" ||
       "${cpu_leaf_cursor_searches}" != "${hybrid_leaf_cursor_searches}" ||
       "${cpu_leaf_cursor_searches}" != "${fused_leaf_cursor_searches}" ||
       "${cpu_leaf_parallel_batches}" != "${cuda_leaf_parallel_batches}" ||
@@ -338,6 +383,7 @@ if [[ "${cpu_leaf_cursor_searches}" != "${cuda_leaf_cursor_searches}" ||
       "${cpu_leaf_parallel_cells}" != "${hybrid_leaf_parallel_cells}" ||
       "${cpu_peak_leaf_threads}" != "${cuda_peak_leaf_threads}" ||
       "${cpu_peak_leaf_threads}" != "${hybrid_peak_leaf_threads}" ||
+      "${cpu_leaf_cost_rows}" != "${cpu_fused_leaf_cost_rows}" ||
       "${cpu_leaf_cost_rows}" != "${cuda_leaf_cost_rows}" ||
       "${cpu_leaf_cost_rows}" != "${hybrid_leaf_cost_rows}" ||
       "${cuda_leaf_cost_rows}" != "${fused_leaf_cost_rows}" ||
@@ -345,23 +391,29 @@ if [[ "${cpu_leaf_cursor_searches}" != "${cuda_leaf_cursor_searches}" ||
       "${cpu_leaf_candidate_rechecks}" != "${hybrid_leaf_candidate_rechecks}" ||
       "${cuda_leaf_candidate_rechecks}" != "${hybrid_leaf_candidate_rechecks}" ||
       "${cuda_leaf_candidate_rechecks}" != "${fused_leaf_candidate_rechecks}" ||
+      "${cpu_leaf_candidate_rechecks}" != "${cpu_fused_leaf_candidate_rechecks}" ||
       "${cpu_leaf_completeness_rows}" != "${cuda_leaf_completeness_rows}" ||
       "${cuda_leaf_completeness_rows}" != "${hybrid_leaf_completeness_rows}" ||
       "${cuda_leaf_completeness_rows}" != "${fused_leaf_completeness_rows}" ||
+      "${cpu_leaf_completeness_rows}" != "${cpu_fused_leaf_completeness_rows}" ||
       "${cpu_leaf_completeness_templates}" != "${cuda_leaf_completeness_templates}" ||
       "${cuda_leaf_completeness_templates}" != "${hybrid_leaf_completeness_templates}" ||
       "${cuda_leaf_completeness_templates}" != "${fused_leaf_completeness_templates}" ||
+      "${cpu_leaf_completeness_templates}" != "${cpu_fused_leaf_completeness_templates}" ||
       "${cpu_leaf_cpu_certified_cells}" != "${cuda_leaf_cpu_certified_cells}" ||
       "${cuda_leaf_cpu_certified_cells}" != "${hybrid_leaf_cpu_certified_cells}" ||
       "${cuda_leaf_cpu_certified_cells}" != "${fused_leaf_cpu_certified_cells}" ||
+      "${cpu_leaf_cpu_certified_cells}" != "${cpu_fused_leaf_cpu_certified_cells}" ||
       "${cpu_leaf_cpu_certified_cells}" != "${cpu_leaf_cells}" ]]; then
-  echo "四路 leaf consume 的规范工作计数不一致" >&2
+  echo "五路 leaf consume 的规范工作计数不一致" >&2
   exit 1
 fi
 cpu_path_append_ms="$(read_field "${run_dir}/cpu.report" path_append_ms)"
+cpu_fused_path_append_ms="$(read_field "${run_dir}/cpu-fused.report" path_append_ms)"
 cuda_path_append_ms="$(read_field "${run_dir}/cuda.report" path_append_ms)"
 hybrid_path_append_ms="$(read_field "${run_dir}/hybrid.report" path_append_ms)"
 cpu_hamilton_reply_ms="$(read_field "${run_dir}/cpu.report" hamilton_reply_ms)"
+cpu_fused_hamilton_reply_ms="$(read_field "${run_dir}/cpu-fused.report" hamilton_reply_ms)"
 cuda_hamilton_reply_ms="$(read_field "${run_dir}/cuda.report" hamilton_reply_ms)"
 hybrid_hamilton_reply_ms="$(read_field "${run_dir}/hybrid.report" hamilton_reply_ms)"
 fused_hamilton_reply_ms="$(read_field "${run_dir}/fused.report" hamilton_reply_ms)"
@@ -382,44 +434,55 @@ cuda_hamilton_reply_compare_ms="$(read_field "${run_dir}/cuda.report" hamilton_r
 hybrid_hamilton_reply_compare_ms="$(read_field "${run_dir}/hybrid.report" hamilton_reply_cuda_compare_ms)"
 fused_hamilton_reply_compare_ms="$(read_field "${run_dir}/fused.report" hamilton_reply_cuda_compare_ms)"
 cpu_hamilton_reply_batches="$(read_field "${run_dir}/cpu.report" hamilton_reply_batches)"
+cpu_fused_hamilton_reply_batches="$(read_field "${run_dir}/cpu-fused.report" hamilton_reply_batches)"
 cuda_hamilton_reply_batches="$(read_field "${run_dir}/cuda.report" hamilton_reply_batches)"
 hybrid_hamilton_reply_batches="$(read_field "${run_dir}/hybrid.report" hamilton_reply_batches)"
 fused_hamilton_reply_batches="$(read_field "${run_dir}/fused.report" hamilton_reply_batches)"
 cpu_hamilton_reply_centers="$(read_field "${run_dir}/cpu.report" hamilton_reply_centers)"
+cpu_fused_hamilton_reply_centers="$(read_field "${run_dir}/cpu-fused.report" hamilton_reply_centers)"
 cuda_hamilton_reply_centers="$(read_field "${run_dir}/cuda.report" hamilton_reply_centers)"
 hybrid_hamilton_reply_centers="$(read_field "${run_dir}/hybrid.report" hamilton_reply_centers)"
 fused_hamilton_reply_centers="$(read_field "${run_dir}/fused.report" hamilton_reply_centers)"
 cpu_hamilton_reply_unique_centers="$(read_field "${run_dir}/cpu.report" hamilton_reply_unique_centers)"
+cpu_fused_hamilton_reply_unique_centers="$(read_field "${run_dir}/cpu-fused.report" hamilton_reply_unique_centers)"
 cuda_hamilton_reply_unique_centers="$(read_field "${run_dir}/cuda.report" hamilton_reply_unique_centers)"
 hybrid_hamilton_reply_unique_centers="$(read_field "${run_dir}/hybrid.report" hamilton_reply_unique_centers)"
 fused_hamilton_reply_unique_centers="$(read_field "${run_dir}/fused.report" hamilton_reply_unique_centers)"
 cpu_hamilton_reply_pairs="$(read_field "${run_dir}/cpu.report" hamilton_reply_neighbor_pairs_tested)"
+cpu_fused_hamilton_reply_pairs="$(read_field "${run_dir}/cpu-fused.report" hamilton_reply_neighbor_pairs_tested)"
 cuda_hamilton_reply_pairs="$(read_field "${run_dir}/cuda.report" hamilton_reply_neighbor_pairs_tested)"
 hybrid_hamilton_reply_pairs="$(read_field "${run_dir}/hybrid.report" hamilton_reply_neighbor_pairs_tested)"
 fused_hamilton_reply_pairs="$(read_field "${run_dir}/fused.report" hamilton_reply_neighbor_pairs_tested)"
 cpu_hamilton_replies_generated="$(read_field "${run_dir}/cpu.report" hamilton_replies_generated)"
+cpu_fused_hamilton_replies_generated="$(read_field "${run_dir}/cpu-fused.report" hamilton_replies_generated)"
 cuda_hamilton_replies_generated="$(read_field "${run_dir}/cuda.report" hamilton_replies_generated)"
 hybrid_hamilton_replies_generated="$(read_field "${run_dir}/hybrid.report" hamilton_replies_generated)"
 fused_hamilton_replies_generated="$(read_field "${run_dir}/fused.report" hamilton_replies_generated)"
-if [[ "${cpu_hamilton_reply_batches}" != "${cuda_hamilton_reply_batches}" ||
+if [[ "${cpu_hamilton_reply_batches}" != "${cpu_fused_hamilton_reply_batches}" ||
+      "${cpu_hamilton_reply_batches}" != "${cuda_hamilton_reply_batches}" ||
       "${cpu_hamilton_reply_batches}" != "${hybrid_hamilton_reply_batches}" ||
       "${cpu_hamilton_reply_batches}" != "${fused_hamilton_reply_batches}" ||
       "${cpu_hamilton_reply_centers}" != "${cuda_hamilton_reply_centers}" ||
       "${cpu_hamilton_reply_centers}" != "${hybrid_hamilton_reply_centers}" ||
       "${cpu_hamilton_reply_centers}" != "${fused_hamilton_reply_centers}" ||
+      "${cpu_hamilton_reply_centers}" != "${cpu_fused_hamilton_reply_centers}" ||
       "${cpu_hamilton_reply_unique_centers}" != "${cuda_hamilton_reply_unique_centers}" ||
       "${cpu_hamilton_reply_unique_centers}" != "${hybrid_hamilton_reply_unique_centers}" ||
       "${cpu_hamilton_reply_unique_centers}" != "${fused_hamilton_reply_unique_centers}" ||
+      "${cpu_hamilton_reply_unique_centers}" != "${cpu_fused_hamilton_reply_unique_centers}" ||
       "${cpu_hamilton_reply_pairs}" != "${cuda_hamilton_reply_pairs}" ||
       "${cpu_hamilton_reply_pairs}" != "${hybrid_hamilton_reply_pairs}" ||
       "${cpu_hamilton_reply_pairs}" != "${fused_hamilton_reply_pairs}" ||
+      "${cpu_hamilton_reply_pairs}" != "${cpu_fused_hamilton_reply_pairs}" ||
       "${cpu_hamilton_replies_generated}" != "${cuda_hamilton_replies_generated}" ||
       "${cpu_hamilton_replies_generated}" != "${hybrid_hamilton_replies_generated}" ||
-      "${cpu_hamilton_replies_generated}" != "${fused_hamilton_replies_generated}" ]]; then
-  echo "四路 Hamilton reply 的规范工作计数不一致" >&2
+      "${cpu_hamilton_replies_generated}" != "${fused_hamilton_replies_generated}" ||
+      "${cpu_hamilton_replies_generated}" != "${cpu_fused_hamilton_replies_generated}" ]]; then
+  echo "五路 Hamilton reply 的规范工作计数不一致" >&2
   exit 1
 fi
 cpu_end_reply_ms="$(read_field "${run_dir}/cpu.report" end_reply_ms)"
+cpu_fused_end_reply_ms="$(read_field "${run_dir}/cpu-fused.report" end_reply_ms)"
 cuda_end_reply_ms="$(read_field "${run_dir}/cuda.report" end_reply_ms)"
 hybrid_end_reply_ms="$(read_field "${run_dir}/hybrid.report" end_reply_ms)"
 cpu_propagation_ms="$(read_field "${run_dir}/cpu.report" propagation_ms)"
@@ -438,10 +501,12 @@ cpu_commit_ms="$(read_field "${run_dir}/cpu.report" commit_ms)"
 cuda_commit_ms="$(read_field "${run_dir}/cuda.report" commit_ms)"
 hybrid_commit_ms="$(read_field "${run_dir}/hybrid.report" commit_ms)"
 cpu_total_ms="$(read_field "${run_dir}/cpu.report" total_ms)"
+cpu_fused_total_ms="$(read_field "${run_dir}/cpu-fused.report" total_ms)"
 cuda_total_ms="$(read_field "${run_dir}/cuda.report" total_ms)"
 hybrid_total_ms="$(read_field "${run_dir}/hybrid.report" total_ms)"
 fused_total_ms="$(read_field "${run_dir}/fused.report" total_ms)"
 cpu_wall_ms="$(<"${run_dir}/cpu.wall-ms")"
+cpu_fused_wall_ms="$(<"${run_dir}/cpu-fused.wall-ms")"
 cuda_wall_ms="$(<"${run_dir}/cuda.wall-ms")"
 hybrid_wall_ms="$(<"${run_dir}/hybrid.wall-ms")"
 fused_wall_ms="$(<"${run_dir}/fused.wall-ms")"
@@ -457,8 +522,11 @@ peak_cache="$(read_field "${run_dir}/cuda.report" peak_leaf_device_cache_bytes)"
 initial_hash="$(read_field "${run_dir}/cuda.report" initial_hash)"
 final_hash="$(read_field "${run_dir}/cuda.report" final_hash)"
 search_speedup="$(awk -v cpu="${cpu_search_ms}" -v cuda="${cuda_search_ms}" 'BEGIN { printf "%.3f", cpu/cuda }')"
+cpu_fused_search_speedup="$(awk -v cpu="${cpu_search_ms}" -v fused="${cpu_fused_search_ms}" 'BEGIN { printf "%.3f", cpu/fused }')"
 wall_speedup="$(awk -v cpu="${cpu_wall_ms}" -v cuda="${cuda_wall_ms}" 'BEGIN { printf "%.3f", cpu/cuda }')"
+cpu_fused_wall_speedup="$(awk -v cpu="${cpu_wall_ms}" -v fused="${cpu_fused_wall_ms}" 'BEGIN { printf "%.3f", cpu/fused }')"
 leaf_speedup="$(awk -v cpu="${cpu_leaf_ms}" -v cuda="${cuda_leaf_ms}" 'BEGIN { printf "%.3f", cpu/cuda }')"
+cpu_fused_leaf_speedup="$(awk -v cpu="${cpu_leaf_ms}" -v fused="${cpu_fused_leaf_ms}" 'BEGIN { printf "%.3f", cpu/fused }')"
 hybrid_search_speedup="$(awk -v cpu="${cpu_search_ms}" -v hybrid="${hybrid_search_ms}" 'BEGIN { printf "%.3f", cpu/hybrid }')"
 hybrid_wall_speedup="$(awk -v cpu="${cpu_wall_ms}" -v hybrid="${hybrid_wall_ms}" 'BEGIN { printf "%.3f", cpu/hybrid }')"
 hybrid_leaf_speedup="$(awk -v cpu="${cpu_leaf_ms}" -v hybrid="${hybrid_leaf_ms}" 'BEGIN { printf "%.3f", cpu/hybrid }')"
@@ -470,6 +538,13 @@ cpu_leaf_residual_ms="$(awk -v total="${cpu_leaf_ms}" -v setup="${cpu_leaf_setup
   -v scatter="${cpu_leaf_cost_scatter_ms}" -v consume="${cpu_leaf_cursor_consume_ms}" \
   -v scalar="${cpu_leaf_scalar_search_ms}" -v apply="${cpu_leaf_apply_ms}" \
   -v verify="${cpu_leaf_proof_verify_ms}" \
+  'BEGIN { printf "%.6f", total-setup-prepare-cost-scatter-consume-scalar-apply-verify }')"
+cpu_fused_leaf_residual_ms="$(awk -v total="${cpu_fused_leaf_ms}" \
+  -v setup="${cpu_fused_leaf_setup_ms}" -v prepare="${cpu_fused_leaf_cursor_prepare_ms}" \
+  -v cost="${cpu_fused_leaf_cost_evaluate_ms}" -v scatter="${cpu_fused_leaf_cost_scatter_ms}" \
+  -v consume="${cpu_fused_leaf_cursor_consume_ms}" \
+  -v scalar="${cpu_fused_leaf_scalar_search_ms}" -v apply="${cpu_fused_leaf_apply_ms}" \
+  -v verify="${cpu_fused_leaf_proof_verify_ms}" \
   'BEGIN { printf "%.6f", total-setup-prepare-cost-scatter-consume-scalar-apply-verify }')"
 cuda_leaf_residual_ms="$(awk -v total="${cuda_leaf_ms}" -v setup="${cuda_leaf_setup_ms}" \
   -v prepare="${cuda_leaf_cursor_prepare_ms}" -v cost="${cuda_leaf_cost_evaluate_ms}" \
@@ -492,6 +567,11 @@ fused_leaf_residual_ms="$(awk -v total="${fused_leaf_ms}" -v setup="${fused_leaf
 cpu_leaf_setup_residual_ms="$(awk -v total="${cpu_leaf_setup_ms}" \
   -v initialize="${cpu_leaf_proof_initialize_ms}" -v coverage="${cpu_leaf_coverage_scan_ms}" \
   -v cursor="${cpu_leaf_cursor_construct_ms}" \
+  'BEGIN { printf "%.6f", total-initialize-coverage-cursor }')"
+cpu_fused_leaf_setup_residual_ms="$(awk -v total="${cpu_fused_leaf_setup_ms}" \
+  -v initialize="${cpu_fused_leaf_proof_initialize_ms}" \
+  -v coverage="${cpu_fused_leaf_coverage_scan_ms}" \
+  -v cursor="${cpu_fused_leaf_cursor_construct_ms}" \
   'BEGIN { printf "%.6f", total-initialize-coverage-cursor }')"
 cuda_leaf_setup_residual_ms="$(awk -v total="${cuda_leaf_setup_ms}" \
   -v initialize="${cuda_leaf_proof_initialize_ms}" -v coverage="${cuda_leaf_coverage_scan_ms}" \
@@ -540,6 +620,10 @@ fused_hamilton_reply_residual_ms="$(awk -v total="${fused_hamilton_reply_ms}" \
 cpu_host_build_ms="$(awk -v work="${cpu_work_graph_ms}" -v leaf="${cpu_leaf_ms}" \
   -v path="${cpu_path_append_ms}" -v hamilton="${cpu_hamilton_reply_ms}" \
   -v end="${cpu_end_reply_ms}" 'BEGIN { printf "%.6f", work-leaf-path-hamilton-end }')"
+cpu_fused_host_build_ms="$(awk -v work="${cpu_fused_work_graph_ms}" \
+  -v leaf="${cpu_fused_leaf_ms}" -v path="${cpu_fused_path_append_ms}" \
+  -v hamilton="${cpu_fused_hamilton_reply_ms}" -v end="${cpu_fused_end_reply_ms}" \
+  'BEGIN { printf "%.6f", work-leaf-path-hamilton-end }')"
 cuda_host_build_ms="$(awk -v work="${cuda_work_graph_ms}" -v leaf="${cuda_leaf_ms}" \
   -v path="${cuda_path_append_ms}" -v hamilton="${cuda_hamilton_reply_ms}" \
   -v end="${cuda_end_reply_ms}" 'BEGIN { printf "%.6f", work-leaf-path-hamilton-end }')"
@@ -567,7 +651,7 @@ manifest="${run_dir}/run-manifest-v1"
   echo "target_offset ${target_offset}"
   echo "max_targets ${max_targets}"
   echo "target_order weight-desc"
-  echo "benchmark_modes cpu,cuda-all,hybrid-leaf-cuda,fused-leaf-buckets"
+  echo "benchmark_modes cpu,cpu-fused,cuda-all,hybrid-leaf-cuda,fused-leaf-buckets"
   echo "cd_mode missing-or-incompatible"
   echo "max_neighborhood 25"
   echo "max_cd_candidates 5"
@@ -599,7 +683,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V11"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V12"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -611,15 +695,19 @@ summary="${run_dir}/summary.txt"
   echo "cuda_leaf_cost_cells ${leaf_cells}"
   echo "cuda_peak_leaf_device_cache_bytes ${peak_cache}"
   echo "cpu_candidate_ms ${cpu_candidate_ms}"
+  echo "cpu_fused_candidate_ms ${cpu_fused_candidate_ms}"
   echo "cuda_candidate_ms ${cuda_candidate_ms}"
   echo "hybrid_candidate_ms ${hybrid_candidate_ms}"
   echo "cpu_work_graph_ms ${cpu_work_graph_ms}"
+  echo "cpu_fused_work_graph_ms ${cpu_fused_work_graph_ms}"
   echo "cuda_work_graph_ms ${cuda_work_graph_ms}"
   echo "hybrid_work_graph_ms ${hybrid_work_graph_ms}"
   echo "cpu_host_build_residual_ms ${cpu_host_build_ms}"
+  echo "cpu_fused_host_build_residual_ms ${cpu_fused_host_build_ms}"
   echo "cuda_host_build_residual_ms ${cuda_host_build_ms}"
   echo "hybrid_host_build_residual_ms ${hybrid_host_build_ms}"
   echo "cpu_leaf_ms ${cpu_leaf_ms}"
+  echo "cpu_fused_leaf_ms ${cpu_fused_leaf_ms}"
   echo "cuda_leaf_ms ${cuda_leaf_ms}"
   echo "hybrid_leaf_ms ${hybrid_leaf_ms}"
   echo "fused_leaf_ms ${fused_leaf_ms}"
@@ -627,8 +715,10 @@ summary="${run_dir}/summary.txt"
   echo "fused_leaf_cuda_batches ${fused_leaf_cuda_batches}"
   echo "hybrid_leaf_frontier_batches ${hybrid_leaf_frontier_batches}"
   echo "fused_leaf_frontier_batches ${fused_leaf_frontier_batches}"
+  echo "cpu_fused_leaf_frontier_batches ${cpu_fused_leaf_frontier_batches}"
   echo "hybrid_leaf_bucket_count ${hybrid_leaf_bucket_count}"
   echo "fused_leaf_bucket_count ${fused_leaf_bucket_count}"
+  echo "cpu_fused_leaf_bucket_count ${cpu_fused_leaf_bucket_count}"
   echo "leaf_cursor_searches_started ${cpu_leaf_cursor_searches}"
   echo "cpu_leaf_setup_ms ${cpu_leaf_setup_ms}"
   echo "cpu_leaf_proof_initialize_ms ${cpu_leaf_proof_initialize_ms}"
@@ -646,6 +736,22 @@ summary="${run_dir}/summary.txt"
   echo "cpu_leaf_apply_ms ${cpu_leaf_apply_ms}"
   echo "cpu_leaf_proof_verify_ms ${cpu_leaf_proof_verify_ms}"
   echo "cpu_leaf_residual_ms ${cpu_leaf_residual_ms}"
+  echo "cpu_fused_leaf_setup_ms ${cpu_fused_leaf_setup_ms}"
+  echo "cpu_fused_leaf_proof_initialize_ms ${cpu_fused_leaf_proof_initialize_ms}"
+  echo "cpu_fused_leaf_coverage_scan_ms ${cpu_fused_leaf_coverage_scan_ms}"
+  echo "cpu_fused_leaf_cursor_construct_ms ${cpu_fused_leaf_cursor_construct_ms}"
+  echo "cpu_fused_leaf_setup_residual_ms ${cpu_fused_leaf_setup_residual_ms}"
+  echo "cpu_fused_leaf_cursor_prepare_ms ${cpu_fused_leaf_cursor_prepare_ms}"
+  echo "cpu_fused_leaf_cost_evaluate_ms ${cpu_fused_leaf_cost_evaluate_ms}"
+  echo "cpu_fused_leaf_cost_cpu_certify_ms ${cpu_fused_leaf_cost_cpu_certify_ms}"
+  echo "cpu_fused_leaf_cost_scatter_ms ${cpu_fused_leaf_cost_scatter_ms}"
+  echo "cpu_fused_leaf_cursor_consume_ms ${cpu_fused_leaf_cursor_consume_ms}"
+  echo "cpu_fused_leaf_candidate_recheck_ms ${cpu_fused_leaf_candidate_recheck_ms}"
+  echo "cpu_fused_leaf_completeness_fallback_ms ${cpu_fused_leaf_completeness_fallback_ms}"
+  echo "cpu_fused_leaf_scalar_search_ms ${cpu_fused_leaf_scalar_search_ms}"
+  echo "cpu_fused_leaf_apply_ms ${cpu_fused_leaf_apply_ms}"
+  echo "cpu_fused_leaf_proof_verify_ms ${cpu_fused_leaf_proof_verify_ms}"
+  echo "cpu_fused_leaf_residual_ms ${cpu_fused_leaf_residual_ms}"
   echo "cuda_leaf_setup_ms ${cuda_leaf_setup_ms}"
   echo "cuda_leaf_proof_initialize_ms ${cuda_leaf_proof_initialize_ms}"
   echo "cuda_leaf_coverage_scan_ms ${cuda_leaf_coverage_scan_ms}"
@@ -703,24 +809,30 @@ summary="${run_dir}/summary.txt"
   echo "leaf_cpu_completeness_templates ${cpu_leaf_completeness_templates}"
   echo "leaf_cpu_certified_cost_cells ${cpu_leaf_cpu_certified_cells}"
   echo "cpu_leaf_parallel_cost_batches ${cpu_leaf_parallel_batches}"
+  echo "cpu_fused_leaf_parallel_cost_batches ${cpu_fused_leaf_parallel_batches}"
   echo "cuda_leaf_parallel_cost_batches ${cuda_leaf_parallel_batches}"
   echo "hybrid_leaf_parallel_cost_batches ${hybrid_leaf_parallel_batches}"
   echo "fused_leaf_parallel_cost_batches ${fused_leaf_parallel_batches}"
   echo "cpu_leaf_parallel_cost_cells ${cpu_leaf_parallel_cells}"
+  echo "cpu_fused_leaf_parallel_cost_cells ${cpu_fused_leaf_parallel_cells}"
   echo "cuda_leaf_parallel_cost_cells ${cuda_leaf_parallel_cells}"
   echo "hybrid_leaf_parallel_cost_cells ${hybrid_leaf_parallel_cells}"
   echo "fused_leaf_parallel_cost_cells ${fused_leaf_parallel_cells}"
   echo "cpu_peak_leaf_cpu_cost_threads ${cpu_peak_leaf_threads}"
+  echo "cpu_fused_peak_leaf_cpu_cost_threads ${cpu_fused_peak_leaf_threads}"
   echo "cuda_peak_leaf_cpu_cost_threads ${cuda_peak_leaf_threads}"
   echo "hybrid_peak_leaf_cpu_cost_threads ${hybrid_peak_leaf_threads}"
   echo "fused_peak_leaf_cpu_cost_threads ${fused_peak_leaf_threads}"
   echo "leaf_speedup ${leaf_speedup}"
+  echo "cpu_fused_leaf_speedup ${cpu_fused_leaf_speedup}"
   echo "hybrid_leaf_speedup ${hybrid_leaf_speedup}"
   echo "fused_leaf_speedup_vs_hybrid ${fused_leaf_speedup}"
   echo "cpu_path_append_ms ${cpu_path_append_ms}"
+  echo "cpu_fused_path_append_ms ${cpu_fused_path_append_ms}"
   echo "cuda_path_append_ms ${cuda_path_append_ms}"
   echo "hybrid_path_append_ms ${hybrid_path_append_ms}"
   echo "cpu_hamilton_reply_ms ${cpu_hamilton_reply_ms}"
+  echo "cpu_fused_hamilton_reply_ms ${cpu_fused_hamilton_reply_ms}"
   echo "cuda_hamilton_reply_ms ${cuda_hamilton_reply_ms}"
   echo "hybrid_hamilton_reply_ms ${hybrid_hamilton_reply_ms}"
   echo "fused_hamilton_reply_ms ${fused_hamilton_reply_ms}"
@@ -750,6 +862,7 @@ summary="${run_dir}/summary.txt"
   echo "hamilton_reply_neighbor_pairs_tested ${cpu_hamilton_reply_pairs}"
   echo "hamilton_replies_generated ${cpu_hamilton_replies_generated}"
   echo "cpu_end_reply_ms ${cpu_end_reply_ms}"
+  echo "cpu_fused_end_reply_ms ${cpu_fused_end_reply_ms}"
   echo "cuda_end_reply_ms ${cuda_end_reply_ms}"
   echo "hybrid_end_reply_ms ${hybrid_end_reply_ms}"
   echo "cpu_propagation_ms ${cpu_propagation_ms}"
@@ -768,6 +881,8 @@ summary="${run_dir}/summary.txt"
   echo "cuda_commit_ms ${cuda_commit_ms}"
   echo "hybrid_commit_ms ${hybrid_commit_ms}"
   echo "cpu_search_ms ${cpu_search_ms}"
+  echo "cpu_fused_search_ms ${cpu_fused_search_ms}"
+  echo "cpu_fused_search_speedup ${cpu_fused_search_speedup}"
   echo "cuda_search_ms ${cuda_search_ms}"
   echo "search_speedup ${search_speedup}"
   echo "hybrid_search_ms ${hybrid_search_ms}"
@@ -775,10 +890,13 @@ summary="${run_dir}/summary.txt"
   echo "fused_search_ms ${fused_search_ms}"
   echo "fused_search_speedup ${fused_search_speedup}"
   echo "cpu_total_ms ${cpu_total_ms}"
+  echo "cpu_fused_total_ms ${cpu_fused_total_ms}"
   echo "cuda_total_ms ${cuda_total_ms}"
   echo "hybrid_total_ms ${hybrid_total_ms}"
   echo "fused_total_ms ${fused_total_ms}"
   echo "cpu_wall_ms ${cpu_wall_ms}"
+  echo "cpu_fused_wall_ms ${cpu_fused_wall_ms}"
+  echo "cpu_fused_wall_speedup ${cpu_fused_wall_speedup}"
   echo "cuda_wall_ms ${cuda_wall_ms}"
   echo "wall_speedup ${wall_speedup}"
   echo "hybrid_wall_ms ${hybrid_wall_ms}"
