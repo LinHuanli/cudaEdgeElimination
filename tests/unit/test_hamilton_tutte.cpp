@@ -183,11 +183,14 @@ void TestHamiltonReplyBatch() {
     const cudaee::HtHamiltonReplyBatchResult cpu = cudaee::EvaluateHtHamiltonReplies(
         graph, {0, 1}, centers, cudaee::PathCompatibilityBackend::kCpu);
     Check(cpu.backend == "cpu" && cpu.cpu_verified && cpu.offsets.size() == centers.size() + 1U &&
-              cpu.offsets.front() == 0U && cpu.offsets.back() == cpu.replies.size(),
+              cpu.offsets.front() == 0U && cpu.offsets.back() == cpu.replies.size() &&
+              cpu.unique_centers == 10U && cpu.neighbor_pairs_tested == 550U &&
+              cpu.validation_ms >= 0.0 && cpu.cpu_enumerate_ms >= 0.0 &&
+              cpu.cuda_evaluate_ms == 0.0 && cpu.cuda_compare_ms == 0.0,
           "CPU Hamilton reply batch metadata and offsets are complete");
     for (std::size_t index = 0; index < centers.size(); ++index) {
       const std::vector<cudaee::HtNeighborPair> expected =
-          cudaee::EnumerateHtHamiltonReplies(graph, {0, 1}, centers[index]);
+          ReferenceReplies(graph, {0, 1}, centers[index]);
       const auto begin = cpu.replies.begin() + static_cast<std::ptrdiff_t>(cpu.offsets[index]);
       const auto end = cpu.replies.begin() + static_cast<std::ptrdiff_t>(cpu.offsets[index + 1U]);
       Check(std::vector<cudaee::HtNeighborPair>(begin, end) == expected,
@@ -200,7 +203,10 @@ void TestHamiltonReplyBatch() {
       const cudaee::HtHamiltonReplyBatchResult gpu = cudaee::EvaluateHtHamiltonReplies(
           graph, {0, 1}, centers, cudaee::PathCompatibilityBackend::kCuda);
       Check(gpu.backend == "cuda" && gpu.selected_device >= 0 && gpu.cpu_verified &&
-                gpu.offsets == cpu.offsets && gpu.replies == cpu.replies,
+                gpu.offsets == cpu.offsets && gpu.replies == cpu.replies &&
+                gpu.unique_centers == cpu.unique_centers &&
+                gpu.neighbor_pairs_tested == cpu.neighbor_pairs_tested &&
+                gpu.cuda_evaluate_ms >= 0.0 && gpu.cuda_compare_ms >= 0.0,
             "CUDA Hamilton reply count/write exactly matches the CPU batch");
     }
 #else
@@ -644,7 +650,14 @@ void TestRecursivePointProof() {
         "CPU wavefront records deterministic CPU-matrix leaf batches");
   Check(wavefront.hamilton_reply_backend == "cpu" && wavefront.hamilton_reply_cpu_verified &&
             wavefront.hamilton_reply_batches > 0U && wavefront.hamilton_reply_centers > 0U &&
-            wavefront.hamilton_replies_generated > 0U,
+            wavefront.hamilton_reply_unique_centers > 0U &&
+            wavefront.hamilton_reply_unique_centers <= wavefront.hamilton_reply_centers &&
+            wavefront.hamilton_reply_neighbor_pairs_tested > 0U &&
+            wavefront.hamilton_replies_generated > 0U &&
+            wavefront.hamilton_reply_ms + 1.0e-6 >= wavefront.hamilton_reply_validation_ms +
+                                                        wavefront.hamilton_reply_cpu_enumerate_ms &&
+            wavefront.hamilton_reply_cuda_evaluate_ms == 0.0 &&
+            wavefront.hamilton_reply_cuda_compare_ms == 0.0,
         "CPU wavefront records fully verified Hamilton reply batches");
   Check(wavefront.reply_frontier_batches > 0U && wavefront.reply_frontier_states > 0U &&
             wavefront.peak_reply_frontier_batch > 1U,
@@ -720,6 +733,9 @@ void TestRecursivePointProof() {
       timed_attempt.leaf_apply_ms + timed_attempt.leaf_proof_verify_ms;
   const double measured_consume_subphases =
       timed_attempt.leaf_candidate_recheck_ms + timed_attempt.leaf_completeness_fallback_ms;
+  const double measured_hamilton_reply_subphases =
+      timed_attempt.hamilton_reply_validation_ms + timed_attempt.hamilton_reply_cpu_enumerate_ms +
+      timed_attempt.hamilton_reply_cuda_evaluate_ms + timed_attempt.hamilton_reply_cuda_compare_ms;
   Check(timed_attempt.candidate_ms >= 0.0 && timed_attempt.work_graph_ms >= 0.0 &&
             timed_attempt.propagation_ms >= 0.0 && timed_attempt.proof_extract_ms >= 0.0 &&
             timed_attempt.proof_verify_ms >= 0.0 && timed_attempt.immediate_verify_ms >= 0.0 &&
@@ -728,11 +744,18 @@ void TestRecursivePointProof() {
             timed_attempt.leaf_cost_evaluate_ms + 1.0e-6 >=
                 timed_attempt.leaf_cost_cpu_certify_ms &&
             timed_attempt.leaf_cursor_consume_ms + 1.0e-6 >= measured_consume_subphases &&
+            timed_attempt.hamilton_reply_ms + 1.0e-6 >= measured_hamilton_reply_subphases &&
             scan.work_graph_ms == timed_attempt.work_graph_ms &&
             scan.leaf_frontier_batches == timed_attempt.leaf_frontier_batches &&
             scan.leaf_frontier_states == timed_attempt.leaf_frontier_states &&
             scan.leaf_bucket_count == timed_attempt.leaf_bucket_count &&
             scan.peak_leaf_frontier_batch == timed_attempt.peak_leaf_frontier_batch &&
+            scan.hamilton_reply_batches == timed_attempt.hamilton_reply_batches &&
+            scan.hamilton_reply_centers == timed_attempt.hamilton_reply_centers &&
+            scan.hamilton_reply_unique_centers == timed_attempt.hamilton_reply_unique_centers &&
+            scan.hamilton_reply_neighbor_pairs_tested ==
+                timed_attempt.hamilton_reply_neighbor_pairs_tested &&
+            scan.hamilton_replies_generated == timed_attempt.hamilton_replies_generated &&
             scan.immediate_verify_ms == timed_attempt.immediate_verify_ms &&
             scan.total_ms + 1.0e-6 >= scan.search_ms,
         "HT scan exposes consistent inclusive phase timings");
@@ -1016,6 +1039,20 @@ void TestRecursivePointProof() {
             cuda_wavefront.leaf_workspace_cache_hits <= cuda_wavefront.leaf_cuda_cost_batches &&
             cuda_wavefront.peak_leaf_device_cache_bytes > 0U,
         "CUDA wavefront uploads one snapshot/template and reports bounded workspace reuse");
+    Check(cuda_wavefront.hamilton_reply_backend == "cuda" &&
+              cuda_wavefront.hamilton_reply_selected_device >= 0 &&
+              cuda_wavefront.hamilton_reply_cpu_verified &&
+              cuda_wavefront.hamilton_reply_unique_centers > 0U &&
+              cuda_wavefront.hamilton_reply_neighbor_pairs_tested > 0U &&
+              cuda_wavefront.hamilton_reply_cpu_enumerate_ms > 0.0 &&
+              cuda_wavefront.hamilton_reply_cuda_evaluate_ms > 0.0 &&
+              cuda_wavefront.hamilton_reply_cuda_compare_ms >= 0.0 &&
+              cuda_wavefront.hamilton_reply_ms + 1.0e-6 >=
+                  cuda_wavefront.hamilton_reply_validation_ms +
+                      cuda_wavefront.hamilton_reply_cpu_enumerate_ms +
+                      cuda_wavefront.hamilton_reply_cuda_evaluate_ms +
+                      cuda_wavefront.hamilton_reply_cuda_compare_ms,
+          "CUDA Hamilton replies expose CPU enumeration and full-array comparison timing");
     cudaee::HtRecursiveOptions auto_long_tail_options = options;
     auto_long_tail_options.root_options.leaf_options.cost_backend =
         cudaee::PathCompatibilityBackend::kAuto;

@@ -1,6 +1,7 @@
 #include "cuda_edge_elimination/hamilton_tutte.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -12,6 +13,12 @@
 
 namespace cudaee {
 namespace {
+
+using SteadyClock = std::chrono::steady_clock;
+
+double ElapsedMilliseconds(const SteadyClock::time_point begin) {
+  return std::chrono::duration<double, std::milli>(SteadyClock::now() - begin).count();
+}
 
 NodeEdge CanonicalEdge(const std::int32_t first, const std::int32_t second) {
   return first < second ? NodeEdge{first, second} : NodeEdge{second, first};
@@ -76,21 +83,6 @@ bool EdgesSurviveTwoOpt(const GraphSnapshot& graph, const NodeEdge target, const
   const __int128 second =
       static_cast<__int128>(graph.Distance(target.u, other.u)) + graph.Distance(target.v, other.v);
   return first >= original || second >= original;
-}
-
-bool ReplySurvivesQuickFilters(const GraphSnapshot& graph, const NodeEdge target,
-                               const std::int32_t center, const std::int32_t first,
-                               const std::int32_t second) {
-  if (CanonicalEdge(first, second) == target ||
-      !EdgesSurviveTwoOpt(graph, target, CanonicalEdge(center, first)) ||
-      !EdgesSurviveTwoOpt(graph, target, CanonicalEdge(center, second))) {
-    return false;
-  }
-  const __int128 original = static_cast<__int128>(graph.Distance(target.u, target.v)) +
-                            graph.Distance(center, first) + graph.Distance(center, second);
-  const __int128 replacement = static_cast<__int128>(graph.Distance(first, second)) +
-                               graph.Distance(target.u, center) + graph.Distance(target.v, center);
-  return original <= replacement;
 }
 
 bool CandidateIsAdmissible(const GraphSnapshot& graph, const NodeEdge target, const std::int32_t c,
@@ -234,6 +226,47 @@ std::vector<std::uint8_t> ScreenCdTasksCpu(const GraphSnapshot& graph, const Nod
   return flags;
 }
 
+void AppendHtHamiltonRepliesUnchecked(const GraphSnapshot& graph, const NodeEdge target,
+                                      const std::int32_t center,
+                                      std::vector<HtNeighborPair>* const replies) {
+  struct NeighborFilter {
+    std::int32_t node{-1};
+    std::int64_t center_cost{};
+    bool survives_two_opt{false};
+  };
+
+  const std::int32_t begin = graph.row_offsets[static_cast<std::size_t>(center)];
+  const std::int32_t end = graph.row_offsets[static_cast<std::size_t>(center) + 1U];
+  std::vector<NeighborFilter> neighbors;
+  neighbors.reserve(static_cast<std::size_t>(end - begin));
+  for (std::int32_t offset = begin; offset < end; ++offset) {
+    const std::int32_t node = graph.neighbors[static_cast<std::size_t>(offset)];
+    neighbors.push_back({node, graph.Distance(center, node),
+                         EdgesSurviveTwoOpt(graph, target, CanonicalEdge(center, node))});
+  }
+
+  const __int128 target_cost = graph.Distance(target.u, target.v);
+  const __int128 center_target_cost =
+      static_cast<__int128>(graph.Distance(target.u, center)) + graph.Distance(target.v, center);
+  for (std::size_t first_index = 0U; first_index < neighbors.size(); ++first_index) {
+    const NeighborFilter& first = neighbors[first_index];
+    for (std::size_t second_index = first_index + 1U; second_index < neighbors.size();
+         ++second_index) {
+      const NeighborFilter& second = neighbors[second_index];
+      if (CanonicalEdge(first.node, second.node) == target || !first.survives_two_opt ||
+          !second.survives_two_opt) {
+        continue;
+      }
+      const __int128 original = target_cost + first.center_cost + second.center_cost;
+      const __int128 replacement =
+          static_cast<__int128>(graph.Distance(first.node, second.node)) + center_target_cost;
+      if (original <= replacement) {
+        replies->push_back({center, first.node, second.node});
+      }
+    }
+  }
+}
+
 std::vector<HtCdCandidate> FinalizeCdCandidates(const GraphSnapshot& graph, const NodeEdge target,
                                                 const HtShallowOptions& options,
                                                 const std::vector<HtCdScreenTask>& tasks,
@@ -246,7 +279,7 @@ std::vector<HtCdCandidate> FinalizeCdCandidates(const GraphSnapshot& graph, cons
   const auto replies_for = [&](const std::int32_t node) -> const std::vector<HtNeighborPair>& {
     const auto index = static_cast<std::size_t>(node);
     if (!reply_cached[index]) {
-      reply_cache[index] = EnumerateHtHamiltonReplies(graph, target, node);
+      AppendHtHamiltonRepliesUnchecked(graph, target, node, &reply_cache[index]);
       reply_cached[index] = true;
     }
     return reply_cache[index];
@@ -294,17 +327,7 @@ std::vector<HtNeighborPair> EnumerateHtHamiltonReplies(const GraphSnapshot& grap
     throw std::invalid_argument(reason.empty() ? "HT reply 中心点非法" : reason);
   }
   std::vector<HtNeighborPair> replies;
-  const std::int32_t begin = graph.row_offsets[static_cast<std::size_t>(center)];
-  const std::int32_t end = graph.row_offsets[static_cast<std::size_t>(center) + 1U];
-  for (std::int32_t first_offset = begin; first_offset < end; ++first_offset) {
-    const std::int32_t first = graph.neighbors[static_cast<std::size_t>(first_offset)];
-    for (std::int32_t second_offset = first_offset + 1; second_offset < end; ++second_offset) {
-      const std::int32_t second = graph.neighbors[static_cast<std::size_t>(second_offset)];
-      if (ReplySurvivesQuickFilters(graph, target, center, first, second)) {
-        replies.push_back({center, first, second});
-      }
-    }
-  }
+  AppendHtHamiltonRepliesUnchecked(graph, target, center, &replies);
   return replies;
 }
 
@@ -312,6 +335,8 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonReplies(const GraphSnapshot& graph,
                                                      const NodeEdge raw_target,
                                                      const std::vector<std::int32_t>& centers,
                                                      const PathCompatibilityBackend backend) {
+  HtHamiltonReplyBatchResult result;
+  const SteadyClock::time_point validation_begin = SteadyClock::now();
   std::string reason;
   if (!ValidateHtGraph(graph, &reason)) {
     throw std::invalid_argument(reason);
@@ -324,19 +349,46 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonReplies(const GraphSnapshot& graph,
       backend != PathCompatibilityBackend::kCuda) {
     throw std::invalid_argument("未知 HT Hamilton reply 后端");
   }
+  for (const std::int32_t center : centers) {
+    if (center < 0 || center >= graph.dimension || center == target.u || center == target.v) {
+      throw std::invalid_argument("HT reply 中心点非法");
+    }
+  }
+  result.validation_ms = ElapsedMilliseconds(validation_begin);
 
-  HtHamiltonReplyBatchResult result;
   result.offsets.reserve(centers.size() + 1U);
   result.offsets.push_back(0U);
+  std::vector<std::int32_t> cache_index(static_cast<std::size_t>(graph.dimension), -1);
+  std::vector<std::vector<HtNeighborPair>> reply_cache;
+  reply_cache.reserve(std::min(centers.size(), static_cast<std::size_t>(graph.dimension)));
+  const SteadyClock::time_point cpu_begin = SteadyClock::now();
   for (const std::int32_t center : centers) {
-    const std::vector<HtNeighborPair> center_replies =
-        EnumerateHtHamiltonReplies(graph, target, center);
+    std::int32_t& cached = cache_index[static_cast<std::size_t>(center)];
+    if (cached < 0) {
+      if (reply_cache.size() >=
+          static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::overflow_error("HT Hamilton reply 中心缓存索引溢出");
+      }
+      cached = static_cast<std::int32_t>(reply_cache.size());
+      reply_cache.emplace_back();
+      AppendHtHamiltonRepliesUnchecked(graph, target, center, &reply_cache.back());
+      ++result.unique_centers;
+      const std::uint64_t degree = static_cast<std::uint64_t>(graph.Degree(center));
+      const std::uint64_t pair_count = degree < 2U ? 0U : degree * (degree - 1U) / 2U;
+      if (pair_count > std::numeric_limits<std::uint64_t>::max() - result.neighbor_pairs_tested) {
+        throw std::overflow_error("HT Hamilton reply 邻边对计数溢出");
+      }
+      result.neighbor_pairs_tested += pair_count;
+    }
+    const std::vector<HtNeighborPair>& center_replies =
+        reply_cache[static_cast<std::size_t>(cached)];
     if (center_replies.size() > std::numeric_limits<std::uint64_t>::max() - result.offsets.back()) {
       throw std::overflow_error("HT Hamilton reply 总数溢出");
     }
     result.replies.insert(result.replies.end(), center_replies.begin(), center_replies.end());
     result.offsets.push_back(result.offsets.back() + center_replies.size());
   }
+  result.cpu_enumerate_ms = ElapsedMilliseconds(cpu_begin);
   result.cpu_verified = true;
   if (backend == PathCompatibilityBackend::kCpu) {
     result.backend = "cpu";
@@ -352,10 +404,12 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonReplies(const GraphSnapshot& graph,
   }
 
   detail::HtHamiltonReplyDeviceBatch cuda_batch;
+  const SteadyClock::time_point cuda_begin = SteadyClock::now();
   try {
     cuda_batch =
         detail::EvaluateHtHamiltonRepliesCuda(graph, target, centers, &result.selected_device);
   } catch (const std::exception&) {
+    result.cuda_evaluate_ms = ElapsedMilliseconds(cuda_begin);
     if (backend == PathCompatibilityBackend::kCuda) {
       throw;
     }
@@ -363,7 +417,11 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonReplies(const GraphSnapshot& graph,
     result.backend = "cpu-fallback";
     return result;
   }
-  if (cuda_batch.offsets != result.offsets || cuda_batch.replies != result.replies) {
+  result.cuda_evaluate_ms = ElapsedMilliseconds(cuda_begin);
+  const SteadyClock::time_point compare_begin = SteadyClock::now();
+  const bool matches = cuda_batch.offsets == result.offsets && cuda_batch.replies == result.replies;
+  result.cuda_compare_ms = ElapsedMilliseconds(compare_begin);
+  if (!matches) {
     throw std::logic_error("CUDA HT Hamilton replies 与 CPU 完整枚举不一致");
   }
   result.backend = "cuda";

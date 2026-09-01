@@ -317,6 +317,61 @@ hybrid_path_append_ms="$(read_field "${run_dir}/hybrid.report" path_append_ms)"
 cpu_hamilton_reply_ms="$(read_field "${run_dir}/cpu.report" hamilton_reply_ms)"
 cuda_hamilton_reply_ms="$(read_field "${run_dir}/cuda.report" hamilton_reply_ms)"
 hybrid_hamilton_reply_ms="$(read_field "${run_dir}/hybrid.report" hamilton_reply_ms)"
+fused_hamilton_reply_ms="$(read_field "${run_dir}/fused.report" hamilton_reply_ms)"
+cpu_hamilton_reply_validation_ms="$(read_field "${run_dir}/cpu.report" hamilton_reply_validation_ms)"
+cuda_hamilton_reply_validation_ms="$(read_field "${run_dir}/cuda.report" hamilton_reply_validation_ms)"
+hybrid_hamilton_reply_validation_ms="$(read_field "${run_dir}/hybrid.report" hamilton_reply_validation_ms)"
+fused_hamilton_reply_validation_ms="$(read_field "${run_dir}/fused.report" hamilton_reply_validation_ms)"
+cpu_hamilton_reply_enumerate_ms="$(read_field "${run_dir}/cpu.report" hamilton_reply_cpu_enumerate_ms)"
+cuda_hamilton_reply_enumerate_ms="$(read_field "${run_dir}/cuda.report" hamilton_reply_cpu_enumerate_ms)"
+hybrid_hamilton_reply_enumerate_ms="$(read_field "${run_dir}/hybrid.report" hamilton_reply_cpu_enumerate_ms)"
+fused_hamilton_reply_enumerate_ms="$(read_field "${run_dir}/fused.report" hamilton_reply_cpu_enumerate_ms)"
+cpu_hamilton_reply_cuda_ms="$(read_field "${run_dir}/cpu.report" hamilton_reply_cuda_evaluate_ms)"
+cuda_hamilton_reply_cuda_ms="$(read_field "${run_dir}/cuda.report" hamilton_reply_cuda_evaluate_ms)"
+hybrid_hamilton_reply_cuda_ms="$(read_field "${run_dir}/hybrid.report" hamilton_reply_cuda_evaluate_ms)"
+fused_hamilton_reply_cuda_ms="$(read_field "${run_dir}/fused.report" hamilton_reply_cuda_evaluate_ms)"
+cpu_hamilton_reply_compare_ms="$(read_field "${run_dir}/cpu.report" hamilton_reply_cuda_compare_ms)"
+cuda_hamilton_reply_compare_ms="$(read_field "${run_dir}/cuda.report" hamilton_reply_cuda_compare_ms)"
+hybrid_hamilton_reply_compare_ms="$(read_field "${run_dir}/hybrid.report" hamilton_reply_cuda_compare_ms)"
+fused_hamilton_reply_compare_ms="$(read_field "${run_dir}/fused.report" hamilton_reply_cuda_compare_ms)"
+cpu_hamilton_reply_batches="$(read_field "${run_dir}/cpu.report" hamilton_reply_batches)"
+cuda_hamilton_reply_batches="$(read_field "${run_dir}/cuda.report" hamilton_reply_batches)"
+hybrid_hamilton_reply_batches="$(read_field "${run_dir}/hybrid.report" hamilton_reply_batches)"
+fused_hamilton_reply_batches="$(read_field "${run_dir}/fused.report" hamilton_reply_batches)"
+cpu_hamilton_reply_centers="$(read_field "${run_dir}/cpu.report" hamilton_reply_centers)"
+cuda_hamilton_reply_centers="$(read_field "${run_dir}/cuda.report" hamilton_reply_centers)"
+hybrid_hamilton_reply_centers="$(read_field "${run_dir}/hybrid.report" hamilton_reply_centers)"
+fused_hamilton_reply_centers="$(read_field "${run_dir}/fused.report" hamilton_reply_centers)"
+cpu_hamilton_reply_unique_centers="$(read_field "${run_dir}/cpu.report" hamilton_reply_unique_centers)"
+cuda_hamilton_reply_unique_centers="$(read_field "${run_dir}/cuda.report" hamilton_reply_unique_centers)"
+hybrid_hamilton_reply_unique_centers="$(read_field "${run_dir}/hybrid.report" hamilton_reply_unique_centers)"
+fused_hamilton_reply_unique_centers="$(read_field "${run_dir}/fused.report" hamilton_reply_unique_centers)"
+cpu_hamilton_reply_pairs="$(read_field "${run_dir}/cpu.report" hamilton_reply_neighbor_pairs_tested)"
+cuda_hamilton_reply_pairs="$(read_field "${run_dir}/cuda.report" hamilton_reply_neighbor_pairs_tested)"
+hybrid_hamilton_reply_pairs="$(read_field "${run_dir}/hybrid.report" hamilton_reply_neighbor_pairs_tested)"
+fused_hamilton_reply_pairs="$(read_field "${run_dir}/fused.report" hamilton_reply_neighbor_pairs_tested)"
+cpu_hamilton_replies_generated="$(read_field "${run_dir}/cpu.report" hamilton_replies_generated)"
+cuda_hamilton_replies_generated="$(read_field "${run_dir}/cuda.report" hamilton_replies_generated)"
+hybrid_hamilton_replies_generated="$(read_field "${run_dir}/hybrid.report" hamilton_replies_generated)"
+fused_hamilton_replies_generated="$(read_field "${run_dir}/fused.report" hamilton_replies_generated)"
+if [[ "${cpu_hamilton_reply_batches}" != "${cuda_hamilton_reply_batches}" ||
+      "${cpu_hamilton_reply_batches}" != "${hybrid_hamilton_reply_batches}" ||
+      "${cpu_hamilton_reply_batches}" != "${fused_hamilton_reply_batches}" ||
+      "${cpu_hamilton_reply_centers}" != "${cuda_hamilton_reply_centers}" ||
+      "${cpu_hamilton_reply_centers}" != "${hybrid_hamilton_reply_centers}" ||
+      "${cpu_hamilton_reply_centers}" != "${fused_hamilton_reply_centers}" ||
+      "${cpu_hamilton_reply_unique_centers}" != "${cuda_hamilton_reply_unique_centers}" ||
+      "${cpu_hamilton_reply_unique_centers}" != "${hybrid_hamilton_reply_unique_centers}" ||
+      "${cpu_hamilton_reply_unique_centers}" != "${fused_hamilton_reply_unique_centers}" ||
+      "${cpu_hamilton_reply_pairs}" != "${cuda_hamilton_reply_pairs}" ||
+      "${cpu_hamilton_reply_pairs}" != "${hybrid_hamilton_reply_pairs}" ||
+      "${cpu_hamilton_reply_pairs}" != "${fused_hamilton_reply_pairs}" ||
+      "${cpu_hamilton_replies_generated}" != "${cuda_hamilton_replies_generated}" ||
+      "${cpu_hamilton_replies_generated}" != "${hybrid_hamilton_replies_generated}" ||
+      "${cpu_hamilton_replies_generated}" != "${fused_hamilton_replies_generated}" ]]; then
+  echo "四路 Hamilton reply 的规范工作计数不一致" >&2
+  exit 1
+fi
 cpu_end_reply_ms="$(read_field "${run_dir}/cpu.report" end_reply_ms)"
 cuda_end_reply_ms="$(read_field "${run_dir}/cuda.report" end_reply_ms)"
 hybrid_end_reply_ms="$(read_field "${run_dir}/hybrid.report" end_reply_ms)"
@@ -399,6 +454,26 @@ fused_leaf_consume_residual_ms="$(awk -v total="${fused_leaf_cursor_consume_ms}"
   -v candidate="${fused_leaf_candidate_recheck_ms}" \
   -v completeness="${fused_leaf_completeness_fallback_ms}" \
   'BEGIN { printf "%.6f", total-candidate-completeness }')"
+cpu_hamilton_reply_residual_ms="$(awk -v total="${cpu_hamilton_reply_ms}" \
+  -v validation="${cpu_hamilton_reply_validation_ms}" \
+  -v enumerate="${cpu_hamilton_reply_enumerate_ms}" -v cuda="${cpu_hamilton_reply_cuda_ms}" \
+  -v compare="${cpu_hamilton_reply_compare_ms}" \
+  'BEGIN { printf "%.6f", total-validation-enumerate-cuda-compare }')"
+cuda_hamilton_reply_residual_ms="$(awk -v total="${cuda_hamilton_reply_ms}" \
+  -v validation="${cuda_hamilton_reply_validation_ms}" \
+  -v enumerate="${cuda_hamilton_reply_enumerate_ms}" -v cuda="${cuda_hamilton_reply_cuda_ms}" \
+  -v compare="${cuda_hamilton_reply_compare_ms}" \
+  'BEGIN { printf "%.6f", total-validation-enumerate-cuda-compare }')"
+hybrid_hamilton_reply_residual_ms="$(awk -v total="${hybrid_hamilton_reply_ms}" \
+  -v validation="${hybrid_hamilton_reply_validation_ms}" \
+  -v enumerate="${hybrid_hamilton_reply_enumerate_ms}" -v cuda="${hybrid_hamilton_reply_cuda_ms}" \
+  -v compare="${hybrid_hamilton_reply_compare_ms}" \
+  'BEGIN { printf "%.6f", total-validation-enumerate-cuda-compare }')"
+fused_hamilton_reply_residual_ms="$(awk -v total="${fused_hamilton_reply_ms}" \
+  -v validation="${fused_hamilton_reply_validation_ms}" \
+  -v enumerate="${fused_hamilton_reply_enumerate_ms}" -v cuda="${fused_hamilton_reply_cuda_ms}" \
+  -v compare="${fused_hamilton_reply_compare_ms}" \
+  'BEGIN { printf "%.6f", total-validation-enumerate-cuda-compare }')"
 cpu_host_build_ms="$(awk -v work="${cpu_work_graph_ms}" -v leaf="${cpu_leaf_ms}" \
   -v path="${cpu_path_append_ms}" -v hamilton="${cpu_hamilton_reply_ms}" \
   -v end="${cpu_end_reply_ms}" 'BEGIN { printf "%.6f", work-leaf-path-hamilton-end }')"
@@ -457,7 +532,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V8"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V9"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -552,6 +627,32 @@ summary="${run_dir}/summary.txt"
   echo "cpu_hamilton_reply_ms ${cpu_hamilton_reply_ms}"
   echo "cuda_hamilton_reply_ms ${cuda_hamilton_reply_ms}"
   echo "hybrid_hamilton_reply_ms ${hybrid_hamilton_reply_ms}"
+  echo "fused_hamilton_reply_ms ${fused_hamilton_reply_ms}"
+  echo "cpu_hamilton_reply_validation_ms ${cpu_hamilton_reply_validation_ms}"
+  echo "cpu_hamilton_reply_enumerate_ms ${cpu_hamilton_reply_enumerate_ms}"
+  echo "cpu_hamilton_reply_cuda_ms ${cpu_hamilton_reply_cuda_ms}"
+  echo "cpu_hamilton_reply_compare_ms ${cpu_hamilton_reply_compare_ms}"
+  echo "cpu_hamilton_reply_residual_ms ${cpu_hamilton_reply_residual_ms}"
+  echo "cuda_hamilton_reply_validation_ms ${cuda_hamilton_reply_validation_ms}"
+  echo "cuda_hamilton_reply_enumerate_ms ${cuda_hamilton_reply_enumerate_ms}"
+  echo "cuda_hamilton_reply_cuda_ms ${cuda_hamilton_reply_cuda_ms}"
+  echo "cuda_hamilton_reply_compare_ms ${cuda_hamilton_reply_compare_ms}"
+  echo "cuda_hamilton_reply_residual_ms ${cuda_hamilton_reply_residual_ms}"
+  echo "hybrid_hamilton_reply_validation_ms ${hybrid_hamilton_reply_validation_ms}"
+  echo "hybrid_hamilton_reply_enumerate_ms ${hybrid_hamilton_reply_enumerate_ms}"
+  echo "hybrid_hamilton_reply_cuda_ms ${hybrid_hamilton_reply_cuda_ms}"
+  echo "hybrid_hamilton_reply_compare_ms ${hybrid_hamilton_reply_compare_ms}"
+  echo "hybrid_hamilton_reply_residual_ms ${hybrid_hamilton_reply_residual_ms}"
+  echo "fused_hamilton_reply_validation_ms ${fused_hamilton_reply_validation_ms}"
+  echo "fused_hamilton_reply_enumerate_ms ${fused_hamilton_reply_enumerate_ms}"
+  echo "fused_hamilton_reply_cuda_ms ${fused_hamilton_reply_cuda_ms}"
+  echo "fused_hamilton_reply_compare_ms ${fused_hamilton_reply_compare_ms}"
+  echo "fused_hamilton_reply_residual_ms ${fused_hamilton_reply_residual_ms}"
+  echo "hamilton_reply_batches ${cpu_hamilton_reply_batches}"
+  echo "hamilton_reply_centers ${cpu_hamilton_reply_centers}"
+  echo "hamilton_reply_unique_centers ${cpu_hamilton_reply_unique_centers}"
+  echo "hamilton_reply_neighbor_pairs_tested ${cpu_hamilton_reply_pairs}"
+  echo "hamilton_replies_generated ${cpu_hamilton_replies_generated}"
   echo "cpu_end_reply_ms ${cpu_end_reply_ms}"
   echo "cuda_end_reply_ms ${cuda_end_reply_ms}"
   echo "hybrid_end_reply_ms ${hybrid_end_reply_ms}"

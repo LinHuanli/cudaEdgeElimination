@@ -280,13 +280,23 @@ void RecordHamiltonReplyBatch(WaveBuildContext* const context,
   HtWavefrontResult& result = *context->result;
   if (result.hamilton_reply_batches == std::numeric_limits<std::uint64_t>::max() ||
       center_count > std::numeric_limits<std::uint64_t>::max() - result.hamilton_reply_centers ||
+      batch.unique_centers >
+          std::numeric_limits<std::uint64_t>::max() - result.hamilton_reply_unique_centers ||
+      batch.neighbor_pairs_tested >
+          std::numeric_limits<std::uint64_t>::max() - result.hamilton_reply_neighbor_pairs_tested ||
       batch.replies.size() >
           std::numeric_limits<std::uint64_t>::max() - result.hamilton_replies_generated) {
     throw std::overflow_error("HT Hamilton reply 批处理统计溢出");
   }
   ++result.hamilton_reply_batches;
   result.hamilton_reply_centers += static_cast<std::uint64_t>(center_count);
+  result.hamilton_reply_unique_centers += batch.unique_centers;
+  result.hamilton_reply_neighbor_pairs_tested += batch.neighbor_pairs_tested;
   result.hamilton_replies_generated += static_cast<std::uint64_t>(batch.replies.size());
+  result.hamilton_reply_validation_ms += batch.validation_ms;
+  result.hamilton_reply_cpu_enumerate_ms += batch.cpu_enumerate_ms;
+  result.hamilton_reply_cuda_evaluate_ms += batch.cuda_evaluate_ms;
+  result.hamilton_reply_cuda_compare_ms += batch.cuda_compare_ms;
   result.hamilton_reply_cpu_verified =
       result.hamilton_reply_batches == 1U
           ? batch.cpu_verified

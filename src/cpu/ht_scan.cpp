@@ -132,6 +132,10 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.leaf_cpu_certified_cost_cells = wavefront.leaf_cpu_certified_cost_cells;
     attempt.peak_leaf_device_cache_bytes = wavefront.peak_leaf_device_cache_bytes;
     attempt.path_append_tasks = wavefront.path_append_tasks;
+    attempt.hamilton_reply_batches = wavefront.hamilton_reply_batches;
+    attempt.hamilton_reply_centers = wavefront.hamilton_reply_centers;
+    attempt.hamilton_reply_unique_centers = wavefront.hamilton_reply_unique_centers;
+    attempt.hamilton_reply_neighbor_pairs_tested = wavefront.hamilton_reply_neighbor_pairs_tested;
     attempt.hamilton_replies_generated = wavefront.hamilton_replies_generated;
     attempt.end_replies_generated = wavefront.end_replies_generated;
     attempt.candidate_ms = wavefront.candidate_ms;
@@ -150,6 +154,10 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.leaf_proof_verify_ms = wavefront.leaf_proof_verify_ms;
     attempt.path_append_ms = wavefront.path_append_ms;
     attempt.hamilton_reply_ms = wavefront.hamilton_reply_ms;
+    attempt.hamilton_reply_validation_ms = wavefront.hamilton_reply_validation_ms;
+    attempt.hamilton_reply_cpu_enumerate_ms = wavefront.hamilton_reply_cpu_enumerate_ms;
+    attempt.hamilton_reply_cuda_evaluate_ms = wavefront.hamilton_reply_cuda_evaluate_ms;
+    attempt.hamilton_reply_cuda_compare_ms = wavefront.hamilton_reply_cuda_compare_ms;
     attempt.end_reply_ms = wavefront.end_reply_ms;
     attempt.propagation_ms = wavefront.propagation_ms;
     attempt.proof_extract_ms = wavefront.proof_extract_ms;
@@ -177,6 +185,11 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.leaf_cpu_certified_cost_cells += attempt.leaf_cpu_certified_cost_cells;
     scan.peak_leaf_device_cache_bytes =
         std::max(scan.peak_leaf_device_cache_bytes, attempt.peak_leaf_device_cache_bytes);
+    scan.hamilton_reply_batches += attempt.hamilton_reply_batches;
+    scan.hamilton_reply_centers += attempt.hamilton_reply_centers;
+    scan.hamilton_reply_unique_centers += attempt.hamilton_reply_unique_centers;
+    scan.hamilton_reply_neighbor_pairs_tested += attempt.hamilton_reply_neighbor_pairs_tested;
+    scan.hamilton_replies_generated += attempt.hamilton_replies_generated;
     scan.candidate_ms += attempt.candidate_ms;
     scan.work_graph_ms += attempt.work_graph_ms;
     scan.leaf_ms += attempt.leaf_ms;
@@ -193,6 +206,10 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.leaf_proof_verify_ms += attempt.leaf_proof_verify_ms;
     scan.path_append_ms += attempt.path_append_ms;
     scan.hamilton_reply_ms += attempt.hamilton_reply_ms;
+    scan.hamilton_reply_validation_ms += attempt.hamilton_reply_validation_ms;
+    scan.hamilton_reply_cpu_enumerate_ms += attempt.hamilton_reply_cpu_enumerate_ms;
+    scan.hamilton_reply_cuda_evaluate_ms += attempt.hamilton_reply_cuda_evaluate_ms;
+    scan.hamilton_reply_cuda_compare_ms += attempt.hamilton_reply_cuda_compare_ms;
     scan.end_reply_ms += attempt.end_reply_ms;
     scan.propagation_ms += attempt.propagation_ms;
     scan.proof_extract_ms += attempt.proof_extract_ms;

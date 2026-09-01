@@ -21,7 +21,7 @@
 - `ht-scan` 的确定性有界目标切片、逐目标 wavefront、CPU 双重复核与 V2 原子提交；
 - HT scan V2 阶段计时，以及用 `--leaf-backend` 将 CUDA leaf cost 与 CPU 候选器解耦的混合路径；
 - 可显式启用、默认关闭的 `--fuse-leaf-buckets` 调度实验及 V3 leaf batch 计数；
-- HT scan V6 leaf/cost/consume 子阶段计时及 V8 四路 benchmark summary；
+- HT scan V7 leaf/cost/reply 子阶段计时及 V9 四路 benchmark summary；
 - path-count matching catalog 与 3/4/5-opt reconnect templates 的线程安全不可变缓存；
 - CPU/CUDA 共用的增量 leaf 精确成本矩阵路径，以及与 CPU scalar 逐字节一致的规范 proof 计数；
 - TSPLIB 最优 tour 的严格成本、节点置换、活动边完整性与规范哈希门禁；

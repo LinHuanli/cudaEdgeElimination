@@ -104,6 +104,10 @@ struct HtScanAttempt {
   std::uint64_t leaf_cpu_certified_cost_cells{};
   std::uint64_t peak_leaf_device_cache_bytes{};
   std::uint64_t path_append_tasks{};
+  std::uint64_t hamilton_reply_batches{};
+  std::uint64_t hamilton_reply_centers{};
+  std::uint64_t hamilton_reply_unique_centers{};
+  std::uint64_t hamilton_reply_neighbor_pairs_tested{};
   std::uint64_t hamilton_replies_generated{};
   std::uint64_t end_replies_generated{};
   double candidate_ms{};
@@ -122,6 +126,10 @@ struct HtScanAttempt {
   double leaf_proof_verify_ms{};
   double path_append_ms{};
   double hamilton_reply_ms{};
+  double hamilton_reply_validation_ms{};
+  double hamilton_reply_cpu_enumerate_ms{};
+  double hamilton_reply_cuda_evaluate_ms{};
+  double hamilton_reply_cuda_compare_ms{};
   double end_reply_ms{};
   double propagation_ms{};
   double proof_extract_ms{};
@@ -156,6 +164,11 @@ struct HtScanResult {
   std::uint64_t leaf_cpu_completeness_templates{};
   std::uint64_t leaf_cpu_certified_cost_cells{};
   std::uint64_t peak_leaf_device_cache_bytes{};
+  std::uint64_t hamilton_reply_batches{};
+  std::uint64_t hamilton_reply_centers{};
+  std::uint64_t hamilton_reply_unique_centers{};
+  std::uint64_t hamilton_reply_neighbor_pairs_tested{};
+  std::uint64_t hamilton_replies_generated{};
   double target_selection_ms{};
   double candidate_ms{};
   double work_graph_ms{};
@@ -173,6 +186,10 @@ struct HtScanResult {
   double leaf_proof_verify_ms{};
   double path_append_ms{};
   double hamilton_reply_ms{};
+  double hamilton_reply_validation_ms{};
+  double hamilton_reply_cpu_enumerate_ms{};
+  double hamilton_reply_cuda_evaluate_ms{};
+  double hamilton_reply_cuda_compare_ms{};
   double end_reply_ms{};
   double propagation_ms{};
   double proof_extract_ms{};

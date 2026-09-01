@@ -59,6 +59,13 @@ struct HtHamiltonReplyBatchResult {
   std::string backend;
   int selected_device{-1};
   bool cpu_verified{false};
+  std::uint64_t unique_centers{};
+  std::uint64_t neighbor_pairs_tested{};
+  // 同步 wall time 只用于诊断，不进入 proof。
+  double validation_ms{};
+  double cpu_enumerate_ms{};
+  double cuda_evaluate_ms{};
+  double cuda_compare_ms{};
 };
 
 struct HtEndReplyTask {
@@ -238,6 +245,8 @@ struct HtWavefrontResult {
   bool hamilton_reply_cpu_verified{false};
   std::uint64_t hamilton_reply_batches{};
   std::uint64_t hamilton_reply_centers{};
+  std::uint64_t hamilton_reply_unique_centers{};
+  std::uint64_t hamilton_reply_neighbor_pairs_tested{};
   std::uint64_t hamilton_replies_generated{};
   std::string end_reply_backend{"none"};
   int end_reply_selected_device{-1};
@@ -267,6 +276,10 @@ struct HtWavefrontResult {
   double leaf_proof_verify_ms{};
   double path_append_ms{};
   double hamilton_reply_ms{};
+  double hamilton_reply_validation_ms{};
+  double hamilton_reply_cpu_enumerate_ms{};
+  double hamilton_reply_cuda_evaluate_ms{};
+  double hamilton_reply_cuda_compare_ms{};
   double end_reply_ms{};
   double propagation_ms{};
   double proof_extract_ms{};
