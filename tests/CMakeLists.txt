@@ -5,6 +5,23 @@ target_compile_options(cudaee_unit PRIVATE -Wall -Wextra -Wconversion -Wshadow -
 
 add_test(NAME unit.core COMMAND cudaee_unit)
 
+add_library(elimtsp_swap_oracle OBJECT "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/src/swap.c")
+target_include_directories(elimtsp_swap_oracle PRIVATE
+  "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/src")
+# ccutil.h 自行定义 NDEBUG；先撤销 Release 默认值，避免测试 oracle 重复定义告警。
+target_compile_options(elimtsp_swap_oracle PRIVATE -UNDEBUG)
+
+add_executable(cudaee_kopt_unit
+  unit/test_kopt.cpp
+  $<TARGET_OBJECTS:elimtsp_swap_oracle>)
+target_link_libraries(cudaee_kopt_unit PRIVATE cudaee_core)
+target_compile_definitions(cudaee_kopt_unit PRIVATE
+  CUDAEE_KOPT_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}/tmp")
+target_compile_options(cudaee_kopt_unit PRIVATE
+  -Wall -Wextra -Wconversion -Wshadow -Wformat=2)
+add_test(NAME unit.kopt COMMAND cudaee_kopt_unit)
+set_tests_properties(unit.kopt PROPERTIES LABELS "correctness;path-system")
+
 add_executable(cudaee_path_system_unit unit/test_path_system.cpp)
 target_link_libraries(cudaee_path_system_unit PRIVATE cudaee_core)
 target_compile_options(cudaee_path_system_unit PRIVATE

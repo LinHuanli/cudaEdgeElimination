@@ -64,14 +64,43 @@ build/cuda-release/cudaee path-table \
 
 当前 GPU 回归对 `m=1..5` 的 368,047 个 compatibility 单元做了全量差分；其中 `m=5` 有 362,880 个查询、147,456 个兼容单元。compute-sanitizer memcheck 为 0 error。
 
+## proper 3/4/5-opt CPU 规范器
+
+CPU 叶搜索没有复制 `swap.c` 的 1,900 余行展开判断，而是从相同组合定义生成 proper reconnect templates：删去巡回中的 `k` 条路径边后，将 `2k` 个端口重新完美匹配；新匹配与剩余 `k` 条路径分量必须形成一个交替单环，并且不得重新加入任何被删抽象边。得到的模板数与参考生成代码完全一致：
+
+| k | proper templates | generator hash |
+|---:|---:|---|
+| 3 | 4 | `e58af5e08d290d04` |
+| 4 | 25 | `03179e3ca191ce82` |
+| 5 | 208 | `6696dde548591bce` |
+
+机器可读哈希位于 `configs/kopt_reconnect_hashes_v1.txt`。测试把固定 ElimTSP 子模块中的 `src/swap.c` 编译为仅测试 oracle，在每个 `k` 上用 2,000 个确定性随机成本矩阵把判断阈值放在生成模板的最小重连成本附近，逐例比较严格改善结果，并验证 oracle 返回的重连属于生成模板集合。生产库不链接参考实现。
+
+`FindKOptWitness` 的 CPU 规范流程为：
+
+1. 重新规范化路径并验证 outside matching；
+2. 从路径边与 outside 边独立重建简单巡回；
+3. 固定 required edge（未提供时固定确定性 anchor），穷举包含它的删除集合；
+4. 按原巡回次序构造端口和路径分量，枚举固定 proper templates；
+5. 用精确整数距离比较删除成本与加入成本；
+6. 重建改善巡回，提取 inside matching，再调用独立 verifier。
+
+`VerifyKOptWitness` 不信任搜索器保存的成本或 matching，而是从原巡回重新检查：删除边全部属于路径、required edge 确实被删除、删除/加入集合互斥、改善后仍是覆盖全部局部节点的单巡回、成本严格下降、inside matching 与巡回端点次序一致。
+
+`ProvePathSystemByKOpt` 对未覆盖 outside matching 依次保存 witness，并利用 inside coverage 合并其余方向。proof 同时绑定 graph snapshot hash、规范路径系统 hash 和兼容表 hash；独立 verifier 逐条重建 witness，并直接用 CPU 交替环谓词检查最终全覆盖。搜索预算耗尽返回 `unresolved`，绝不返回“无改善”或证明成功。
+
+`CUDAEE_PATH_KOPT_PROOF_V1` 提供稳定文本往返，保存严格顺序的头字段、每条 source outside、删/加边、精确成本与 inside mate。读取器限制路径数、outside/record 数、`k`、边数、16 位十六进制哈希和完美匹配结构，并拒绝 `END` 后的多余字段；读回的 proof 仍必须经过 graph/path 绑定和完整 witness verifier，解析成功本身不授权证明。
+
+回归覆盖 proper 3/4/5-opt 的全部模板路径：一个无严格改善的 7 节点实例会检查 25 个 anchor 删除集合和 1,330 个 proper reconnect 单元；另有 `m=1`、`m=2` 的成功 proof、成本篡改和 snapshot-hash 篡改拒绝测试。
+
 ## 后续接线
 
 M4 后续必须按顺序完成：
 
-1. 对 3/4/5-opt reconnect template 建立独立 CPU 规范实现与穷举 oracle；
-2. 让叶证明返回可重放的 inside matching 与具体换边 witness，而不是布尔值；
-3. 对未被 k-opt 解决的叶转入 CPU Held–Karp/原 LocalElimination fallback；
-4. 实现 HS `c,d` 候选与 AND–OR 状态传播；
-5. 扩展 proof 格式并由 CPU 从不可变 epoch 快照完整重放。
+1. 把 proper reconnect 成本筛选做成批量 CUDA 候选器，候选仍由现有 CPU verifier 接受；
+2. 对未被 k-opt 解决的叶转入 CPU Held–Karp/原 LocalElimination fallback；
+3. 实现 HS `c,d` 候选与 AND–OR 状态传播；
+4. 将 leaf proof 嵌入完整 HS 证书，从不可变 epoch 快照递归重放；
+5. 将完整 HS 证书链接入候选阶段，继续由 epoch commit 的 CPU 门禁授权。
 
 在这些门禁完成前，`gpu-eliminate` 仍只授权现有 JV 证明。

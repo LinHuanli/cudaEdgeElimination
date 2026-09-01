@@ -29,7 +29,9 @@
 
 M4.1 组合层已完成：CPU 路径规范化与匹配穷举、`m<=5` GPU 表查找、固定生成器哈希，以及 `m=6,7` CPU fallback。全部小表单元由独立 CPU oracle 差分，GPU 结果只在 CPU 接受后返回。
 
-M4.2 继续实现 3/4/5-opt 叶 witness、困难叶 CPU fallback、HS `c,d` AND–OR 搜索和 proof 重放。只有整条证书链完成后才把 HS 候选接入 epoch commit。
+M4.2a CPU 叶规范器已完成：组合生成 proper 3/4/5-opt 模板，与固定 ElimTSP `swap.c` oracle 差分，并生成绑定快照/路径/兼容表哈希的 `path-kopt-proof-v1`。
+
+M4.2b 继续实现批量 CUDA k-opt cost、困难叶 CPU fallback、HS `c,d` AND–OR 搜索和全局证书重放。只有整条证书链完成后才把 HS 候选接入 epoch commit。
 
 ## M5：中大型评测与优化
 
@@ -37,4 +39,4 @@ M4.2 继续实现 3/4/5-opt 叶 witness、困难叶 CPU fallback、HS `c,d` AND�
 
 ## 当前完成定义
 
-当前已交付 M0、M1、M2、M3 安全桥接和 M4.1。M3.1 与 M4.2 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或组合表替代删除强度与 HS 实现。
+当前已交付 M0、M1、M2、M3 安全桥接、M4.1 和 M4.2a。M3.1 与 M4.2b 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或局部叶 proof 替代删除强度与 HS 全链路。

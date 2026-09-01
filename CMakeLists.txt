@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.27)
 
-project(cudaEdgeElimination VERSION 0.1.0 LANGUAGES CXX)
+project(cudaEdgeElimination VERSION 0.1.0 LANGUAGES CXX C)
 
 option(CUDAEE_ENABLE_CUDA "编译 CUDA JV 候选后端" ON)
 option(CUDAEE_ENABLE_SANITIZERS "启用 AddressSanitizer/UndefinedBehaviorSanitizer" OFF)
@@ -18,6 +18,7 @@ set(CUDAEE_SOURCES
     src/common/distance.cpp
     src/common/graph.cpp
     src/cpu/jv_elimination.cpp
+    src/cpu/kopt_search.cpp
     src/cpu/path_system.cpp
     src/lp/lp_epoch.cpp
     src/lp/cuopt_sidecar.cpp)

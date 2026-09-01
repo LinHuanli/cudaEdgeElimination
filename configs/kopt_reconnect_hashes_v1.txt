@@ -1,0 +1,6 @@
+CUDAEE_KOPT_RECONNECT_HASHES_V1
+# k template_count generator_hash
+record 3 4 e58af5e08d290d04
+record 4 25 03179e3ca191ce82
+record 5 208 6696dde548591bce
+END
