@@ -8,9 +8,10 @@
 - `m=1..7` outside matching 和全部 inside perfect matching 的穷举；
 - inside/outside 并是否形成单一交替 Hamilton 回路的 CPU 规范判定；
 - `m<=5` 的压缩 coverage table、固定生成器哈希和 CUDA bitset 查询；
-- `m=6,7` 的 CPU 直接判定回退。
+- `m=6,7` 的 CPU 直接判定回退；
+- proper 3/4/5-opt、批量 CUDA 成本候选和有界 CPU 精确困难叶。
 
-当前没有新增消元方法，也不生成 proof 删除记录。只有后续 3/4/5-opt witness、困难叶 CPU fallback、HS AND–OR 搜索和独立证书重放全部接通后，才能让这套组合基础参与删边。
+当前可以生成并独立重放局部 leaf proof，但尚未接入 HS AND–OR 根证书和 epoch commit，因此不授权删边。只有后续 `c,d`/Hamilton reply 搜索和全局证书重放接通后，这套组合基础才能参与消元提交。
 
 ## 与参考实现的语义对应
 
@@ -112,14 +113,22 @@ CPU 有独立的成本矩阵实现，CUDA 回归逐单元比较三阶模板及�
 4. `auto` 模式的 CUDA 运行错误转 CPU；显式 CUDA 失败返回 `unresolved`；
 5. 因而 kernel 漏报只会损失性能，不会把“未知”变成证明。
 
+## 有界精确困难叶
+
+当 3/4/5-opt 没有解决某个 outside matching 时，可选的 `FindExactTourWitness` 将每条 forced outside edge 收缩为一个有两种方向的 block，将其他节点作为 singleton block。固定首 block 的方向后，Held–Karp 子集 DP 穷举其余 block 的访问次序与方向；由于 outside 边被两条巡回共同保留，目标函数只比较原路径边总成本和候选 block 间转移成本。required path edge 在所有转移中被禁止，保证返回 witness 确实删除目标边。
+
+DP 只产生候选巡回，不绕过证明边界：实现从候选巡回与原巡回做集合差得到通用 `k` 阶删/加边，重新计算整数成本并提取 inside matching，随后调用 `VerifyKOptWitness` 从输入重建全部不变量。`ProvePathSystemByKOpt` 仅在 k-opt 未解决后调用该回退，并仍要求全部 outside matching 被 witness coverage 覆盖。
+
+`exact_fallback_max_blocks=0` 表示禁用；接口硬限制为 18。block 数超限、DP 规模溢出或内存不足均返回 `unresolved`。运行期记录访问状态数，但为保持已发布的 `CUDAEE_PATH_KOPT_PROOF_V1` 字段稳定，该性能统计不写入证明文件。回归分别覆盖精确改善、精确无改善、block 超限，以及 k-opt 预算耗尽后由精确 DP 完成 proof 并往返重放；独立测试还在 60 组随机 7 点实例的两个 outside 上直接枚举 Hamilton 巡回核对最优值，并验证一个通用 7-opt witness 的 V1 往返。
+
 ## 后续接线
 
 M4 后续必须按顺序完成：
 
-1. 对未被 k-opt 解决的叶转入 CPU Held–Karp/原 LocalElimination fallback；
-2. 实现 HS `c,d` 候选与 AND–OR 状态传播；
-3. 缓存坐标/模板设备常驻数据，并用真实任务桶评估 kernel 粒度；
-4. 将 leaf proof 嵌入完整 HS 证书，从不可变 epoch 快照递归重放；
-5. 将完整 HS 证书链接入候选阶段，继续由 epoch commit 的 CPU 门禁授权。
+1. 实现 HS `c,d` 候选与 AND–OR 状态传播；
+2. 缓存坐标/模板设备常驻数据，并用真实任务桶评估 kernel 粒度；
+3. 将 leaf proof 嵌入完整 HS 证书，从不可变 epoch 快照递归重放；
+4. 将完整 HS 证书链接入候选阶段，继续由 epoch commit 的 CPU 门禁授权；
+5. 若 18-block 子集 DP 在真实长尾不足，再接入原 LocalElimination 1-tree B&B 作为更大规模 CPU fallback。
 
 在这些门禁完成前，`gpu-eliminate` 仍只授权现有 JV 证明。

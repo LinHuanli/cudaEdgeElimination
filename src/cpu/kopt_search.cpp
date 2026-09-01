@@ -7,8 +7,10 @@
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <map>
+#include <new>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -408,6 +410,55 @@ struct ReconnectAttempt {
   std::string reason;
   std::uint64_t matchings_tested{};
 };
+
+struct ExactTourBlock {
+  std::int32_t first{-1};
+  std::int32_t second{-1};
+  bool paired{false};
+};
+
+std::int32_t BlockEntry(const ExactTourBlock& block, const std::uint32_t orientation) {
+  return orientation == 0 ? block.first : block.second;
+}
+
+std::int32_t BlockExit(const ExactTourBlock& block, const std::uint32_t orientation) {
+  if (!block.paired) {
+    return block.first;
+  }
+  return orientation == 0 ? block.second : block.first;
+}
+
+std::uint32_t BlockOrientationCount(const ExactTourBlock& block) { return block.paired ? 2U : 1U; }
+
+std::vector<ExactTourBlock> BuildExactTourBlocks(const TourContext& context,
+                                                 const EndpointMatching& outside) {
+  std::vector<ExactTourBlock> blocks;
+  std::vector<bool> is_endpoint(
+      static_cast<std::size_t>(*std::max_element(context.nodes.begin(), context.nodes.end()) + 1),
+      false);
+  for (std::uint32_t endpoint = 0; endpoint < outside.endpoint_count; ++endpoint) {
+    const std::uint32_t partner = outside.mate[endpoint];
+    if (endpoint >= partner) {
+      continue;
+    }
+    const std::int32_t first = context.endpoint_nodes[endpoint];
+    const std::int32_t second = context.endpoint_nodes[partner];
+    blocks.push_back({first, second, true});
+    is_endpoint[static_cast<std::size_t>(first)] = true;
+    is_endpoint[static_cast<std::size_t>(second)] = true;
+  }
+  std::vector<std::int32_t> singleton_nodes;
+  for (const std::int32_t node : context.nodes) {
+    if (!is_endpoint[static_cast<std::size_t>(node)]) {
+      singleton_nodes.push_back(node);
+    }
+  }
+  std::sort(singleton_nodes.begin(), singleton_nodes.end());
+  for (const std::int32_t node : singleton_nodes) {
+    blocks.push_back({node, node, false});
+  }
+  return blocks;
+}
 
 KOptCostTask BuildKOptCostTask(const GraphSnapshot& graph, const TourContext& context,
                                const std::vector<std::size_t>& deleted_positions) {
@@ -916,6 +967,235 @@ KOptSearchResult FindKOptWitness(const GraphSnapshot& graph, const NormalizedPat
   return result;
 }
 
+KOptSearchResult FindExactTourWitness(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
+                                      const EndpointMatching& outside,
+                                      const std::optional<NodeEdge>& required_edge,
+                                      const std::uint32_t max_blocks) {
+  KOptSearchResult result;
+  if (max_blocks == 0 || max_blocks > 18) {
+    result.status = KOptSearchStatus::kUnresolved;
+    result.reason = "exact fallback 的 max_blocks 必须位于 [1,18]";
+    return result;
+  }
+  TourContext context;
+  if (!BuildTourContext(graph, paths, outside, required_edge, &context, &result.reason)) {
+    return result;
+  }
+  const std::vector<ExactTourBlock> blocks = BuildExactTourBlocks(context, outside);
+  const std::size_t block_count = blocks.size();
+  if (block_count < 2) {
+    result.reason = "收缩 outside matching 后不足两个 block";
+    return result;
+  }
+  if (block_count > max_blocks) {
+    result.status = KOptSearchStatus::kUnresolved;
+    result.reason = "exact fallback 超过 block 上限";
+    return result;
+  }
+
+  const std::size_t state_count = 2U * block_count;
+  const std::size_t mask_count = std::size_t{1} << block_count;
+  if (state_count > std::numeric_limits<std::size_t>::max() / mask_count) {
+    result.status = KOptSearchStatus::kUnresolved;
+    result.reason = "exact fallback DP 规模溢出";
+    return result;
+  }
+  const std::size_t cell_count = state_count * mask_count;
+  const std::int64_t infinity = std::numeric_limits<std::int64_t>::max();
+  std::vector<std::int64_t> cost;
+  std::vector<std::int16_t> predecessor;
+  try {
+    cost.assign(cell_count, infinity);
+    predecessor.assign(cell_count, -1);
+  } catch (const std::bad_alloc&) {
+    result.status = KOptSearchStatus::kUnresolved;
+    result.reason = "exact fallback DP 内存不足";
+    return result;
+  }
+  const auto cell = [state_count](const std::size_t mask, const std::size_t state) {
+    return mask * state_count + state;
+  };
+
+  // 固定第 0 个 forced-edge block 的方向；反转整个无向巡回可覆盖另一方向。
+  constexpr std::size_t kStartState = 0;
+  constexpr std::size_t kStartMask = 1;
+  cost[cell(kStartMask, kStartState)] = 0;
+  const std::optional<NodeEdge> forbidden =
+      required_edge.has_value()
+          ? std::optional<NodeEdge>(CanonicalEdge(required_edge->u, required_edge->v))
+          : std::nullopt;
+
+  for (std::size_t mask = 1; mask < mask_count; ++mask) {
+    if ((mask & kStartMask) == 0) {
+      continue;
+    }
+    for (std::size_t block_index = 0; block_index < block_count; ++block_index) {
+      if ((mask & (std::size_t{1} << block_index)) == 0) {
+        continue;
+      }
+      for (std::uint32_t orientation = 0; orientation < BlockOrientationCount(blocks[block_index]);
+           ++orientation) {
+        const std::size_t state = 2U * block_index + orientation;
+        const std::int64_t current_cost = cost[cell(mask, state)];
+        if (current_cost == infinity) {
+          continue;
+        }
+        ++result.exact_states_tested;
+        const std::int32_t from = BlockExit(blocks[block_index], orientation);
+        for (std::size_t next_block = 0; next_block < block_count; ++next_block) {
+          const std::size_t next_bit = std::size_t{1} << next_block;
+          if ((mask & next_bit) != 0) {
+            continue;
+          }
+          for (std::uint32_t next_orientation = 0;
+               next_orientation < BlockOrientationCount(blocks[next_block]); ++next_orientation) {
+            const std::int32_t to = BlockEntry(blocks[next_block], next_orientation);
+            if (forbidden.has_value() && CanonicalEdge(from, to) == *forbidden) {
+              continue;
+            }
+            const std::int64_t transition = graph.Distance(from, to);
+            if (transition < 0 || current_cost > infinity - transition) {
+              continue;
+            }
+            const std::size_t next_mask = mask | next_bit;
+            const std::size_t next_state = 2U * next_block + next_orientation;
+            const std::int64_t candidate = current_cost + transition;
+            const std::size_t next_cell = cell(next_mask, next_state);
+            if (candidate < cost[next_cell]) {
+              cost[next_cell] = candidate;
+              predecessor[next_cell] = static_cast<std::int16_t>(state);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const std::size_t full_mask = mask_count - 1;
+  std::int64_t best_cost = infinity;
+  std::size_t best_state = state_count;
+  const std::int32_t start_entry = BlockEntry(blocks.front(), 0);
+  for (std::size_t block_index = 1; block_index < block_count; ++block_index) {
+    for (std::uint32_t orientation = 0; orientation < BlockOrientationCount(blocks[block_index]);
+         ++orientation) {
+      const std::size_t state = 2U * block_index + orientation;
+      const std::int64_t path_cost = cost[cell(full_mask, state)];
+      if (path_cost == infinity) {
+        continue;
+      }
+      const std::int32_t from = BlockExit(blocks[block_index], orientation);
+      if (forbidden.has_value() && CanonicalEdge(from, start_entry) == *forbidden) {
+        continue;
+      }
+      const std::int64_t closing = graph.Distance(from, start_entry);
+      if (closing < 0 || path_cost > infinity - closing) {
+        continue;
+      }
+      const std::int64_t candidate = path_cost + closing;
+      if (candidate < best_cost) {
+        best_cost = candidate;
+        best_state = state;
+      }
+    }
+  }
+  if (best_state == state_count) {
+    result.status = KOptSearchStatus::kNoImprovement;
+    result.reason = "不存在满足 required-edge 约束的局部巡回";
+    return result;
+  }
+
+  std::vector<NodeEdge> original_path_edges(context.path_edges.begin(), context.path_edges.end());
+  std::int64_t original_path_cost = 0;
+  std::string cost_reason;
+  if (!SumEdgeCosts(graph, original_path_edges, &original_path_cost, &cost_reason)) {
+    result.reason = cost_reason;
+    return result;
+  }
+  if (best_cost >= original_path_cost) {
+    result.status = KOptSearchStatus::kNoImprovement;
+    result.reason = "精确 DP 证明不存在严格更短的受约束局部巡回";
+    return result;
+  }
+
+  std::vector<std::size_t> state_order;
+  std::size_t mask = full_mask;
+  std::size_t state = best_state;
+  while (state != kStartState) {
+    state_order.push_back(state);
+    const std::int16_t previous = predecessor[cell(mask, state)];
+    if (previous < 0) {
+      result.reason = "exact fallback predecessor 链损坏";
+      return result;
+    }
+    mask ^= std::size_t{1} << (state / 2U);
+    state = static_cast<std::size_t>(previous);
+  }
+  state_order.push_back(kStartState);
+  std::reverse(state_order.begin(), state_order.end());
+  if (state_order.size() != block_count) {
+    result.reason = "exact fallback 未重建全部 block";
+    return result;
+  }
+
+  EdgeSet improved_edges = context.outside_edges;
+  for (std::size_t order_index = 0; order_index < state_order.size(); ++order_index) {
+    const std::size_t current_state = state_order[order_index];
+    const std::size_t next_state = state_order[(order_index + 1) % state_order.size()];
+    const std::size_t current_block = current_state / 2U;
+    const std::size_t next_block = next_state / 2U;
+    const auto current_orientation = static_cast<std::uint32_t>(current_state % 2U);
+    const auto next_orientation = static_cast<std::uint32_t>(next_state % 2U);
+    const NodeEdge transition = CanonicalEdge(BlockExit(blocks[current_block], current_orientation),
+                                              BlockEntry(blocks[next_block], next_orientation));
+    if (transition.u == transition.v || !improved_edges.insert(transition).second) {
+      result.reason = "exact fallback 重建了自环或重复边";
+      return result;
+    }
+  }
+
+  std::vector<std::int32_t> improved_tour;
+  if (!BuildCycle(graph.dimension, context.nodes, improved_edges, &improved_tour, &result.reason)) {
+    return result;
+  }
+  std::vector<NodeEdge> deleted_edges;
+  std::vector<NodeEdge> added_edges;
+  std::set_difference(context.all_edges.begin(), context.all_edges.end(), improved_edges.begin(),
+                      improved_edges.end(), std::back_inserter(deleted_edges));
+  std::set_difference(improved_edges.begin(), improved_edges.end(), context.all_edges.begin(),
+                      context.all_edges.end(), std::back_inserter(added_edges));
+  if (deleted_edges.size() < 2 || deleted_edges.size() != added_edges.size() ||
+      deleted_edges.size() > std::numeric_limits<std::uint32_t>::max()) {
+    result.reason = "exact fallback 的交换边集规模非法";
+    return result;
+  }
+
+  KOptWitness witness;
+  witness.k = static_cast<std::uint32_t>(deleted_edges.size());
+  witness.deleted_edges = std::move(deleted_edges);
+  witness.added_edges = std::move(added_edges);
+  if (!SumEdgeCosts(graph, witness.deleted_edges, &witness.deleted_cost, &result.reason) ||
+      !SumEdgeCosts(graph, witness.added_edges, &witness.added_cost, &result.reason) ||
+      witness.added_cost >= witness.deleted_cost) {
+    if (result.reason.empty()) {
+      result.reason = "exact fallback 交换成本不构成严格改善";
+    }
+    return result;
+  }
+  if (!ExtractInsideMatching(context, outside, improved_tour, &witness.inside_matching,
+                             &result.reason)) {
+    return result;
+  }
+  std::string verify_reason;
+  if (!VerifyKOptWitness(graph, paths, outside, required_edge, witness, &verify_reason)) {
+    result.reason = "exact fallback witness 复核失败: " + verify_reason;
+    return result;
+  }
+  result.status = KOptSearchStatus::kImproved;
+  result.reason = "精确 DP 找到严格改善的局部巡回";
+  result.witness = std::move(witness);
+  return result;
+}
+
 bool VerifyKOptWitness(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
                        const EndpointMatching& outside,
                        const std::optional<NodeEdge>& required_edge, const KOptWitness& witness,
@@ -924,8 +1204,8 @@ bool VerifyKOptWitness(const GraphSnapshot& graph, const NormalizedPathSystem& p
   if (!BuildTourContext(graph, paths, outside, required_edge, &context, reason)) {
     return false;
   }
-  if (witness.k < 3 || witness.k > 5 || witness.deleted_edges.size() != witness.k ||
-      witness.added_edges.size() != witness.k) {
+  if (witness.k < 2 || witness.k > context.path_edges.size() ||
+      witness.deleted_edges.size() != witness.k || witness.added_edges.size() != witness.k) {
     SetReason(reason, "witness 的 k 或边数非法");
     return false;
   }
@@ -1022,6 +1302,20 @@ PathSystemKOptProof ProvePathSystemByKOpt(const GraphSnapshot& graph,
         !AddWithoutOverflow(&proof.reconnect_matchings_tested, search.reconnect_matchings_tested)) {
       proof.reason = "path-system k-opt 统计计数溢出";
       return proof;
+    }
+    if (search.status != KOptSearchStatus::kImproved && options.exact_fallback_max_blocks != 0) {
+      KOptSearchResult exact = FindExactTourWitness(graph, paths, outside[source], required_edge,
+                                                    options.exact_fallback_max_blocks);
+      if (!AddWithoutOverflow(&proof.exact_states_tested, exact.exact_states_tested)) {
+        proof.reason = "path-system exact DP 状态计数溢出";
+        return proof;
+      }
+      if (exact.status == KOptSearchStatus::kImproved) {
+        search = std::move(exact);
+      } else {
+        search.reason += "; exact fallback: " + exact.reason;
+        search.status = exact.status;
+      }
     }
     if (search.status != KOptSearchStatus::kImproved) {
       proof.reason = "outside " + std::to_string(source) + " unresolved: " + search.reason;
@@ -1204,7 +1498,6 @@ PathSystemKOptProof ReadPathSystemKOptProof(const std::filesystem::path& path) {
   if (!(input >> proof.reconnect_matchings_tested)) {
     throw std::runtime_error("path k-opt proof 的 reconnect_matchings_tested 非法");
   }
-
   std::size_t record_count = 0;
   ExpectToken(&input, "record_count");
   if (!(input >> record_count) || record_count > proof.outside_count) {
@@ -1216,8 +1509,9 @@ PathSystemKOptProof ReadPathSystemKOptProof(const std::filesystem::path& path) {
     ExpectToken(&input, "record");
     if (!(input >> record.source_outside_index >> record.witness.k >> record.witness.deleted_cost >>
           record.witness.added_cost) ||
-        record.source_outside_index >= proof.outside_count || record.witness.k < 3 ||
-        record.witness.k > 5 || record.witness.deleted_cost < 0 || record.witness.added_cost < 0) {
+        record.source_outside_index >= proof.outside_count || record.witness.k < 2 ||
+        record.witness.k > 200 || record.witness.deleted_cost < 0 ||
+        record.witness.added_cost < 0) {
       throw std::runtime_error("path k-opt proof 的 record 头非法");
     }
 

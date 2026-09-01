@@ -11,7 +11,8 @@
 | M4.1 path-system 组合层 | 完成 | 路径规范化；固定哈希表；368,047 单元 CPU/CUDA 全量差分；`m=6,7` CPU fallback |
 | M4.2a CPU k-opt 叶证明 | 完成 | proper 3/4/5-opt `4/25/208` 模板；ElimTSP oracle 差分；`path-kopt-proof-v1` 独立重放 |
 | M4.2b CUDA k-opt cost | 完成（候选器） | 批量精确成本矩阵；CPU/CUDA 单元一致；坏/漏候选 CPU 全模板兜底；memcheck 0 error |
-| M4.3 困难叶与 HS | 待实现 | Held–Karp fallback、HS AND–OR、全局 proof 与 epoch 接线尚未完成 |
+| M4.3a 精确困难叶 | 完成（有界 CPU fallback） | 收缩 forced outside matching；Held–Karp 子集 DP；通用交换 witness 独立重放；block 超限为 unresolved |
+| M4.3b HS AND–OR | 待实现 | `c,d` 候选、全部 Hamilton replies、全局 proof 与 epoch 接线尚未完成 |
 | M5 中大型调优 | 待开始 | 首期不设最低加速比；pcb3038 尚未形成认证运行记录 |
 
 ## 当前基准结果
@@ -30,6 +31,8 @@ CPU k-opt 叶证明：自动生成的 proper 3/4/5-opt 模板数为 `4/25/208`�
 
 CUDA k-opt cost：按删除集合与 proper template 形成精确成本矩阵，CPU/CUDA 逐单元一致；候选成功和 GPU 无命中后的 CPU completeness fallback 均通过回归，CUDA memcheck 为 0 error。当前尚未以真实 HS 任务报告加速比。
 
+CPU 精确困难叶：将每条 forced outside edge 收缩为可双向访问的 block，其余节点为 singleton block；固定一个 block 的方向消除无向反转对称后，以 Held–Karp 子集 DP 穷举所有 block 次序和方向。比较时消去两条巡回共有的 outside 成本，并禁止候选重新使用 required path edge。成功结果转换为任意 `k>=2` 的交换 witness，再交给同一独立 verifier；默认关闭，启用时最多 18 个 block，内存不足或超限均返回 `unresolved`。60 组随机 7 点、每组两个 outside 的结果与直接 Hamilton 巡回枚举最优值一致，并覆盖 7-opt proof 往返。CPU Debug/ASan、CPU Release 与 CUDA Release 全量回归通过，GPU 2 上 k-opt memcheck 为 0 error。
+
 ## 安全边界
 
-`gpu-eliminate` 目前只实现 JV quick candidate search；path-system CPU leaf proof 尚未连接 HS 全局 AND–OR 证书，因此也不授权删边；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。HS 全链路与 M3.1 必须标为 pending；仍严禁从局部布尔结果或 cuOpt 浮点 reduced cost 直接构造删除记录。
+`gpu-eliminate` 目前只实现 JV quick candidate search；path-system CPU leaf proof（含有界精确 fallback）尚未连接 HS 全局 AND–OR 证书，因此也不授权删边；`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集。HS 全链路与 M3.1 必须标为 pending；仍严禁从局部布尔结果或 cuOpt 浮点 reduced cost 直接构造删除记录。

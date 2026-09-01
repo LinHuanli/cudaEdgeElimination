@@ -33,6 +33,8 @@ struct KOptSearchOptions {
   std::uint64_t max_deletion_sets{};
   PathCompatibilityBackend cost_backend{PathCompatibilityBackend::kCpu};
   std::uint32_t cost_batch_size{4096};
+  // 0 禁用；非零时在 k-opt 未解决后运行收缩 outside matching 的精确 DP（硬上限 18）。
+  std::uint32_t exact_fallback_max_blocks{};
 };
 
 struct KOptReconnectTable {
@@ -80,6 +82,7 @@ struct KOptSearchResult {
   KOptWitness witness;
   std::uint64_t deletion_sets_tested{};
   std::uint64_t reconnect_matchings_tested{};
+  std::uint64_t exact_states_tested{};
 };
 
 [[nodiscard]] std::uint64_t ComputePathSystemHash(const NormalizedPathSystem& paths);
@@ -90,6 +93,13 @@ struct KOptSearchResult {
                                                const EndpointMatching& outside,
                                                const std::optional<NodeEdge>& required_edge,
                                                const KOptSearchOptions& options = {});
+
+// 精确求解所有包含 outside matching 且不含 required_edge 的局部巡回。
+[[nodiscard]] KOptSearchResult FindExactTourWitness(const GraphSnapshot& graph,
+                                                    const NormalizedPathSystem& paths,
+                                                    const EndpointMatching& outside,
+                                                    const std::optional<NodeEdge>& required_edge,
+                                                    std::uint32_t max_blocks);
 
 // 从原路径巡回独立重建删边、加边、严格成本改善和 inside matching。
 [[nodiscard]] bool VerifyKOptWitness(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
@@ -112,6 +122,7 @@ struct PathSystemKOptProof {
   std::uint32_t outside_count{};
   std::uint64_t deletion_sets_tested{};
   std::uint64_t reconnect_matchings_tested{};
+  std::uint64_t exact_states_tested{};
   std::vector<OutsideKOptWitness> records;
 };
 

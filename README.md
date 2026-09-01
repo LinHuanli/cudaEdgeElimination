@@ -12,9 +12,10 @@
 - 路径系统规范化、`m<=5` CPU 生成/CUDA 查询兼容表与 `m=6,7` CPU 回退；
 - proper 3/4/5-opt CPU 叶 witness、inside coverage 与 `path-kopt-proof-v1` 重放；
 - 批量 CUDA k-opt 精确成本候选矩阵，以及 GPU 未命中后的 CPU completeness fallback；
+- 收缩 forced outside matching 的 CPU 精确 Held–Karp 子集 DP 困难叶回退；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 
-尚未完成的研究项（困难叶 fallback/HS AND–OR 全链路、cuOpt 退化对偶稳定化与精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。局部 leaf proof 尚未接入删边；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
+尚未完成的研究项（HS AND–OR 全链路、cuOpt 退化对偶稳定化与精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。精确困难叶有 18 个 block 的硬上限，超限只返回 `unresolved`。局部 leaf proof 尚未接入删边；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
 
 ## 快速开始
 

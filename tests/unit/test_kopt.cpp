@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <random>
 #include <stdexcept>
@@ -37,6 +38,92 @@ cudaee::GraphSnapshot MakeGraph(const std::vector<cudaee::Point>& points) {
   graph.integer_distance_safe = true;
   graph.points = points;
   return graph;
+}
+
+cudaee::NodeEdge CanonicalEdge(const std::int32_t first, const std::int32_t second) {
+  return first < second ? cudaee::NodeEdge{first, second} : cudaee::NodeEdge{second, first};
+}
+
+std::vector<cudaee::NodeEdge> OutsideEdges(const cudaee::NormalizedPathSystem& paths,
+                                           const cudaee::EndpointMatching& outside) {
+  std::vector<std::int32_t> endpoints;
+  endpoints.reserve(2U * paths.paths.size());
+  for (const cudaee::Path& path : paths.paths) {
+    endpoints.push_back(path.front());
+    endpoints.push_back(path.back());
+  }
+  std::vector<cudaee::NodeEdge> edges;
+  for (std::uint32_t endpoint = 0; endpoint < outside.endpoint_count; ++endpoint) {
+    const std::uint32_t partner = outside.mate[endpoint];
+    if (endpoint < partner) {
+      edges.push_back(CanonicalEdge(endpoints[endpoint], endpoints[partner]));
+    }
+  }
+  return edges;
+}
+
+std::int64_t OriginalTourCost(const cudaee::GraphSnapshot& graph,
+                              const cudaee::NormalizedPathSystem& paths,
+                              const cudaee::EndpointMatching& outside) {
+  std::int64_t cost = 0;
+  for (const cudaee::Path& path : paths.paths) {
+    for (std::size_t index = 1; index < path.size(); ++index) {
+      cost += graph.Distance(path[index - 1], path[index]);
+    }
+  }
+  for (const cudaee::NodeEdge& edge : OutsideEdges(paths, outside)) {
+    cost += graph.Distance(edge.u, edge.v);
+  }
+  return cost;
+}
+
+// 测试 oracle 直接枚举巡回，不复用生产 DP 的 block 状态或 predecessor。
+std::int64_t BruteForceConstrainedTourCost(const cudaee::GraphSnapshot& graph,
+                                           const cudaee::NormalizedPathSystem& paths,
+                                           const cudaee::EndpointMatching& outside,
+                                           const cudaee::NodeEdge& forbidden) {
+  std::vector<std::int32_t> nodes;
+  for (const cudaee::Path& path : paths.paths) {
+    nodes.insert(nodes.end(), path.begin(), path.end());
+  }
+  std::sort(nodes.begin(), nodes.end());
+  const std::int32_t start = nodes.front();
+  std::vector<std::int32_t> tail(nodes.begin() + 1, nodes.end());
+  const std::vector<cudaee::NodeEdge> forced = OutsideEdges(paths, outside);
+  const cudaee::NodeEdge canonical_forbidden = CanonicalEdge(forbidden.u, forbidden.v);
+  std::int64_t best = std::numeric_limits<std::int64_t>::max();
+  do {
+    std::vector<std::int32_t> order = {start};
+    order.insert(order.end(), tail.begin(), tail.end());
+    std::vector<cudaee::NodeEdge> tour_edges;
+    tour_edges.reserve(order.size());
+    std::int64_t cost = 0;
+    bool valid = true;
+    for (std::size_t index = 0; index < order.size(); ++index) {
+      const std::int32_t first = order[index];
+      const std::int32_t second = order[(index + 1) % order.size()];
+      const cudaee::NodeEdge edge = CanonicalEdge(first, second);
+      if (edge == canonical_forbidden) {
+        valid = false;
+        break;
+      }
+      tour_edges.push_back(edge);
+      cost += graph.Distance(first, second);
+    }
+    if (!valid) {
+      continue;
+    }
+    for (const cudaee::NodeEdge& edge : forced) {
+      if (std::find(tour_edges.begin(), tour_edges.end(), edge) == tour_edges.end()) {
+        valid = false;
+        break;
+      }
+    }
+    if (valid) {
+      best = std::min(best, cost);
+    }
+  } while (std::next_permutation(tail.begin(), tail.end()));
+  return best;
 }
 
 void TestKOptCostMatrixCpuCuda() {
@@ -234,6 +321,12 @@ void TestImprovingWitnessAndProof() {
   Check(cudaee::VerifyKOptWitness(graph, paths, outside, required, search.witness, &reason),
         reason);
 
+  const cudaee::KOptSearchResult exact =
+      cudaee::FindExactTourWitness(graph, paths, outside, required, 10);
+  Check(exact.status == cudaee::KOptSearchStatus::kImproved, exact.reason);
+  Check(exact.exact_states_tested > 0, "exact fallback visits DP states");
+  Check(cudaee::VerifyKOptWitness(graph, paths, outside, required, exact.witness, &reason), reason);
+
   const cudaee::KOptSearchResult batched = cudaee::FindKOptWitness(
       graph, paths, outside, required,
       {.max_k = 3, .cost_backend = cudaee::PathCompatibilityBackend::kAuto, .cost_batch_size = 2});
@@ -276,6 +369,20 @@ void TestImprovingWitnessAndProof() {
   Check(cudaee::VerifyPathSystemKOptProof(graph, paths, required, loaded, &reason), reason);
   Check(loaded.records.size() == proof.records.size(), "path k-opt proof round trip");
 
+  const cudaee::PathSystemKOptProof exact_proof = cudaee::ProvePathSystemByKOpt(
+      graph, paths, required,
+      {.max_k = 3, .max_deletion_sets = 1, .exact_fallback_max_blocks = 10});
+  Check(exact_proof.proven, exact_proof.reason);
+  Check(exact_proof.deletion_sets_tested == 1, "k-opt budget is exhausted before exact fallback");
+  Check(exact_proof.exact_states_tested > 0, "proof records exact fallback work");
+  Check(cudaee::VerifyPathSystemKOptProof(graph, paths, required, exact_proof, &reason), reason);
+  const std::filesystem::path exact_proof_path =
+      std::filesystem::path(CUDAEE_KOPT_TEST_TMP_DIR) / "tiny-exact.path-kopt-proof";
+  cudaee::WritePathSystemKOptProof(exact_proof_path, exact_proof);
+  const cudaee::PathSystemKOptProof loaded_exact =
+      cudaee::ReadPathSystemKOptProof(exact_proof_path);
+  Check(cudaee::VerifyPathSystemKOptProof(graph, paths, required, loaded_exact, &reason), reason);
+
   cudaee::PathSystemKOptProof wrong_hash = proof;
   ++wrong_hash.snapshot_hash;
   Check(!cudaee::VerifyPathSystemKOptProof(graph, paths, required, wrong_hash, &reason),
@@ -297,6 +404,17 @@ void TestNoImprovementAndBudget() {
       {.max_k = 3, .cost_backend = cudaee::PathCompatibilityBackend::kAuto, .cost_batch_size = 2});
   Check(batched_no_improvement.status == cudaee::KOptSearchStatus::kNoImprovement,
         "batched candidate oracle falls back before concluding no improvement");
+
+  const cudaee::KOptSearchResult exact_no_improvement =
+      cudaee::FindExactTourWitness(graph, paths, outside, cudaee::NodeEdge{0, 1}, 10);
+  Check(exact_no_improvement.status == cudaee::KOptSearchStatus::kNoImprovement,
+        "exact fallback proves no strictly shorter constrained tour");
+  Check(exact_no_improvement.exact_states_tested > 0, "exact no-improvement visits DP states");
+
+  const cudaee::KOptSearchResult exact_too_large =
+      cudaee::FindExactTourWitness(graph, paths, outside, cudaee::NodeEdge{0, 1}, 2);
+  Check(exact_too_large.status == cudaee::KOptSearchStatus::kUnresolved,
+        "exact fallback block cap remains unresolved");
 
   const cudaee::KOptSearchResult unresolved = cudaee::FindKOptWitness(
       graph, paths, outside, cudaee::NodeEdge{0, 1}, {.max_k = 3, .max_deletion_sets = 1});
@@ -324,6 +442,86 @@ void TestNoImprovementAndBudget() {
   Check(exhaustive.deletion_sets_tested == 25, "all anchored 3/4/5 deletion sets tested");
   Check(exhaustive.reconnect_matchings_tested == 1330,
         "all proper 3/4/5 reconnect templates tested");
+}
+
+void TestExactFallbackAgainstBruteForce() {
+  std::mt19937 random(19870217U); // NOLINT(bugprone-random-generator-seed): 固定回归种子。
+  std::uniform_int_distribution<std::int64_t> coordinate(-30, 30);
+  for (std::uint32_t trial = 0; trial < 60; ++trial) {
+    std::vector<cudaee::Point> points;
+    points.reserve(7);
+    for (std::uint32_t node = 0; node < 7; ++node) {
+      const std::int64_t x = coordinate(random);
+      const std::int64_t y = coordinate(random);
+      points.push_back({static_cast<double>(x), static_cast<double>(y), x, y});
+    }
+    const cudaee::GraphSnapshot graph = MakeGraph(points);
+    const cudaee::NormalizedPathSystem paths =
+        cudaee::NormalizePathSystem({{0, 1, 2}, {3, 4, 5, 6}}, graph.dimension);
+    Check(paths.valid, paths.reason);
+    const cudaee::NodeEdge required{0, 1};
+    for (const cudaee::EndpointMatching& outside : cudaee::EnumerateOutsideMatchings(2)) {
+      const std::int64_t original = OriginalTourCost(graph, paths, outside);
+      const std::int64_t oracle = BruteForceConstrainedTourCost(graph, paths, outside, required);
+      Check(oracle != std::numeric_limits<std::int64_t>::max(),
+            "brute-force constrained tour exists");
+      const cudaee::KOptSearchResult exact =
+          cudaee::FindExactTourWitness(graph, paths, outside, required, 10);
+      if (oracle < original) {
+        Check(exact.status == cudaee::KOptSearchStatus::kImproved,
+              "exact fallback agrees with brute-force improvement");
+        Check(original - exact.witness.deleted_cost + exact.witness.added_cost == oracle,
+              "exact fallback equals brute-force optimum");
+        std::string reason;
+        Check(cudaee::VerifyKOptWitness(graph, paths, outside, required, exact.witness, &reason),
+              reason);
+      } else {
+        Check(exact.status == cudaee::KOptSearchStatus::kNoImprovement,
+              "exact fallback agrees with brute-force no-improvement");
+      }
+    }
+  }
+}
+
+void TestExactSevenOptProofRoundTrip() {
+  const cudaee::GraphSnapshot graph = MakeGraph({{10.0, 0.0, 10, 0},
+                                                 {7.0, 7.0, 7, 7},
+                                                 {0.0, 10.0, 0, 10},
+                                                 {-7.0, 7.0, -7, 7},
+                                                 {-10.0, 0.0, -10, 0},
+                                                 {-7.0, -7.0, -7, -7},
+                                                 {0.0, -10.0, 0, -10},
+                                                 {7.0, -7.0, 7, -7}});
+  const cudaee::NormalizedPathSystem paths =
+      cudaee::NormalizePathSystem({{0, 2, 4, 6, 1, 3, 5, 7}}, graph.dimension);
+  Check(paths.valid, paths.reason);
+  const cudaee::EndpointMatching outside = cudaee::EnumerateOutsideMatchings(1).front();
+  const cudaee::NodeEdge required{0, 2};
+  const cudaee::KOptSearchResult exact =
+      cudaee::FindExactTourWitness(graph, paths, outside, required, 10);
+  Check(exact.status == cudaee::KOptSearchStatus::kImproved, exact.reason);
+  Check(exact.witness.k == 7, "exact fallback emits a generic 7-opt witness");
+  std::string reason;
+  Check(cudaee::VerifyKOptWitness(graph, paths, outside, required, exact.witness, &reason), reason);
+
+  cudaee::PathSystemKOptProof proof;
+  proof.proven = true;
+  proof.reason = "精确 7-opt 测试证明";
+  proof.snapshot_hash = graph.ContentHash();
+  proof.path_system_hash = cudaee::ComputePathSystemHash(paths);
+  proof.compatibility_table_hash = cudaee::BuildPathCompatibilityTable(1).generator_hash;
+  proof.path_count = 1;
+  proof.outside_count = 1;
+  proof.exact_states_tested = exact.exact_states_tested;
+  proof.records.push_back({0, exact.witness});
+  Check(cudaee::VerifyPathSystemKOptProof(graph, paths, required, proof, &reason), reason);
+
+  const std::filesystem::path proof_path =
+      std::filesystem::path(CUDAEE_KOPT_TEST_TMP_DIR) / "seven-opt.path-kopt-proof";
+  cudaee::WritePathSystemKOptProof(proof_path, proof);
+  const cudaee::PathSystemKOptProof loaded = cudaee::ReadPathSystemKOptProof(proof_path);
+  Check(loaded.records.front().witness.k == 7, "V1 parser accepts independently verified k>5");
+  Check(cudaee::VerifyPathSystemKOptProof(graph, paths, required, loaded, &reason), reason);
 }
 
 void TestTwoPathCoverageProof() {
@@ -354,6 +552,8 @@ int main() {
     TestReconnectTemplatesAgainstElimTspOracle();
     TestImprovingWitnessAndProof();
     TestNoImprovementAndBudget();
+    TestExactFallbackAgainstBruteForce();
+    TestExactSevenOptProofRoundTrip();
     TestTwoPathCoverageProof();
     std::cout << "k-opt tests passed\n";
     return 0;
