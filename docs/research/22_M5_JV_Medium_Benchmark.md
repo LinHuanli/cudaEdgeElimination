@@ -113,3 +113,5 @@ CUDAEE_BENCHMARK_GPU=1 tools/run_jv_benchmark.sh d15112 5
 3. 为 `rl5915`、`d15112` 补齐来源明确、成本重新计算通过的最优 tour witness。
 4. 增加全图 HT 目标调度、预算与 sidecar 批量 commit；JV 基准不能替代 HT 吞吐结论。
 5. 完成 M3.1 对偶稳定化和 exact reduced-cost 边集导出后，再测 LP—JV—HT 交替固定点的端到端性能。
+
+第 1 项已在后续提交完成，结果见 [M5 JV CUDA 跨 epoch 驻留缓存](23_M5_JV_Device_Residency.md)；本文件保留 `cac180f` 基线数字用于可比性。

@@ -6,6 +6,7 @@
 
 - TSPLIB `EUC_2D` / `CEIL_2D` 与 Concorde 稀疏边文件读取；
 - Jonker–Volgenant（JV）快速消元的 CPU 基线与 CUDA 候选生成；
+- JV 跨 epoch 精确静态键、动态 CSR 刷新与增长型 CUDA 驻留 workspace；
 - epoch 快照、CPU 复核、最小度保护、确定性提交，以及兼容 JV V1 的自包含 HT V2 证明日志；
 - `lp-epoch-v1` CSR 模型、cuOpt C API 动态 sidecar、残差与精确定点下界；
 - Concorde 受限 overlay、列—边映射、`CCbigguy` 对偶注入与完整图精确定价证书；
