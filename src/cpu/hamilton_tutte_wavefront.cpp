@@ -1101,8 +1101,12 @@ PropagateWavefront(const HtWavefrontOptions& options, const std::vector<WaveStat
   std::vector<HtWavefrontReplyTask> reply_tasks;
   FlattenWavefront(states, &state_tasks, &move_tasks, &reply_tasks);
   try {
-    *status = detail::EvaluateHtWavefrontCuda(state_tasks, move_tasks, reply_tasks, level_offsets,
-                                              &result->selected_device);
+    detail::HtWavefrontDeviceResult device_result =
+        detail::EvaluateHtWavefrontCuda(state_tasks, move_tasks, reply_tasks, level_offsets,
+                                        options.propagation_blocks, &result->selected_device);
+    *status = std::move(device_result.status);
+    result->propagation_blocks = device_result.launched_blocks;
+    result->propagation_cooperative = device_result.cooperative;
   } catch (const std::exception& error) {
     if (backend == PathCompatibilityBackend::kCuda) {
       *reason = std::string("CUDA HT wavefront propagation 失败: ") + error.what();
@@ -1111,6 +1115,8 @@ PropagateWavefront(const HtWavefrontOptions& options, const std::vector<WaveStat
     *status = cpu_status;
     result->propagation_backend = "cpu";
     result->selected_device = -1;
+    result->propagation_blocks = 0U;
+    result->propagation_cooperative = false;
     result->cpu_verified = true;
     return PropagationStatus::kOk;
   }

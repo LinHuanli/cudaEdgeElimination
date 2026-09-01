@@ -54,4 +54,4 @@ CPU cost backend 继续使用原 scalar 搜索，避免改变其直接全模板�
 
 ## 后续
 
-后续 M4.3b3b2b2b2b2a/b1 已完成[设备快照/模板与 workspace 驻留缓存](18_Hamilton_Tutte_GPU_Leaf_Cache.md)以及 [128-cell long-tail policy](19_Hamilton_Tutte_CPU_Long_Tail.md)。路径上下文、组合游标与 CPU witness 构造仍位于主机；下一步评估多 block continuation 和 HT epoch commit。
+后续已完成设备驻留缓存、128-cell long-tail policy 与 [cooperative multi-block continuation](20_Hamilton_Tutte_Multi_Block_Continuation.md)。路径上下文、组合游标与 CPU witness 构造仍位于主机；下一步是 HT epoch commit。

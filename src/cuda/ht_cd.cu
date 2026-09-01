@@ -1,5 +1,6 @@
 #include "cuda_edge_elimination/hamilton_tutte.hpp"
 
+#include <cooperative_groups.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -12,6 +13,8 @@
 
 namespace cudaee::detail {
 namespace {
+
+namespace cg = cooperative_groups;
 
 void CheckCuda(const cudaError_t status, const char* const operation) {
   if (status != cudaSuccess) {
@@ -169,6 +172,41 @@ __device__ void AppendCompletedState(const std::uint32_t state_index,
   }
 }
 
+__device__ void
+ProcessCompletedState(const std::uint32_t queue_index, const HtWavefrontStateTask* const states,
+                      const HtWavefrontMoveTask* const moves, std::int32_t* const status,
+                      std::uint32_t* const remaining_moves, std::uint32_t* const remaining_children,
+                      std::uint32_t* const move_failed, std::uint32_t* const completed_queue,
+                      std::uint32_t* const queue_tail, const std::uint32_t state_count,
+                      std::uint32_t* const error_code) {
+  const std::uint32_t state_index = completed_queue[queue_index];
+  const std::uint32_t parent_move = states[state_index].parent_move;
+  if (parent_move == kNoHtChild) {
+    return;
+  }
+  if (status[state_index] == 0) {
+    atomicExch(&move_failed[parent_move], 1U);
+  }
+  __threadfence();
+  const std::uint32_t children_before = atomicSub(&remaining_children[parent_move], 1U);
+  if (children_before != 1U) {
+    return;
+  }
+
+  const std::uint32_t parent_state = moves[parent_move].parent_state;
+  if (atomicAdd(&move_failed[parent_move], 0U) == 0U) {
+    if (atomicCAS(&status[parent_state], -1, 1) == -1) {
+      AppendCompletedState(parent_state, completed_queue, queue_tail, state_count, error_code);
+    }
+    return;
+  }
+
+  const std::uint32_t moves_before = atomicSub(&remaining_moves[parent_state], 1U);
+  if (moves_before == 1U && atomicCAS(&status[parent_state], -1, 0) == -1) {
+    AppendCompletedState(parent_state, completed_queue, queue_tail, state_count, error_code);
+  }
+}
+
 __global__ void PropagateHtContinuationsPersistentKernel(
     const HtWavefrontStateTask* const states, const HtWavefrontMoveTask* const moves,
     std::int32_t* const status, std::uint32_t* const remaining_moves,
@@ -208,32 +246,8 @@ __global__ void PropagateHtContinuationsPersistentKernel(
 
     for (std::uint32_t queue_index = batch_begin + threadIdx.x; queue_index < batch_end;
          queue_index += blockDim.x) {
-      const std::uint32_t state_index = completed_queue[queue_index];
-      const std::uint32_t parent_move = states[state_index].parent_move;
-      if (parent_move == kNoHtChild) {
-        continue;
-      }
-      if (status[state_index] == 0) {
-        atomicExch(&move_failed[parent_move], 1U);
-      }
-      __threadfence();
-      const std::uint32_t children_before = atomicSub(&remaining_children[parent_move], 1U);
-      if (children_before != 1U) {
-        continue;
-      }
-
-      const std::uint32_t parent_state = moves[parent_move].parent_state;
-      if (atomicAdd(&move_failed[parent_move], 0U) == 0U) {
-        if (atomicCAS(&status[parent_state], -1, 1) == -1) {
-          AppendCompletedState(parent_state, completed_queue, queue_tail, state_count, error_code);
-        }
-        continue;
-      }
-
-      const std::uint32_t moves_before = atomicSub(&remaining_moves[parent_state], 1U);
-      if (moves_before == 1U && atomicCAS(&status[parent_state], -1, 0) == -1) {
-        AppendCompletedState(parent_state, completed_queue, queue_tail, state_count, error_code);
-      }
+      ProcessCompletedState(queue_index, states, moves, status, remaining_moves, remaining_children,
+                            move_failed, completed_queue, queue_tail, state_count, error_code);
     }
     __syncthreads();
     if (threadIdx.x == 0U) {
@@ -241,6 +255,108 @@ __global__ void PropagateHtContinuationsPersistentKernel(
     }
     __syncthreads();
   }
+}
+
+__global__ void PropagateHtContinuationsCooperativeKernel(
+    const HtWavefrontStateTask* const states, const HtWavefrontMoveTask* const moves,
+    std::int32_t* const status, std::uint32_t* const remaining_moves,
+    std::uint32_t* const remaining_children, std::uint32_t* const move_failed,
+    std::uint32_t* const completed_queue, std::uint32_t* const queue_tail,
+    const std::uint32_t state_count, std::uint32_t* const error_code,
+    std::uint32_t* const batch_begin, std::uint32_t* const batch_end, std::uint32_t* const stop) {
+  const cg::grid_group grid = cg::this_grid();
+  const std::size_t thread_index = grid.thread_rank();
+  const std::size_t thread_count = grid.size();
+  if (thread_index == 0U) {
+    *batch_begin = 0U;
+    *batch_end = atomicAdd(queue_tail, 0U);
+    *stop = 0U;
+    if (*batch_end > state_count) {
+      atomicCAS(error_code, 0U, 1U);
+      *stop = 1U;
+    } else if (*batch_end == 0U) {
+      atomicCAS(error_code, 0U, 2U);
+      *stop = 1U;
+    }
+  }
+  grid.sync();
+
+  while (*stop == 0U) {
+    const std::uint32_t begin = *batch_begin;
+    const std::uint32_t end = *batch_end;
+    for (std::size_t queue_index = static_cast<std::size_t>(begin) + thread_index;
+         queue_index < end; queue_index += thread_count) {
+      ProcessCompletedState(static_cast<std::uint32_t>(queue_index), states, moves, status,
+                            remaining_moves, remaining_children, move_failed, completed_queue,
+                            queue_tail, state_count, error_code);
+    }
+    grid.sync();
+
+    if (thread_index == 0U) {
+      const std::uint32_t next_end = atomicAdd(queue_tail, 0U);
+      *batch_begin = end;
+      *batch_end = next_end;
+      if (next_end > state_count) {
+        atomicCAS(error_code, 0U, 1U);
+        *stop = 1U;
+      } else if (next_end == end) {
+        if (next_end != state_count) {
+          // grid.sync 后仍无新父状态，说明合法有限 DAG 的 counter 传播已停滞。
+          atomicCAS(error_code, 0U, 2U);
+        }
+        *stop = 1U;
+      }
+    }
+    grid.sync();
+  }
+}
+
+struct HtPropagationLaunch {
+  std::uint32_t blocks{1U};
+  bool cooperative{false};
+};
+
+HtPropagationLaunch SelectHtPropagationLaunch(const int device, const std::uint32_t state_count,
+                                              const std::uint32_t threads,
+                                              const std::uint32_t requested_blocks) {
+  if (requested_blocks == 1U) {
+    return {};
+  }
+  int cooperative_launch = 0;
+  CheckCuda(cudaDeviceGetAttribute(&cooperative_launch, cudaDevAttrCooperativeLaunch, device),
+            "cudaDeviceGetAttribute(cooperative launch)");
+  if (cooperative_launch == 0) {
+    if (requested_blocks > 1U) {
+      throw std::runtime_error("CUDA 设备不支持 cooperative continuation launch");
+    }
+    return {};
+  }
+
+  int blocks_per_multiprocessor = 0;
+  CheckCuda(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_multiprocessor,
+                                                          PropagateHtContinuationsCooperativeKernel,
+                                                          static_cast<int>(threads), 0U),
+            "cudaOccupancyMaxActiveBlocksPerMultiprocessor(HT continuation)");
+  int multiprocessors = 0;
+  CheckCuda(cudaDeviceGetAttribute(&multiprocessors, cudaDevAttrMultiProcessorCount, device),
+            "cudaDeviceGetAttribute(multiprocessor count)");
+  if (blocks_per_multiprocessor <= 0 || multiprocessors <= 0 ||
+      blocks_per_multiprocessor > std::numeric_limits<int>::max() / multiprocessors) {
+    throw std::runtime_error("CUDA cooperative continuation residency 非法");
+  }
+  const auto resident_blocks =
+      static_cast<std::uint32_t>(blocks_per_multiprocessor * multiprocessors);
+  if (requested_blocks > resident_blocks) {
+    throw std::invalid_argument("请求的 HT propagation blocks 超过 cooperative residency");
+  }
+  if (requested_blocks > 1U) {
+    return {.blocks = requested_blocks, .cooperative = true};
+  }
+
+  const std::uint32_t useful_blocks = 1U + (state_count - 1U) / threads;
+  const std::uint32_t blocks = std::min(resident_blocks, useful_blocks);
+  return blocks > 1U ? HtPropagationLaunch{.blocks = blocks, .cooperative = true}
+                     : HtPropagationLaunch{};
 }
 
 } // namespace
@@ -309,11 +425,12 @@ std::vector<std::uint8_t> ScreenHtCdCandidatesCuda(const GraphSnapshot& graph,
 
 bool HtWavefrontCudaAvailable(std::string* const reason) { return SelectDevice(reason) >= 0; }
 
-std::vector<std::uint8_t> EvaluateHtWavefrontCuda(const std::vector<HtWavefrontStateTask>& states,
-                                                  const std::vector<HtWavefrontMoveTask>& moves,
-                                                  const std::vector<HtWavefrontReplyTask>& replies,
-                                                  const std::vector<std::uint32_t>& level_offsets,
-                                                  int* const selected_device) {
+HtWavefrontDeviceResult EvaluateHtWavefrontCuda(const std::vector<HtWavefrontStateTask>& states,
+                                                const std::vector<HtWavefrontMoveTask>& moves,
+                                                const std::vector<HtWavefrontReplyTask>& replies,
+                                                const std::vector<std::uint32_t>& level_offsets,
+                                                const std::uint32_t requested_blocks,
+                                                int* const selected_device) {
   if (states.empty() || states.size() > std::numeric_limits<std::uint32_t>::max() ||
       moves.size() > std::numeric_limits<std::uint32_t>::max() ||
       replies.size() > std::numeric_limits<std::uint32_t>::max() || level_offsets.size() < 2U ||
@@ -397,6 +514,9 @@ std::vector<std::uint8_t> EvaluateHtWavefrontCuda(const std::vector<HtWavefrontS
   DeviceBuffer<std::uint32_t> device_completed_queue(states.size());
   DeviceBuffer<std::uint32_t> device_queue_tail(1U);
   DeviceBuffer<std::uint32_t> device_error_code(1U);
+  DeviceBuffer<std::uint32_t> device_batch_begin(1U);
+  DeviceBuffer<std::uint32_t> device_batch_end(1U);
+  DeviceBuffer<std::uint32_t> device_stop(1U);
 
   std::vector<std::int32_t> host_status(states.size(), -1);
   std::vector<std::uint32_t> host_remaining_moves(states.size());
@@ -441,11 +561,48 @@ std::vector<std::uint8_t> EvaluateHtWavefrontCuda(const std::vector<HtWavefrontS
             "cudaMemset(HT wavefront error_code)");
 
   constexpr std::uint32_t kThreads = 256U;
-  PropagateHtContinuationsPersistentKernel<<<1U, kThreads>>>(
-      device_states.get(), device_moves.get(), device_status.get(), device_remaining_moves.get(),
-      device_remaining_children.get(), device_move_failed.get(), device_completed_queue.get(),
-      device_queue_tail.get(), static_cast<std::uint32_t>(states.size()), device_error_code.get());
-  CheckCuda(cudaGetLastError(), "PropagateHtContinuationsPersistentKernel launch");
+  const HtPropagationLaunch launch = SelectHtPropagationLaunch(
+      device, static_cast<std::uint32_t>(states.size()), kThreads, requested_blocks);
+  if (!launch.cooperative) {
+    PropagateHtContinuationsPersistentKernel<<<1U, kThreads>>>(
+        device_states.get(), device_moves.get(), device_status.get(), device_remaining_moves.get(),
+        device_remaining_children.get(), device_move_failed.get(), device_completed_queue.get(),
+        device_queue_tail.get(), static_cast<std::uint32_t>(states.size()),
+        device_error_code.get());
+    CheckCuda(cudaGetLastError(), "PropagateHtContinuationsPersistentKernel launch");
+  } else {
+    const HtWavefrontStateTask* states_pointer = device_states.get();
+    const HtWavefrontMoveTask* moves_pointer = device_moves.get();
+    std::int32_t* status_pointer = device_status.get();
+    std::uint32_t* remaining_moves_pointer = device_remaining_moves.get();
+    std::uint32_t* remaining_children_pointer = device_remaining_children.get();
+    std::uint32_t* move_failed_pointer = device_move_failed.get();
+    std::uint32_t* completed_queue_pointer = device_completed_queue.get();
+    std::uint32_t* queue_tail_pointer = device_queue_tail.get();
+    std::uint32_t state_count = static_cast<std::uint32_t>(states.size());
+    std::uint32_t* error_code_pointer = device_error_code.get();
+    std::uint32_t* batch_begin_pointer = device_batch_begin.get();
+    std::uint32_t* batch_end_pointer = device_batch_end.get();
+    std::uint32_t* stop_pointer = device_stop.get();
+    void* kernel_arguments[] = {&states_pointer,
+                                &moves_pointer,
+                                &status_pointer,
+                                &remaining_moves_pointer,
+                                &remaining_children_pointer,
+                                &move_failed_pointer,
+                                &completed_queue_pointer,
+                                &queue_tail_pointer,
+                                &state_count,
+                                &error_code_pointer,
+                                &batch_begin_pointer,
+                                &batch_end_pointer,
+                                &stop_pointer};
+    CheckCuda(cudaLaunchCooperativeKernel(
+                  reinterpret_cast<const void*>(PropagateHtContinuationsCooperativeKernel),
+                  dim3(launch.blocks), dim3(kThreads), kernel_arguments, 0U, nullptr),
+              "PropagateHtContinuationsCooperativeKernel launch");
+  }
+  CheckCuda(cudaDeviceSynchronize(), "HT continuation kernel synchronize");
 
   std::uint32_t error_code = 0U;
   device_error_code.CopyToHost(&error_code);
@@ -456,14 +613,17 @@ std::vector<std::uint8_t> EvaluateHtWavefrontCuda(const std::vector<HtWavefrontS
     throw std::runtime_error("CUDA HT continuation queue 在全部状态完成前停滞");
   }
   device_status.CopyToHost(host_status.data());
-  std::vector<std::uint8_t> status(states.size());
+  HtWavefrontDeviceResult result;
+  result.status.resize(states.size());
+  result.launched_blocks = launch.blocks;
+  result.cooperative = launch.cooperative;
   for (std::size_t state_index = 0; state_index < states.size(); ++state_index) {
     if (host_status[state_index] != 0 && host_status[state_index] != 1) {
       throw std::runtime_error("CUDA HT continuation 存在未完成状态");
     }
-    status[state_index] = static_cast<std::uint8_t>(host_status[state_index]);
+    result.status[state_index] = static_cast<std::uint8_t>(host_status[state_index]);
   }
-  return status;
+  return result;
 }
 
 } // namespace cudaee::detail

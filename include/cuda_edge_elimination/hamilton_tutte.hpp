@@ -184,6 +184,8 @@ struct HtWavefrontOptions {
   std::uint32_t leaf_frontier_batch_states{256};
   // 只控制 continuation 真值传播；leaf/c,d 后端仍由 search_options 分别配置。
   PathCompatibilityBackend propagation_backend{PathCompatibilityBackend::kAuto};
+  // 0 自动选择 cooperative residency 内的 block 数；1 强制单 block 正确性基线。
+  std::uint32_t propagation_blocks{};
   // 只控制递归 point/end reply 的批量路径冲突标记；CPU 始终规范化并逐项认证。
   PathCompatibilityBackend path_append_backend{PathCompatibilityBackend::kAuto};
   // 控制 c,d/point Hamilton 邻边对与 end 活动边的 count/write；CPU 始终完整比较。
@@ -196,6 +198,8 @@ struct HtWavefrontResult {
   std::string propagation_backend{"none"};
   int selected_device{-1};
   bool cpu_verified{false};
+  std::uint32_t propagation_blocks{};
+  bool propagation_cooperative{false};
   std::string path_append_backend{"none"};
   int path_append_selected_device{-1};
   bool path_append_cpu_verified{false};
@@ -379,6 +383,12 @@ struct HtEndReplyDeviceBatch {
   std::vector<NodeEdge> replies;
 };
 
+struct HtWavefrontDeviceResult {
+  std::vector<std::uint8_t> status;
+  std::uint32_t launched_blocks{};
+  bool cooperative{false};
+};
+
 [[nodiscard]] bool HtCdCudaAvailable(std::string* reason);
 [[nodiscard]] std::vector<std::uint8_t>
 ScreenHtCdCandidatesCuda(const GraphSnapshot& graph, NodeEdge target_edge,
@@ -396,11 +406,12 @@ EvaluateHtEndRepliesCuda(const GraphSnapshot& graph, const std::vector<HtEndRepl
                          int* selected_device);
 
 [[nodiscard]] bool HtWavefrontCudaAvailable(std::string* reason);
-[[nodiscard]] std::vector<std::uint8_t>
+[[nodiscard]] HtWavefrontDeviceResult
 EvaluateHtWavefrontCuda(const std::vector<HtWavefrontStateTask>& states,
                         const std::vector<HtWavefrontMoveTask>& moves,
                         const std::vector<HtWavefrontReplyTask>& replies,
-                        const std::vector<std::uint32_t>& level_offsets, int* selected_device);
+                        const std::vector<std::uint32_t>& level_offsets,
+                        std::uint32_t requested_blocks, int* selected_device);
 
 [[nodiscard]] bool HtPathAppendCudaAvailable(std::string* reason);
 [[nodiscard]] HtPathAppendDeviceBatch

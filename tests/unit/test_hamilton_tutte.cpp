@@ -765,7 +765,8 @@ void TestRecursivePointProof() {
          .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCuda});
     Check(cuda_wavefront.status == cudaee::HtSearchStatus::kProven, cuda_wavefront.proof.reason);
     Check(cuda_wavefront.propagation_backend == "cuda" && cuda_wavefront.selected_device >= 0 &&
-              cuda_wavefront.cpu_verified,
+              cuda_wavefront.cpu_verified && cuda_wavefront.propagation_blocks == 1U &&
+              !cuda_wavefront.propagation_cooperative,
           "CUDA wavefront propagation is fully CPU verified");
     Check(cuda_wavefront.path_append_backend == "cuda" &&
               cuda_wavefront.path_append_selected_device >= 0 &&
@@ -792,6 +793,7 @@ void TestRecursivePointProof() {
         graph, {2, 4},
         {.search_options = auto_long_tail_options,
          .propagation_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .propagation_blocks = 2U,
          .path_append_backend = cudaee::PathCompatibilityBackend::kCuda,
          .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCuda});
     Check(auto_long_tail.status == cuda_wavefront.status &&
@@ -801,8 +803,9 @@ void TestRecursivePointProof() {
               auto_long_tail.leaf_cpu_long_tail_batches == auto_long_tail.leaf_cost_batches &&
               auto_long_tail.leaf_cpu_long_tail_tasks == auto_long_tail.leaf_cost_tasks &&
               auto_long_tail.leaf_cpu_long_tail_cells == auto_long_tail.leaf_cost_cells &&
-              auto_long_tail.leaf_cuda_cost_batches == 0U,
-          "auto CPU long-tail keeps the full CUDA scheduler proof byte-identical");
+              auto_long_tail.leaf_cuda_cost_batches == 0U &&
+              auto_long_tail.propagation_blocks == 2U && auto_long_tail.propagation_cooperative,
+          "two-block propagation and auto CPU long-tail keep the proof byte-identical");
     const cudaee::HtWavefrontResult cuda_single_leaf = cudaee::ProveEdgeByWavefrontHt(
         graph, {2, 4},
         {.search_options = cuda_wavefront_options,
@@ -1039,29 +1042,78 @@ void TestCudaWavefrontTruthTable() {
   const std::vector<cudaee::HtWavefrontMoveTask> moves = {{0, 0, 2, 2}, {0, 2, 1, 1}};
   const std::vector<cudaee::HtWavefrontReplyTask> replies = {{1, 0}, {2, 0}, {3, 0}};
   int selected_device = -1;
-  const std::vector<std::uint8_t> status =
-      cudaee::detail::EvaluateHtWavefrontCuda(states, moves, replies, {0, 1, 4}, &selected_device);
-  Check(status == std::vector<std::uint8_t>({1, 1, 0, 1}) && selected_device >= 0,
+  const cudaee::detail::HtWavefrontDeviceResult single = cudaee::detail::EvaluateHtWavefrontCuda(
+      states, moves, replies, {0, 1, 4}, 1U, &selected_device);
+  Check(single.status == std::vector<std::uint8_t>({1, 1, 0, 1}) && selected_device >= 0 &&
+            single.launched_blocks == 1U && !single.cooperative,
         "CUDA wavefront evaluates the pinned AND/OR truth table");
+  const cudaee::detail::HtWavefrontDeviceResult cooperative =
+      cudaee::detail::EvaluateHtWavefrontCuda(states, moves, replies, {0, 1, 4}, 2U,
+                                              &selected_device);
+  Check(cooperative.status == single.status && cooperative.launched_blocks == 2U &&
+            cooperative.cooperative,
+        "two-block cooperative continuation preserves the pinned truth table");
 
   const std::vector<cudaee::HtWavefrontStateTask> failed_states = {
       {cudaee::kNoHtChild, 0, 1, 0}, {0, 1, 0, 1}, {0, 1, 0, 0}};
   const std::vector<cudaee::HtWavefrontMoveTask> failed_moves = {{0, 0, 2, 2}};
   const std::vector<cudaee::HtWavefrontReplyTask> failed_replies = {{1, 0}, {2, 0}};
-  const std::vector<std::uint8_t> failed_status = cudaee::detail::EvaluateHtWavefrontCuda(
-      failed_states, failed_moves, failed_replies, {0, 1, 3}, &selected_device);
-  Check(failed_status == std::vector<std::uint8_t>({0, 1, 0}),
+  const cudaee::detail::HtWavefrontDeviceResult failed = cudaee::detail::EvaluateHtWavefrontCuda(
+      failed_states, failed_moves, failed_replies, {0, 1, 3}, 2U, &selected_device);
+  Check(failed.status == std::vector<std::uint8_t>({0, 1, 0}) && failed.cooperative,
         "CUDA continuation marks a state failed only after all moves fail");
+
+  constexpr std::uint32_t kWideChildCount = 512U;
+  std::vector<cudaee::HtWavefrontStateTask> wide_states;
+  wide_states.reserve(kWideChildCount + 1U);
+  wide_states.push_back({cudaee::kNoHtChild, 0U, 1U, 0U});
+  for (std::uint32_t child = 0U; child < kWideChildCount; ++child) {
+    wide_states.push_back({0U, 1U, 0U, static_cast<std::uint8_t>(child != 300U)});
+  }
+  const std::vector<cudaee::HtWavefrontMoveTask> wide_moves = {
+      {0U, 0U, kWideChildCount, kWideChildCount}};
+  std::vector<cudaee::HtWavefrontReplyTask> wide_replies;
+  wide_replies.reserve(kWideChildCount);
+  for (std::uint32_t child = 0U; child < kWideChildCount; ++child) {
+    wide_replies.push_back({child + 1U, 0U});
+  }
+  const cudaee::detail::HtWavefrontDeviceResult wide_failed =
+      cudaee::detail::EvaluateHtWavefrontCuda(wide_states, wide_moves, wide_replies,
+                                              {0U, 1U, kWideChildCount + 1U}, 2U, &selected_device);
+  Check(wide_failed.status.front() == 0U && wide_failed.status[301U] == 0U &&
+            wide_failed.cooperative,
+        "two blocks propagate one failed child across a 512-way AND move");
+  wide_states[301U].leaf_proven = 1U;
+  const cudaee::detail::HtWavefrontDeviceResult wide_success =
+      cudaee::detail::EvaluateHtWavefrontCuda(wide_states, wide_moves, wide_replies,
+                                              {0U, 1U, kWideChildCount + 1U}, 2U, &selected_device);
+  Check(wide_success.status.front() == 1U &&
+            std::all_of(wide_success.status.begin(), wide_success.status.end(),
+                        [](const std::uint8_t value) { return value == 1U; }),
+        "two blocks complete a 512-way successful AND move exactly once");
+  const cudaee::detail::HtWavefrontDeviceResult wide_auto = cudaee::detail::EvaluateHtWavefrontCuda(
+      wide_states, wide_moves, wide_replies, {0U, 1U, kWideChildCount + 1U}, 0U, &selected_device);
+  Check(wide_auto.status == wide_success.status && wide_auto.launched_blocks == 3U &&
+            wide_auto.cooperative,
+        "auto continuation uses the useful cooperative block count");
 
   std::vector<cudaee::HtWavefrontReplyTask> invalid = replies;
   invalid.front().child_index = 0;
   CheckThrows(
       [&] {
-        const auto ignored = cudaee::detail::EvaluateHtWavefrontCuda(states, moves, invalid,
-                                                                     {0, 1, 4}, &selected_device);
+        const auto ignored = cudaee::detail::EvaluateHtWavefrontCuda(
+            states, moves, invalid, {0, 1, 4}, 2U, &selected_device);
         static_cast<void>(ignored);
       },
       "CUDA wavefront rejects a non-forward continuation");
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::detail::EvaluateHtWavefrontCuda(
+            states, moves, replies, {0, 1, 4}, std::numeric_limits<std::uint32_t>::max(),
+            &selected_device);
+        static_cast<void>(ignored);
+      },
+      "CUDA wavefront rejects blocks beyond cooperative residency");
 }
 #endif
 

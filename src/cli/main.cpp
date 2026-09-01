@@ -28,27 +28,27 @@ namespace {
 using Arguments = std::map<std::string, std::string>;
 
 void PrintHelp() {
-  std::cout
-      << "cudaee：可验证 TSP GPU 边消元研究工具\n\n"
-      << "命令：\n"
-      << "  gpu-eliminate --tsp FILE --edges FILE --output FILE --proof FILE\n"
-      << "                [--backend auto|cpu|cuda] [--max-rounds N] [--manifest FILE]\n"
-      << "  verify        --tsp FILE --edges FILE --proof FILE\n"
-      << "  lp-solve      --input FILE --output FILE [--cuopt-library FILE]\n"
-      << "  lp-example    --output FILE\n"
-      << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
-      << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
-      << "                [--scheduler dfs|wavefront] [--backend auto|cpu|cuda]\n"
-      << "                [--reply-backend auto|cpu|cuda]\n"
-      << "                [--reply-frontier-batch-states N]\n"
-      << "                [--leaf-frontier-batch-states N]\n"
-      << "                [--cost-batch-size N] [--cuda-min-cost-cells N]\n"
-      << "                [--path-append-backend auto|cpu|cuda]\n"
-      << "                [--propagation-backend auto|cpu|cuda] [--max-depth N] [HT budgets]\n"
-      << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
-      << "  pipeline      与 gpu-eliminate 相同，可附加 --lp-epoch FILE\n"
-      << "                --lp-solution FILE [--cuopt-library FILE]\n\n"
-      << "所有输出必须位于源码仓库内；不支持或验证失败时不会删除边。\n";
+  std::cout << "cudaee：可验证 TSP GPU 边消元研究工具\n\n"
+            << "命令：\n"
+            << "  gpu-eliminate --tsp FILE --edges FILE --output FILE --proof FILE\n"
+            << "                [--backend auto|cpu|cuda] [--max-rounds N] [--manifest FILE]\n"
+            << "  verify        --tsp FILE --edges FILE --proof FILE\n"
+            << "  lp-solve      --input FILE --output FILE [--cuopt-library FILE]\n"
+            << "  lp-example    --output FILE\n"
+            << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
+            << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
+            << "                [--scheduler dfs|wavefront] [--backend auto|cpu|cuda]\n"
+            << "                [--reply-backend auto|cpu|cuda]\n"
+            << "                [--reply-frontier-batch-states N]\n"
+            << "                [--leaf-frontier-batch-states N]\n"
+            << "                [--cost-batch-size N] [--cuda-min-cost-cells N]\n"
+            << "                [--path-append-backend auto|cpu|cuda]\n"
+            << "                [--propagation-backend auto|cpu|cuda] [--propagation-blocks N]\n"
+            << "                [--max-depth N] [HT budgets]\n"
+            << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
+            << "  pipeline      与 gpu-eliminate 相同，可附加 --lp-epoch FILE\n"
+            << "                --lp-solution FILE [--cuopt-library FILE]\n\n"
+            << "所有输出必须位于源码仓库内；不支持或验证失败时不会删除边。\n";
 }
 
 Arguments ParseArguments(const int argc, char** argv, const int first) {
@@ -388,6 +388,8 @@ bool HtProveCommand(const Arguments& arguments) {
   std::string path_append_backend = "none";
   std::string hamilton_reply_backend = "none";
   int selected_device = -1;
+  std::uint32_t propagation_blocks = 0;
+  bool propagation_cooperative = false;
   int path_append_selected_device = -1;
   int hamilton_reply_selected_device = -1;
   bool path_append_cpu_verified = false;
@@ -443,6 +445,7 @@ bool HtProveCommand(const Arguments& arguments) {
              OptionalInteger<std::uint32_t>(arguments, "leaf-frontier-batch-states", 256U),
          .propagation_backend =
              ParsePathCompatibilityBackend(Optional(arguments, "propagation-backend", "auto")),
+         .propagation_blocks = OptionalInteger<std::uint32_t>(arguments, "propagation-blocks", 0U),
          .path_append_backend =
              ParsePathCompatibilityBackend(Optional(arguments, "path-append-backend", "auto")),
          .hamilton_reply_backend =
@@ -453,6 +456,8 @@ bool HtProveCommand(const Arguments& arguments) {
     path_append_backend = std::move(result.path_append_backend);
     hamilton_reply_backend = std::move(result.hamilton_reply_backend);
     selected_device = result.selected_device;
+    propagation_blocks = result.propagation_blocks;
+    propagation_cooperative = result.propagation_cooperative;
     path_append_selected_device = result.path_append_selected_device;
     hamilton_reply_selected_device = result.hamilton_reply_selected_device;
     path_append_cpu_verified = result.path_append_cpu_verified;
@@ -509,6 +514,8 @@ bool HtProveCommand(const Arguments& arguments) {
   if (scheduler == "wavefront") {
     std::cout << " propagation_backend=" << propagation_backend
               << " selected_device=" << selected_device << " moves=" << moves_generated
+              << " propagation_blocks=" << propagation_blocks
+              << " propagation_cooperative=" << (propagation_cooperative ? 1 : 0)
               << " peak_frontier=" << peak_frontier
               << " path_append_backend=" << path_append_backend
               << " path_append_device=" << path_append_selected_device
