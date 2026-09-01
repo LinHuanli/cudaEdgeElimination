@@ -1974,6 +1974,66 @@ void ApplyBatchedKOptSearch(const GraphSnapshot& graph, const NormalizedPathSyst
   FinishBatchedPathProofIfCovered(work);
 }
 
+bool VerifyPathSystemKOptProofBoundToSnapshot(const GraphSnapshot& graph,
+                                              const NormalizedPathSystem& paths,
+                                              const std::optional<NodeEdge>& required_edge,
+                                              const PathSystemKOptProof& proof,
+                                              const std::uint64_t snapshot_hash,
+                                              std::string* const reason) {
+  if (!proof.proven || proof.snapshot_hash != snapshot_hash ||
+      proof.path_system_hash != ComputePathSystemHash(paths) ||
+      proof.path_count != paths.paths.size() || proof.path_count == 0 ||
+      proof.path_count > kMaxTestablePathCount) {
+    SetReason(reason, "path-system proof 的状态或绑定哈希不一致");
+    return false;
+  }
+  const PathMatchingCatalog& catalog = CachedPathMatchingCatalog(proof.path_count);
+  const std::vector<EndpointMatching>& outside = catalog.outside;
+  if (proof.outside_count != outside.size()) {
+    SetReason(reason, "path-system proof 的 outside 数量不一致");
+    return false;
+  }
+  if (catalog.table.has_value()) {
+    if (proof.compatibility_table_hash != catalog.table->generator_hash) {
+      SetReason(reason, "path-system proof 的兼容表哈希不一致");
+      return false;
+    }
+  } else if (proof.compatibility_table_hash != 0) {
+    SetReason(reason, "m>5 proof 不应绑定完整兼容表");
+    return false;
+  }
+
+  std::vector<bool> covered(outside.size(), false);
+  for (const OutsideKOptWitness& record : proof.records) {
+    if (record.source_outside_index >= outside.size() || covered[record.source_outside_index]) {
+      SetReason(reason, "path-system proof 的 source outside 顺序非法");
+      return false;
+    }
+    std::string witness_reason;
+    if (!VerifyKOptWitness(graph, paths, outside[record.source_outside_index], required_edge,
+                           record.witness, &witness_reason)) {
+      SetReason(reason, "path-system witness 失败: " + witness_reason);
+      return false;
+    }
+    for (std::size_t outside_index = 0; outside_index < outside.size(); ++outside_index) {
+      if (IsAlternatingHamiltonianCycle(outside[outside_index], record.witness.inside_matching,
+                                        proof.path_count)) {
+        covered[outside_index] = true;
+      }
+    }
+    if (!covered[record.source_outside_index]) {
+      SetReason(reason, "path-system witness 不覆盖其 source outside");
+      return false;
+    }
+  }
+  if (!std::all_of(covered.begin(), covered.end(), [](const bool value) { return value; })) {
+    SetReason(reason, "path-system proof 未覆盖全部 outside matching");
+    return false;
+  }
+  SetReason(reason, "OK");
+  return true;
+}
+
 void RecordKOptBatchBackend(PathSystemKOptBatchResult* const result, const std::string& backend,
                             const int selected_device) {
   if (result->cost_backend == "none") {
@@ -2022,10 +2082,11 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
   }
 
   std::vector<BatchedPathProofWork> works;
+  std::uint64_t snapshot_hash = 0U;
   {
     ScopedPhaseTimer timer(&result.setup_ms);
     ScopedPhaseTimer initialize_timer(&result.proof_initialize_ms);
-    const std::uint64_t snapshot_hash = graph.ContentHash();
+    snapshot_hash = graph.ContentHash();
     works.reserve(path_systems.size());
     for (const NormalizedPathSystem& paths : path_systems) {
       works.push_back(InitializeBatchedPathProof(paths, snapshot_hash));
@@ -2237,8 +2298,9 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
       bool verified = false;
       {
         ScopedPhaseTimer timer(&result.proof_verify_ms);
-        verified = VerifyPathSystemKOptProof(graph, path_systems[index], required_edge,
-                                             works[index].proof, &reason);
+        // graph 在整个同步 batch 内只读；沿用入口哈希，逐 proof 仍完整复核绑定与 witness。
+        verified = VerifyPathSystemKOptProofBoundToSnapshot(
+            graph, path_systems[index], required_edge, works[index].proof, snapshot_hash, &reason);
       }
       if (!verified) {
         throw std::logic_error("批量 path-system proof CPU 复核失败: " + reason);
@@ -2256,58 +2318,9 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
 bool VerifyPathSystemKOptProof(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
                                const std::optional<NodeEdge>& required_edge,
                                const PathSystemKOptProof& proof, std::string* const reason) {
-  if (!proof.proven || proof.snapshot_hash != graph.ContentHash() ||
-      proof.path_system_hash != ComputePathSystemHash(paths) ||
-      proof.path_count != paths.paths.size() || proof.path_count == 0 ||
-      proof.path_count > kMaxTestablePathCount) {
-    SetReason(reason, "path-system proof 的状态或绑定哈希不一致");
-    return false;
-  }
-  const PathMatchingCatalog& catalog = CachedPathMatchingCatalog(proof.path_count);
-  const std::vector<EndpointMatching>& outside = catalog.outside;
-  if (proof.outside_count != outside.size()) {
-    SetReason(reason, "path-system proof 的 outside 数量不一致");
-    return false;
-  }
-  if (catalog.table.has_value()) {
-    if (proof.compatibility_table_hash != catalog.table->generator_hash) {
-      SetReason(reason, "path-system proof 的兼容表哈希不一致");
-      return false;
-    }
-  } else if (proof.compatibility_table_hash != 0) {
-    SetReason(reason, "m>5 proof 不应绑定完整兼容表");
-    return false;
-  }
-
-  std::vector<bool> covered(outside.size(), false);
-  for (const OutsideKOptWitness& record : proof.records) {
-    if (record.source_outside_index >= outside.size() || covered[record.source_outside_index]) {
-      SetReason(reason, "path-system proof 的 source outside 顺序非法");
-      return false;
-    }
-    std::string witness_reason;
-    if (!VerifyKOptWitness(graph, paths, outside[record.source_outside_index], required_edge,
-                           record.witness, &witness_reason)) {
-      SetReason(reason, "path-system witness 失败: " + witness_reason);
-      return false;
-    }
-    for (std::size_t outside_index = 0; outside_index < outside.size(); ++outside_index) {
-      if (IsAlternatingHamiltonianCycle(outside[outside_index], record.witness.inside_matching,
-                                        proof.path_count)) {
-        covered[outside_index] = true;
-      }
-    }
-    if (!covered[record.source_outside_index]) {
-      SetReason(reason, "path-system witness 不覆盖其 source outside");
-      return false;
-    }
-  }
-  if (!std::all_of(covered.begin(), covered.end(), [](const bool value) { return value; })) {
-    SetReason(reason, "path-system proof 未覆盖全部 outside matching");
-    return false;
-  }
-  SetReason(reason, "OK");
-  return true;
+  // 独立 verifier 必须自行绑定调用时的完整图；只有同一同步 batch 的内部复核可复用哈希。
+  return VerifyPathSystemKOptProofBoundToSnapshot(graph, paths, required_edge, proof,
+                                                  graph.ContentHash(), reason);
 }
 
 namespace {
