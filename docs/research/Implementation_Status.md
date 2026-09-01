@@ -14,8 +14,8 @@
 | M4.3a 精确困难叶 | 完成（有界 CPU fallback） | 收缩 forced outside matching；Held–Karp 子集 DP；通用交换 witness 独立重放；block 超限为 unresolved |
 | M4.3b1 浅层 HS AND–OR | 完成（研究 API） | `c,d` OR；完整邻边对 AND；嵌套 leaf 重放；CUDA flags 经 CPU 全量差分 |
 | M4.3b2 递归 HT 语义与证书 | 完成（CPU 研究 API/CLI） | extra point/end；continuation arena；全局 proof V1；`ht-prove`/`ht-verify` 严格重放 |
-| M4.3b3a 混合 GPU wavefront | 完成（研究 API/CLI） | 主机 BFS；CUDA 反向层次 AND–OR；逐状态 CPU 差分；成功子树 V1 重放 |
-| M4.3b3b 全设备 wavefront 与提交 | 待实现 | GPU 状态/reply 生成、批量叶、persistent counters、CPU long-tail、epoch commit |
+| M4.3b3a 混合 GPU wavefront | 完成（研究 API/CLI） | 主机 BFS；CUDA 原子 continuation counters；CPU 全状态差分；成功子树 V1 重放 |
+| M4.3b3b 全设备 wavefront 与提交 | 待实现 | GPU 状态/reply 生成、批量叶、device-persistent queue、CPU long-tail、epoch commit |
 | M5 中大型调优 | 待开始 | 首期不设最低加速比；pcb3038 尚未形成认证运行记录 |
 
 ## 当前基准结果
@@ -40,7 +40,7 @@ CPU 精确困难叶：将每条 forced outside edge 收缩为可双向访问的 
 
 递归 HT：CPU DFS 实现与后续 wavefront 相同的 `Leaf(F) OR ∨move ∧reply HT(F∪reply)` 真值。未解决状态可选择未出现在路径系统中的 point，或选择当前路径 endpoint；每个 move 必须记录其完整活动图 replies。成功子树保存为只向后引用的扁平 continuation arena，独立 verifier 从目标边重新规范化每个子状态并拒绝环、共享 child、遗漏 reply 和未引用节点。`CUDAEE_HT_RECURSIVE_PROOF_V1` 嵌入现有 path-k-opt V1 叶证明并严格拒绝非法计数、枚举值和尾随字段。固定 point/end 递归实例均由 8 点完整巡回穷举额外确认目标边不属于任何最优巡回；depth/budget fail-closed 与 proof 篡改已有回归。`ht-prove`/`ht-verify` 已覆盖固定实例的文件级端到端 CTest；未解决写入 `proven=0` 并返回退出码 3。DFS 调度本身仍在 CPU，GPU 版本使用下一段的独立 wavefront 路径。
 
-混合 wavefront：主机 BFS 为每个状态先跑 leaf，再生成有界 point/end OR moves 及其完整 replies；所有 child 只指向下一层。CPU 从后向前得到规范状态真值；CUDA 用一个线程处理一个状态、按反向层次 launch 得到同一向量，两者任一单元不同即返回 `invalid`。成功时仅复制第一个成功 move 的子树到既有 continuation arena，再运行完整 proof verifier。固定 shallow/point/end 三类实例与 DFS 均成功并使用相同 move 类型；独立 4 状态 truth table 覆盖“第一个 AND 失败、第二个 OR 成功”，非法同层/反向 child 在 launch 前拒绝。当前 CLI 固定实例的 CUDA 运行生成 34 个状态、18 个 moves、84 个 replies，峰值 frontier 27，最终压缩为 4 节点证明；这些是正确性样例，不是性能结论。
+混合 wavefront：主机 BFS 为每个状态先跑 leaf，再生成有界 point/end OR moves 及其完整 replies；所有 child 只指向下一层。CPU 从后向前得到规范状态真值；CUDA 从 leaf/vacuous/无 move 终态队列开始，每个完成 child 原子更新 move 的 `remaining_children/failed`，成功 move 立即完成父状态，失败 move 递减父状态的 `remaining_moves`，最后一个失败 move 才宣告 OR 失败。两者任一状态不同即返回 `invalid`。成功时仅复制第一个成功 move 的子树到既有 continuation arena，再运行完整 proof verifier。固定 shallow/point/end 三类实例与 DFS 均成功并使用相同 move 类型；固定真值表覆盖 AND 失败、OR 回退和“全部 moves 失败”，非法同层/反向 child 在 launch 前拒绝。当前 CLI 固定实例的 CUDA 运行生成 34 个状态、18 个 moves、84 个 replies，峰值 frontier 27，最终压缩为 4 节点证明；这些是正确性样例，不是性能结论。
 
 ## 安全边界
 

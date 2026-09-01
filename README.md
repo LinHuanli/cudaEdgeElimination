@@ -15,10 +15,10 @@
 - 收缩 forced outside matching 的 CPU 精确 Held–Karp 子集 DP 困难叶回退；
 - 浅层 Hamilton–Tutte `c,d` AND–OR 根证明与 CPU 复核的 CUDA 候选筛选；
 - CPU 递归 Hamilton–Tutte point/end moves、continuation arena 与全局 `recursive-ht-proof-v1`；
-- 主机 BFS 工作图、CUDA 反向层次 AND–OR 传播及逐状态 CPU 差分复核；
+- 主机 BFS 工作图、CUDA continuation 原子计数传播及逐状态 CPU 差分复核；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 
-尚未完成的研究项（GPU 状态生成/批量叶/persistent continuation 与 epoch commit、cuOpt 退化对偶稳定化与精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。精确困难叶有 18 个 block 的硬上限，超限只返回 `unresolved`。递归 HT proof 尚未接入删边；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
+尚未完成的研究项（GPU 状态生成/批量叶/device-persistent queue 与 epoch commit、cuOpt 退化对偶稳定化与精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。精确困难叶有 18 个 block 的硬上限，超限只返回 `unresolved`。递归 HT proof 尚未接入删边；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
 
 ## 快速开始
 

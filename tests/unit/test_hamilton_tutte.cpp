@@ -627,14 +627,23 @@ void TestCudaWavefrontTruthTable() {
   }
   // 根的第一个 move 是 success AND failure，第二个 move 单独成功，覆盖 AND/OR 两级真值。
   const std::vector<cudaee::HtWavefrontStateTask> states = {
-      {0, 2, 0}, {2, 0, 1}, {2, 0, 0}, {2, 0, 1}};
-  const std::vector<cudaee::HtWavefrontMoveTask> moves = {{0, 2}, {2, 1}};
+      {cudaee::kNoHtChild, 0, 2, 0}, {0, 2, 0, 1}, {0, 2, 0, 0}, {1, 2, 0, 1}};
+  const std::vector<cudaee::HtWavefrontMoveTask> moves = {{0, 0, 2, 2}, {0, 2, 1, 1}};
   const std::vector<cudaee::HtWavefrontReplyTask> replies = {{1, 0}, {2, 0}, {3, 0}};
   int selected_device = -1;
   const std::vector<std::uint8_t> status =
       cudaee::detail::EvaluateHtWavefrontCuda(states, moves, replies, {0, 1, 4}, &selected_device);
   Check(status == std::vector<std::uint8_t>({1, 1, 0, 1}) && selected_device >= 0,
         "CUDA wavefront evaluates the pinned AND/OR truth table");
+
+  const std::vector<cudaee::HtWavefrontStateTask> failed_states = {
+      {cudaee::kNoHtChild, 0, 1, 0}, {0, 1, 0, 1}, {0, 1, 0, 0}};
+  const std::vector<cudaee::HtWavefrontMoveTask> failed_moves = {{0, 0, 2, 2}};
+  const std::vector<cudaee::HtWavefrontReplyTask> failed_replies = {{1, 0}, {2, 0}};
+  const std::vector<std::uint8_t> failed_status = cudaee::detail::EvaluateHtWavefrontCuda(
+      failed_states, failed_moves, failed_replies, {0, 1, 3}, &selected_device);
+  Check(failed_status == std::vector<std::uint8_t>({0, 1, 0}),
+        "CUDA continuation marks a state failed only after all moves fail");
 
   std::vector<cudaee::HtWavefrontReplyTask> invalid = replies;
   invalid.front().child_index = 0;

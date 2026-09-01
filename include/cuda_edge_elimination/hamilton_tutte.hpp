@@ -169,14 +169,17 @@ struct HtWavefrontResult {
 
 // GPU continuation 层使用的紧凑只读任务；CPU 在接受结果前复算全部状态。
 struct HtWavefrontStateTask {
+  std::uint32_t parent_move{kNoHtChild};
   std::uint32_t move_begin{};
   std::uint32_t move_count{};
   std::uint8_t leaf_proven{};
 };
 
 struct HtWavefrontMoveTask {
+  std::uint32_t parent_state{};
   std::uint32_t reply_begin{};
   std::uint32_t reply_count{};
+  std::uint32_t child_count{};
 };
 
 struct HtWavefrontReplyTask {
@@ -215,7 +218,7 @@ EnumerateHtHamiltonReplies(const GraphSnapshot& graph, NodeEdge target_edge, std
 [[nodiscard]] bool VerifyHtRecursiveProof(const GraphSnapshot& graph, const HtRecursiveProof& proof,
                                           std::string* reason);
 
-// 主机按层生成完整 AND–OR 工作图，CPU/CUDA 反向传播后提取一个可重放成功子树。
+// 主机按层生成完整 AND–OR 工作图，CPU/CUDA continuation 传播后提取可重放成功子树。
 [[nodiscard]] HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph,
                                                        NodeEdge target_edge,
                                                        const HtWavefrontOptions& options = {});

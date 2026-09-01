@@ -420,23 +420,41 @@ void FlattenWavefront(const std::vector<WaveState>& states,
   state_tasks->clear();
   move_tasks->clear();
   reply_tasks->clear();
-  state_tasks->reserve(states.size());
-  for (const WaveState& state : states) {
+  state_tasks->resize(states.size());
+  std::vector<std::uint32_t> parent_moves(states.size(), kNoHtChild);
+  for (std::size_t state_index = 0; state_index < states.size(); ++state_index) {
+    const WaveState& state = states[state_index];
     HtWavefrontStateTask state_task;
     state_task.move_begin = static_cast<std::uint32_t>(move_tasks->size());
     state_task.move_count = static_cast<std::uint32_t>(state.moves.size());
     state_task.leaf_proven = static_cast<std::uint8_t>(state.leaf_proof.proven);
     for (const WaveMove& move : state.moves) {
       HtWavefrontMoveTask move_task;
+      move_task.parent_state = static_cast<std::uint32_t>(state_index);
       move_task.reply_begin = static_cast<std::uint32_t>(reply_tasks->size());
       move_task.reply_count = static_cast<std::uint32_t>(move.replies.size());
+      const std::uint32_t move_index = static_cast<std::uint32_t>(move_tasks->size());
       for (const HtTreeReply& reply : move.replies) {
+        if (!reply.path_infeasible) {
+          if (reply.child_index >= states.size() || reply.child_index == 0U ||
+              parent_moves[reply.child_index] != kNoHtChild) {
+            throw std::logic_error("HT wavefront child 没有唯一 parent move");
+          }
+          parent_moves[reply.child_index] = move_index;
+          ++move_task.child_count;
+        }
         reply_tasks->push_back(
             {reply.child_index, static_cast<std::uint8_t>(reply.path_infeasible)});
       }
       move_tasks->push_back(move_task);
     }
-    state_tasks->push_back(state_task);
+    state_tasks->at(state_index) = state_task;
+  }
+  for (std::size_t state_index = 1; state_index < states.size(); ++state_index) {
+    if (parent_moves[state_index] == kNoHtChild) {
+      throw std::logic_error("HT wavefront 非根状态缺少 parent move");
+    }
+    state_tasks->at(state_index).parent_move = parent_moves[state_index];
   }
 }
 

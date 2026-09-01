@@ -39,9 +39,9 @@ M4.3b1 浅层 HS 根证明已完成：确定性生成 `c,d` OR moves，对固定
 
 M4.3b2 递归语义与全局证书已完成：CPU DFS 枚举 extra point/end OR moves 和每个 move 的完整 Hamilton replies；成功子树转为扁平 continuation arena，并用 `recursive-ht-proof-v1` 连同嵌套 path-k-opt 叶独立重放。资源上限只返回 `unresolved`。
 
-M4.3b3a 混合 wavefront 已完成：主机按层生成完整有界 AND–OR 工作图；CUDA 从最深层反向计算每个状态的 `OR(move) / AND(reply)` 真值；返回前 CPU 对全部状态逐项复算，只从成功状态提取既有 V1 continuation arena。DFS 与 wavefront 在固定 shallow/point/end 实例上均产生可验证证明。
+M4.3b3a 混合 wavefront 已完成：主机按层生成完整有界 AND–OR 工作图；CUDA 用 `remaining_children/failed/remaining_moves` 原子 continuation counters 从已完成叶队列向根传播；返回前 CPU 对全部状态逐项复算，只从成功状态提取既有 V1 continuation arena。DFS 与 wavefront 在固定 shallow/point/end 实例上均产生可验证证明。
 
-M4.3b3b 继续把状态/reply 生成和 leaf 批处理迁到 GPU，加入按路径数/深度/reply 数分桶、persistent continuation counters 和 CPU long-tail 队列。CPU/GPU 对完整小实例真值及证书必须一致；之后才把验证成功的 HT 候选接入 epoch commit。
+M4.3b3b 继续把状态/reply 生成和 leaf 批处理迁到 GPU，加入按路径数/深度/reply 数分桶、device-persistent queue 和 CPU long-tail 队列。CPU/GPU 对完整小实例真值及证书必须一致；之后才把验证成功的 HT 候选接入 epoch commit。
 
 ## M5：中大型评测与优化
 
