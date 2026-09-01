@@ -37,7 +37,7 @@ CUDA 不是证明授权源。CPU 对每个中心重新运行规范枚举器，�
 4. 设备错误字检查越界以及 count/write 尾指针不一致；
 5. 拷回后与 CPU 完整列表逐元素比较。
 
-每个线程写独占区间，因此无需输出原子操作，且结果不依赖 block 调度顺序。当前前缀和在主机完成：这样先建立最小而可复核的实现，后续跨 frontier 合批规模足够大时再评估 CUB scan 是否有端到端收益。
+每个线程写独占区间，因此无需输出原子操作，且结果不依赖 block 调度顺序。当前前缀和在主机完成：这样先建立最小而可复核的实现，frontier 合批规模进一步增大后再评估 CUB scan 是否有端到端收益。
 
 ## wavefront 集成与预算
 
@@ -52,8 +52,8 @@ point 候选先按目标边中点距离形成候选中心列表，再批量枚�
 - 固定递归 point CLI 全 CUDA 运行得到 9 batches、16 centers、46 surviving pairs；完整工作图仍为 34 states、18 moves、84 replies，最终 4 节点 V1 proof 通过独立 `ht-verify`；
 - CUDA 单元测试还必须通过 compute-sanitizer memcheck，CPU Debug/ASan、CPU Release 与 CUDA Release 全套 CTest 均为提交门禁。
 
-上述数字是确定性正确性样例，不是加速比。当前 batch 边界仍是单个父状态，频繁的小 kernel 可能比 CPU 更慢。
+上述数字是确定性正确性样例，不是加速比。M4.3b3b2b1 已把当前层按父状态数切成 chunk，同一 chunk 的 point centers 共用一次 count/write；固定样例含根阶段在内的 Hamilton batches 从单状态 chunk 的 9 降到 4，详见 [frontier reply batching](13_Hamilton_Tutte_Frontier_Reply_Batching.md)。
 
 ## 未完成项
 
-M4.3b3b2a2 已把 end move 的 CSR 提取迁到同一 CUDA 模块，见 [GPU end replies](12_Hamilton_Tutte_GPU_End_Replies.md)。规范 child、leaf engine 和工作图所有权仍在主机。M4.3b3b2b 将优先把 root/point/end 任务跨同层 frontier 合并，再实现设备端规范子状态 SoA、按桶 leaf batches、多 block continuation 和 CPU long-tail。所有设备输出继续先通过 CPU 全量差分，直至独立证书重放与 epoch commit 链路完成。
+M4.3b3b2a2 已把 end move 的 CSR 提取迁到同一 CUDA 模块，见 [GPU end replies](12_Hamilton_Tutte_GPU_End_Replies.md)；M4.3b3b2b1 已把 point/end 任务跨同层 chunk 合并。规范 child、leaf engine 和工作图所有权仍在主机。M4.3b3b2b2 将实现设备端规范子状态 SoA、按桶 leaf batches、多 block continuation 和 CPU long-tail。所有设备输出继续先通过 CPU 全量差分，直至独立证书重放与 epoch commit 链路完成。

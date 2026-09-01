@@ -107,6 +107,7 @@ add_test(
     --scheduler wavefront
     --backend cpu
     --reply-backend cpu
+    --reply-frontier-batch-states 256
     --path-append-backend cpu
     --propagation-backend cpu
     --max-neighborhood 0

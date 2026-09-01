@@ -634,6 +634,9 @@ void TestRecursivePointProof() {
             wavefront.hamilton_reply_batches > 0U && wavefront.hamilton_reply_centers > 0U &&
             wavefront.hamilton_replies_generated > 0U,
         "CPU wavefront records fully verified Hamilton reply batches");
+  Check(wavefront.reply_frontier_batches > 0U && wavefront.reply_frontier_states > 0U &&
+            wavefront.peak_reply_frontier_batch > 1U,
+        "wavefront records multi-parent reply generation chunks");
   Check(wavefront.proof.nodes.size() == result.proof.nodes.size(),
         "DFS and wavefront point arenas have the same size");
   Check(std::all_of(wavefront.proof.nodes.begin() + 1, wavefront.proof.nodes.end(),
@@ -642,6 +645,21 @@ void TestRecursivePointProof() {
                     }),
         "wavefront proof genuinely uses point moves");
   Check(cudaee::VerifyHtRecursiveProof(graph, wavefront.proof, &reason), reason);
+
+  const cudaee::HtWavefrontResult single_state_batches = cudaee::ProveEdgeByWavefrontHt(
+      graph, {2, 4},
+      {.search_options = options,
+       .reply_frontier_batch_states = 1,
+       .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+       .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu});
+  Check(single_state_batches.status == wavefront.status &&
+            cudaee::SerializeHtRecursiveProof(single_state_batches.proof) ==
+                cudaee::SerializeHtRecursiveProof(wavefront.proof),
+        "frontier reply chunk size preserves the canonical recursive proof");
+  Check(single_state_batches.reply_frontier_batches > wavefront.reply_frontier_batches &&
+            single_state_batches.hamilton_reply_batches > wavefront.hamilton_reply_batches,
+        "multi-parent chunks reduce reply-generation batch count");
 
 #ifndef CUDAEE_HAS_CUDA
   const cudaee::HtWavefrontResult auto_fallback = cudaee::ProveEdgeByWavefrontHt(

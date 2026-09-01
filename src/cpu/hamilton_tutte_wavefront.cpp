@@ -49,6 +49,12 @@ struct EndCandidate {
   std::vector<NodeEdge> replies;
 };
 
+struct PreparedStateCandidates {
+  std::size_t state_index{};
+  std::vector<PointCandidate> point;
+  std::vector<EndCandidate> end;
+};
+
 std::vector<std::int32_t> BuildPointCandidateNodes(const GraphSnapshot& graph,
                                                    const NodeEdge target,
                                                    const NormalizedPathSystem& state,
@@ -122,6 +128,7 @@ struct WaveBuildContext {
   const HtRecursiveOptions* options{};
   PathCompatibilityBackend path_append_backend{PathCompatibilityBackend::kAuto};
   PathCompatibilityBackend hamilton_reply_backend{PathCompatibilityBackend::kAuto};
+  std::uint32_t reply_frontier_batch_states{256};
   HtWavefrontResult* result{};
   bool budget_exhausted{false};
   bool path_append_failed{false};
@@ -287,35 +294,6 @@ std::vector<HtNeighborPair> CopyHamiltonReplySlice(const HtHamiltonReplyBatchRes
   return {begin, end};
 }
 
-std::optional<std::vector<PointCandidate>> BuildPointCandidates(WaveBuildContext* const context,
-                                                                const NormalizedPathSystem& state) {
-  const std::vector<std::int32_t> nodes =
-      BuildPointCandidateNodes(*context->graph, context->target, state, *context->options);
-  if (nodes.empty()) {
-    return std::vector<PointCandidate>{};
-  }
-  const std::optional<HtHamiltonReplyBatchResult> batch =
-      EvaluateHamiltonReplyBatch(context, nodes);
-  if (!batch.has_value()) {
-    return std::nullopt;
-  }
-  std::vector<PointCandidate> candidates;
-  candidates.reserve(nodes.size());
-  for (std::size_t index = 0; index < nodes.size(); ++index) {
-    candidates.push_back({nodes[index], CopyHamiltonReplySlice(*batch, index)});
-  }
-  std::sort(candidates.begin(), candidates.end(),
-            [](const PointCandidate& lhs, const PointCandidate& rhs) {
-              return std::tuple{lhs.replies.size(), lhs.node} <
-                     std::tuple{rhs.replies.size(), rhs.node};
-            });
-  if (context->options->max_point_candidates != 0U &&
-      candidates.size() > context->options->max_point_candidates) {
-    candidates.resize(context->options->max_point_candidates);
-  }
-  return candidates;
-}
-
 void RecordEndReplyBatch(WaveBuildContext* const context, const HtEndReplyBatchResult& batch,
                          const std::size_t task_count) {
   if (task_count == 0U) {
@@ -376,32 +354,113 @@ std::vector<NodeEdge> CopyEndReplySlice(const HtEndReplyBatchResult& batch,
   return {begin, end};
 }
 
-std::optional<std::vector<EndCandidate>> BuildEndCandidates(WaveBuildContext* const context,
-                                                            const NormalizedPathSystem& state) {
-  const std::vector<HtEndReplyTask> tasks = BuildEndReplyTasks(state);
-  if (tasks.empty()) {
-    return std::vector<EndCandidate>{};
+void RecordReplyFrontierBatch(WaveBuildContext* const context, const std::size_t state_count) {
+  if (state_count == 0U) {
+    return;
   }
-  const std::optional<HtEndReplyBatchResult> batch = EvaluateEndReplyBatch(context, tasks);
-  if (!batch.has_value()) {
-    return std::nullopt;
+  HtWavefrontResult& result = *context->result;
+  if (result.reply_frontier_batches == std::numeric_limits<std::uint64_t>::max() ||
+      state_count > std::numeric_limits<std::uint64_t>::max() - result.reply_frontier_states) {
+    throw std::overflow_error("HT reply frontier 批处理统计溢出");
   }
-  std::vector<EndCandidate> candidates;
-  candidates.reserve(tasks.size());
-  for (std::size_t index = 0; index < tasks.size(); ++index) {
-    candidates.push_back(
-        {tasks[index].endpoint, tasks[index].internal_neighbor, CopyEndReplySlice(*batch, index)});
+  ++result.reply_frontier_batches;
+  result.reply_frontier_states += static_cast<std::uint64_t>(state_count);
+  result.peak_reply_frontier_batch =
+      std::max(result.peak_reply_frontier_batch, static_cast<std::uint64_t>(state_count));
+}
+
+std::optional<std::vector<PreparedStateCandidates>>
+PrepareFrontierCandidates(WaveBuildContext* const context, const std::vector<WaveState>& states,
+                          const std::size_t begin, const std::size_t end) {
+  struct CandidateInput {
+    std::size_t state_index{};
+    std::size_t point_begin{};
+    std::vector<std::int32_t> point_nodes;
+    std::size_t end_begin{};
+    std::vector<HtEndReplyTask> end_tasks;
+  };
+
+  std::vector<CandidateInput> inputs;
+  std::vector<std::int32_t> centers;
+  std::vector<HtEndReplyTask> end_tasks;
+  inputs.reserve(end - begin);
+  for (std::size_t state_index = begin; state_index < end; ++state_index) {
+    const WaveState& state = states.at(state_index);
+    if (state.leaf_proof.proven || state.depth >= context->options->max_depth) {
+      continue;
+    }
+    CandidateInput input;
+    input.state_index = state_index;
+    input.point_begin = centers.size();
+    if (context->options->enable_point_moves) {
+      input.point_nodes = BuildPointCandidateNodes(*context->graph, context->target, state.paths,
+                                                   *context->options);
+      centers.insert(centers.end(), input.point_nodes.begin(), input.point_nodes.end());
+    }
+    input.end_begin = end_tasks.size();
+    if (context->options->enable_end_moves) {
+      // 先预取整个 chunk 的 end replies，回填时仍由 point vacuous-success 决定是否使用。
+      input.end_tasks = BuildEndReplyTasks(state.paths);
+      end_tasks.insert(end_tasks.end(), input.end_tasks.begin(), input.end_tasks.end());
+    }
+    inputs.push_back(std::move(input));
   }
-  std::sort(candidates.begin(), candidates.end(),
-            [](const EndCandidate& lhs, const EndCandidate& rhs) {
-              return std::tuple{lhs.replies.size(), lhs.endpoint, lhs.internal_neighbor} <
-                     std::tuple{rhs.replies.size(), rhs.endpoint, rhs.internal_neighbor};
-            });
-  if (context->options->max_end_candidates != 0U &&
-      candidates.size() > context->options->max_end_candidates) {
-    candidates.resize(context->options->max_end_candidates);
+
+  std::optional<HtHamiltonReplyBatchResult> point_batch;
+  if (!centers.empty()) {
+    point_batch = EvaluateHamiltonReplyBatch(context, centers);
+    if (!point_batch.has_value()) {
+      return std::nullopt;
+    }
   }
-  return candidates;
+  std::optional<HtEndReplyBatchResult> end_batch;
+  if (!end_tasks.empty()) {
+    end_batch = EvaluateEndReplyBatch(context, end_tasks);
+    if (!end_batch.has_value()) {
+      return std::nullopt;
+    }
+  }
+
+  std::vector<PreparedStateCandidates> prepared;
+  prepared.reserve(inputs.size());
+  for (const CandidateInput& input : inputs) {
+    PreparedStateCandidates state_candidates;
+    state_candidates.state_index = input.state_index;
+    state_candidates.point.reserve(input.point_nodes.size());
+    for (std::size_t index = 0; index < input.point_nodes.size(); ++index) {
+      state_candidates.point.push_back(
+          {input.point_nodes[index],
+           CopyHamiltonReplySlice(*point_batch, input.point_begin + index)});
+    }
+    std::sort(state_candidates.point.begin(), state_candidates.point.end(),
+              [](const PointCandidate& lhs, const PointCandidate& rhs) {
+                return std::tuple{lhs.replies.size(), lhs.node} <
+                       std::tuple{rhs.replies.size(), rhs.node};
+              });
+    if (context->options->max_point_candidates != 0U &&
+        state_candidates.point.size() > context->options->max_point_candidates) {
+      state_candidates.point.resize(context->options->max_point_candidates);
+    }
+
+    state_candidates.end.reserve(input.end_tasks.size());
+    for (std::size_t index = 0; index < input.end_tasks.size(); ++index) {
+      const HtEndReplyTask& task = input.end_tasks[index];
+      state_candidates.end.push_back({task.endpoint, task.internal_neighbor,
+                                      CopyEndReplySlice(*end_batch, input.end_begin + index)});
+    }
+    std::sort(state_candidates.end.begin(), state_candidates.end.end(),
+              [](const EndCandidate& lhs, const EndCandidate& rhs) {
+                return std::tuple{lhs.replies.size(), lhs.endpoint, lhs.internal_neighbor} <
+                       std::tuple{rhs.replies.size(), rhs.endpoint, rhs.internal_neighbor};
+              });
+    if (context->options->max_end_candidates != 0U &&
+        state_candidates.end.size() > context->options->max_end_candidates) {
+      state_candidates.end.resize(context->options->max_end_candidates);
+    }
+    prepared.push_back(std::move(state_candidates));
+  }
+  RecordReplyFrontierBatch(context, prepared.size());
+  return prepared;
 }
 
 bool AppendNormalizedChild(WaveBuildContext* const context, NormalizedPathSystem child,
@@ -447,6 +506,7 @@ bool RecordMove(WaveBuildContext* const context, const std::uint32_t state_index
 }
 
 bool GeneratePointMoves(WaveBuildContext* const context, const std::uint32_t state_index,
+                        const std::vector<PointCandidate>& candidates,
                         std::vector<WaveState>* const states) {
   struct PlannedMove {
     PointCandidate candidate;
@@ -458,12 +518,7 @@ bool GeneratePointMoves(WaveBuildContext* const context, const std::uint32_t sta
   std::vector<HtPathAppendTask> append_tasks;
   std::uint64_t planned_replies = 0U;
   bool budget_blocked = false;
-  const std::optional<std::vector<PointCandidate>> candidates =
-      BuildPointCandidates(context, parent);
-  if (!candidates.has_value()) {
-    return false;
-  }
-  for (const PointCandidate& candidate : *candidates) {
+  for (const PointCandidate& candidate : candidates) {
     if (!MoveReplyCountAllowed(*context, candidate.replies.size())) {
       continue;
     }
@@ -526,6 +581,7 @@ bool GeneratePointMoves(WaveBuildContext* const context, const std::uint32_t sta
 }
 
 bool GenerateEndMoves(WaveBuildContext* const context, const std::uint32_t state_index,
+                      const std::vector<EndCandidate>& candidates,
                       std::vector<WaveState>* const states) {
   struct PlannedMove {
     EndCandidate candidate;
@@ -537,11 +593,7 @@ bool GenerateEndMoves(WaveBuildContext* const context, const std::uint32_t state
   std::vector<HtPathAppendTask> append_tasks;
   std::uint64_t planned_replies = 0U;
   bool budget_blocked = false;
-  const std::optional<std::vector<EndCandidate>> candidates = BuildEndCandidates(context, parent);
-  if (!candidates.has_value()) {
-    return false;
-  }
-  for (const EndCandidate& candidate : *candidates) {
+  for (const EndCandidate& candidate : candidates) {
     if (!MoveReplyCountAllowed(*context, candidate.replies.size())) {
       continue;
     }
@@ -682,35 +734,52 @@ bool ExpandWavefront(WaveBuildContext* const context, std::vector<WaveState>* co
   while (frontier_begin < frontier_end) {
     context->result->peak_frontier = std::max(
         context->result->peak_frontier, static_cast<std::uint64_t>(frontier_end - frontier_begin));
-    for (std::size_t index = frontier_begin; index < frontier_end; ++index) {
-      ++context->result->proof.leaf_calls;
-      WaveState& state = states->at(index);
-      state.leaf_proof = ProvePathSystemByKOpt(*context->graph, state.paths, context->target,
-                                               context->options->root_options.leaf_options);
-      if (state.leaf_proof.proven || state.depth >= context->options->max_depth) {
+    const std::size_t max_batch_states =
+        context->reply_frontier_batch_states == 0U
+            ? frontier_end - frontier_begin
+            : static_cast<std::size_t>(context->reply_frontier_batch_states);
+    for (std::size_t batch_begin = frontier_begin; batch_begin < frontier_end;) {
+      const std::size_t batch_end =
+          batch_begin + std::min(max_batch_states, frontier_end - batch_begin);
+      for (std::size_t index = batch_begin; index < batch_end; ++index) {
+        ++context->result->proof.leaf_calls;
+        WaveState& state = states->at(index);
+        state.leaf_proof = ProvePathSystemByKOpt(*context->graph, state.paths, context->target,
+                                                 context->options->root_options.leaf_options);
+      }
+      if (!context->options->enable_point_moves && !context->options->enable_end_moves) {
+        batch_begin = batch_end;
         continue;
       }
-      const std::uint32_t state_index = static_cast<std::uint32_t>(index);
-      if (context->options->enable_point_moves &&
-          !GeneratePointMoves(context, state_index, states)) {
+      const std::optional<std::vector<PreparedStateCandidates>> prepared =
+          PrepareFrontierCandidates(context, *states, batch_begin, batch_end);
+      if (!prepared.has_value()) {
         return false;
       }
-      if (context->budget_exhausted) {
-        return false;
+      for (const PreparedStateCandidates& candidates : *prepared) {
+        const auto state_index = static_cast<std::uint32_t>(candidates.state_index);
+        if (context->options->enable_point_moves &&
+            !GeneratePointMoves(context, state_index, candidates.point, states)) {
+          return false;
+        }
+        if (context->budget_exhausted) {
+          return false;
+        }
+        // 已知成功的 point move 不再生成更晚的 OR 候选。
+        const bool point_shortcut =
+            !states->at(candidates.state_index).moves.empty() &&
+            std::all_of(states->at(candidates.state_index).moves.back().replies.begin(),
+                        states->at(candidates.state_index).moves.back().replies.end(),
+                        [](const HtTreeReply& reply) { return reply.path_infeasible; });
+        if (!point_shortcut && context->options->enable_end_moves &&
+            !GenerateEndMoves(context, state_index, candidates.end, states)) {
+          return false;
+        }
+        if (context->budget_exhausted) {
+          return false;
+        }
       }
-      // 已知成功的 point move 不再生成更晚的 OR 候选。
-      const bool point_shortcut =
-          !states->at(index).moves.empty() &&
-          std::all_of(states->at(index).moves.back().replies.begin(),
-                      states->at(index).moves.back().replies.end(),
-                      [](const HtTreeReply& reply) { return reply.path_infeasible; });
-      if (!point_shortcut && context->options->enable_end_moves &&
-          !GenerateEndMoves(context, state_index, states)) {
-        return false;
-      }
-      if (context->budget_exhausted) {
-        return false;
-      }
+      batch_begin = batch_end;
     }
     frontier_begin = frontier_end;
     frontier_end = states->size();
@@ -956,6 +1025,7 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
                            .options = &options.search_options,
                            .path_append_backend = options.path_append_backend,
                            .hamilton_reply_backend = options.hamilton_reply_backend,
+                           .reply_frontier_batch_states = options.reply_frontier_batch_states,
                            .result = &result,
                            .budget_exhausted = false,
                            .path_append_failed = false,

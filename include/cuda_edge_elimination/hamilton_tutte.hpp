@@ -178,6 +178,8 @@ struct HtRecursiveResult {
 
 struct HtWavefrontOptions {
   HtRecursiveOptions search_options{};
+  // 每个 reply 生成 chunk 的父状态上限；0 表示一次覆盖完整 frontier，不裁剪状态。
+  std::uint32_t reply_frontier_batch_states{256};
   // 只控制 continuation 真值传播；leaf/c,d 后端仍由 search_options 分别配置。
   PathCompatibilityBackend propagation_backend{PathCompatibilityBackend::kAuto};
   // 只控制递归 point/end reply 的批量路径冲突标记；CPU 始终规范化并逐项认证。
@@ -209,6 +211,9 @@ struct HtWavefrontResult {
   std::uint64_t end_reply_batches{};
   std::uint64_t end_reply_tasks{};
   std::uint64_t end_replies_generated{};
+  std::uint64_t reply_frontier_batches{};
+  std::uint64_t reply_frontier_states{};
+  std::uint64_t peak_reply_frontier_batch{};
   std::uint64_t moves_generated{};
   std::uint64_t peak_frontier{};
 };

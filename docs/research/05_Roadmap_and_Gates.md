@@ -47,7 +47,9 @@ M4.3b3b2a1 Hamilton reply count/write 已完成：根 `c,d` 在一个 batch 内�
 
 M4.3b3b2a2 end reply count/write 已完成：同一父状态的所有路径端点合批，排除各自路径内部邻点后按 CSR 顺序写出规范活动边；空 reply 区间、重复 task 和正反 endpoint 均由 CPU 完整列表认证。
 
-M4.3b3b2b 继续把规范子状态 SoA 和 leaf 批处理迁到 GPU，加入跨 frontier 的 `(depth,path_count,reply bucket)` 合批、多 block 队列与 CPU long-tail。CPU/GPU 对完整小实例真值及证书必须一致；之后才把验证成功的 HT 候选接入 epoch commit。
+M4.3b3b2b1 frontier reply batching 已完成：按可配置父状态数切分当前层，每个 chunk 分别把 point centers 和 end tasks 展平为一次生成调用，再按原 state/candidate/reply 顺序回填；chunk 大小不裁剪搜索。固定实例的 V1 proof 与单状态 chunk 逐字节一致。
+
+M4.3b3b2b2 继续把规范子状态 SoA 和 leaf 批处理迁到 GPU，加入基于 `(depth,path_count,reply bucket)` 的复杂度分桶、多 block 队列与 CPU long-tail。CPU/GPU 对完整小实例真值及证书必须一致；之后才把验证成功的 HT 候选接入 epoch commit。
 
 ## M5：中大型评测与优化
 
@@ -55,4 +57,4 @@ M4.3b3b2b 继续把规范子状态 SoA 和 leaf 批处理迁到 GPU，加入跨 
 
 ## 当前完成定义
 
-当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器，以及 M4.3b3b2a1/a2 Hamilton/end reply count/write。M3.1 与 M4.3b3b2b 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或部分 GPU 化原型替代删除强度与完整 GPU/提交链路。
+当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write，以及 M4.3b3b2b1 frontier reply batching。M3.1 与 M4.3b3b2b2 未完成时必须在状态清单中标为 pending，不能用合法但偏弱的下界或部分 GPU 化原型替代删除强度与完整 GPU/提交链路。

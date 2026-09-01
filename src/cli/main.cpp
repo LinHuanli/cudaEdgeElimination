@@ -40,6 +40,7 @@ void PrintHelp() {
       << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
       << "                [--scheduler dfs|wavefront] [--backend auto|cpu|cuda]\n"
       << "                [--reply-backend auto|cpu|cuda]\n"
+      << "                [--reply-frontier-batch-states N]\n"
       << "                [--path-append-backend auto|cpu|cuda]\n"
       << "                [--propagation-backend auto|cpu|cuda] [--max-depth N] [HT budgets]\n"
       << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
@@ -398,6 +399,9 @@ bool HtProveCommand(const Arguments& arguments) {
   std::uint64_t end_reply_batches = 0;
   std::uint64_t end_reply_tasks = 0;
   std::uint64_t end_replies_generated = 0;
+  std::uint64_t reply_frontier_batches = 0;
+  std::uint64_t reply_frontier_states = 0;
+  std::uint64_t peak_reply_frontier_batch = 0;
   std::uint64_t moves_generated = 0;
   std::uint64_t peak_frontier = 0;
   if (scheduler == "dfs") {
@@ -408,6 +412,8 @@ bool HtProveCommand(const Arguments& arguments) {
     cudaee::HtWavefrontResult result = cudaee::ProveEdgeByWavefrontHt(
         graph, target,
         {.search_options = options,
+         .reply_frontier_batch_states =
+             OptionalInteger<std::uint32_t>(arguments, "reply-frontier-batch-states", 256U),
          .propagation_backend =
              ParsePathCompatibilityBackend(Optional(arguments, "propagation-backend", "auto")),
          .path_append_backend =
@@ -435,6 +441,9 @@ bool HtProveCommand(const Arguments& arguments) {
     end_reply_batches = result.end_reply_batches;
     end_reply_tasks = result.end_reply_tasks;
     end_replies_generated = result.end_replies_generated;
+    reply_frontier_batches = result.reply_frontier_batches;
+    reply_frontier_states = result.reply_frontier_states;
+    peak_reply_frontier_batch = result.peak_reply_frontier_batch;
     moves_generated = result.moves_generated;
     peak_frontier = result.peak_frontier;
   } else {
@@ -469,7 +478,10 @@ bool HtProveCommand(const Arguments& arguments) {
               << " end_reply_batches=" << end_reply_batches
               << " end_reply_tasks=" << end_reply_tasks
               << " end_replies_generated=" << end_replies_generated
-              << " end_reply_cpu_verified=" << (end_reply_cpu_verified ? 1 : 0);
+              << " end_reply_cpu_verified=" << (end_reply_cpu_verified ? 1 : 0)
+              << " reply_frontier_batches=" << reply_frontier_batches
+              << " reply_frontier_states=" << reply_frontier_states
+              << " peak_reply_frontier_batch=" << peak_reply_frontier_batch;
   }
   std::cout << " reason=" << std::quoted(proof.reason) << '\n';
   if (search_status == cudaee::HtSearchStatus::kInvalid) {
