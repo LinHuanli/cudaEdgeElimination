@@ -634,13 +634,17 @@ void TestPathSystemLeafCostBatch() {
       cudaee::ProvePathSystemByKOpt(graph, paths, required, cpu_options);
   const cudaee::PathSystemKOptBatchResult cpu_batch =
       cudaee::ProvePathSystemsByKOpt(graph, {paths, paths}, required, cpu_options);
-  Check(cpu_batch.cost_backend == "cpu-scalar" && cpu_batch.cost_batches == 0U &&
-            cpu_batch.scalar_searches > 0U &&
+  Check(cpu_batch.cost_backend == "cpu" && cpu_batch.cost_batches == 1U &&
+            cpu_batch.cost_tasks == 2U && cpu_batch.cost_cells == 8U &&
+            cpu_batch.cpu_certified_cost_cells == cpu_batch.cost_cells &&
+            cpu_batch.cost_rows_consumed == cpu_batch.cost_tasks &&
+            cpu_batch.scalar_searches == 0U && cpu_batch.cuda_cost_batches == 0U &&
+            cpu_batch.cpu_completeness_rows == 0U &&
             cudaee::SerializePathSystemKOptProof(cpu_batch.proofs[0]) ==
                 cudaee::SerializePathSystemKOptProof(cpu_scalar) &&
             cudaee::SerializePathSystemKOptProof(cpu_batch.proofs[1]) ==
                 cudaee::SerializePathSystemKOptProof(cpu_scalar),
-        "CPU leaf bucket keeps the scalar proof semantics");
+        "CPU leaf bucket uses the exact matrix while keeping scalar proof bytes");
 }
 
 void TestLeafCpuLongTailThreshold() {
@@ -723,12 +727,30 @@ void TestLeafCursorDifferential() {
         cudaee::ProvePathSystemsByKOpt(graph, path_systems, cudaee::NodeEdge{0, 1}, options);
     Check(batch.cpu_verified && batch.proofs.size() == path_systems.size(),
           "random leaf cursor batch returns aligned CPU-verified proofs");
+    cudaee::KOptSearchOptions cpu_options = options;
+    cpu_options.cost_backend = cudaee::PathCompatibilityBackend::kCpu;
+    const cudaee::PathSystemKOptBatchResult cpu_batch =
+        cudaee::ProvePathSystemsByKOpt(graph, path_systems, cudaee::NodeEdge{0, 1}, cpu_options);
+    Check(cpu_batch.cpu_verified && cpu_batch.cost_backend == "cpu" &&
+              cpu_batch.scalar_searches == 0U &&
+              cpu_batch.cpu_certified_cost_cells == cpu_batch.cost_cells &&
+              cpu_batch.proofs.size() == path_systems.size(),
+          "random explicit CPU leaf cursor uses a fully certified matrix");
     for (std::size_t index = 0U; index < path_systems.size(); ++index) {
       const cudaee::PathSystemKOptProof scalar = cudaee::ProvePathSystemByKOpt(
+          graph, path_systems[index], cudaee::NodeEdge{0, 1}, cpu_options);
+      const cudaee::PathSystemKOptProof direct_matrix = cudaee::ProvePathSystemByKOpt(
           graph, path_systems[index], cudaee::NodeEdge{0, 1}, options);
-      Check(cudaee::SerializePathSystemKOptProof(batch.proofs[index]) ==
-                cudaee::SerializePathSystemKOptProof(scalar),
-            "incremental cursor matches scalar proof on randomized paths and budgets");
+      const std::string scalar_bytes = cudaee::SerializePathSystemKOptProof(scalar);
+      Check(cudaee::SerializePathSystemKOptProof(direct_matrix) == scalar_bytes,
+            "direct matrix search matches CPU scalar proof at trial=" + std::to_string(trial) +
+                " path=" + std::to_string(index));
+      Check(cudaee::SerializePathSystemKOptProof(batch.proofs[index]) == scalar_bytes,
+            "auto matrix cursor matches CPU scalar proof at trial=" + std::to_string(trial) +
+                " path=" + std::to_string(index));
+      Check(cudaee::SerializePathSystemKOptProof(cpu_batch.proofs[index]) == scalar_bytes,
+            "CPU matrix cursor matches CPU scalar proof at trial=" + std::to_string(trial) +
+                " path=" + std::to_string(index));
     }
   }
 }

@@ -632,12 +632,16 @@ void TestRecursivePointProof() {
             !wavefront.path_append_device_children_verified && wavefront.path_append_batches > 0U &&
             wavefront.path_append_tasks > 0U && wavefront.path_append_child_edges > 0U,
         "CPU wavefront records fully verified path-append batches");
-  Check(wavefront.leaf_cost_backend == "cpu-scalar" && wavefront.leaf_cpu_verified &&
+  Check(wavefront.leaf_cost_backend == "cpu" && wavefront.leaf_cpu_verified &&
             wavefront.leaf_frontier_batches > 0U &&
             wavefront.leaf_frontier_states == wavefront.proof.leaf_calls &&
             wavefront.leaf_bucket_count > 0U && wavefront.peak_leaf_frontier_batch > 0U &&
-            wavefront.leaf_scalar_searches > 0U,
-        "CPU wavefront records deterministic leaf complexity buckets");
+            wavefront.leaf_cost_batches > 0U && wavefront.leaf_cost_tasks > 0U &&
+            wavefront.leaf_cost_cells > 0U &&
+            wavefront.leaf_cpu_certified_cost_cells == wavefront.leaf_cost_cells &&
+            wavefront.leaf_cost_rows_consumed == wavefront.leaf_cost_tasks &&
+            wavefront.leaf_cpu_completeness_rows == 0U && wavefront.leaf_scalar_searches == 0U,
+        "CPU wavefront records deterministic CPU-matrix leaf batches");
   Check(wavefront.hamilton_reply_backend == "cpu" && wavefront.hamilton_reply_cpu_verified &&
             wavefront.hamilton_reply_batches > 0U && wavefront.hamilton_reply_centers > 0U &&
             wavefront.hamilton_replies_generated > 0U,

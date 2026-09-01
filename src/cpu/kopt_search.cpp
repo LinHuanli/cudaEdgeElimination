@@ -1120,11 +1120,11 @@ KOptSearchResult FindKOptWitnessImpl(const GraphSnapshot& graph, const Normalize
       bool budget_blocked = false;
       while (has_combination && works.size() < options.cost_batch_size) {
         if (options.max_deletion_sets != 0 &&
-            result.deletion_sets_tested >= options.max_deletion_sets) {
+            (result.deletion_sets_tested >= options.max_deletion_sets ||
+             works.size() >= options.max_deletion_sets - result.deletion_sets_tested)) {
           budget_blocked = true;
           break;
         }
-        ++result.deletion_sets_tested;
         CostWork work;
         work.deleted_positions.reserve(k);
         for (const std::size_t selected : combination) {
@@ -1162,6 +1162,12 @@ KOptSearchResult FindKOptWitnessImpl(const GraphSnapshot& graph, const Normalize
         }
 
         for (std::size_t work_index = 0; work_index < works.size(); ++work_index) {
+          // block 尾部可能因更早的 witness 不会被测试；proof 只记录实际消费的删除集合。
+          if (!AddWithoutOverflow(&result.deletion_sets_tested, 1U)) {
+            result.status = KOptSearchStatus::kUnresolved;
+            result.reason = "k-opt 删除集合计数溢出";
+            return result;
+          }
           const std::size_t row_offset = work_index * reconnect_table.templates.size();
           const std::span<const std::int64_t> row(costs.added_costs.data() + row_offset,
                                                   reconnect_table.templates.size());
@@ -1616,8 +1622,9 @@ public:
       return;
     }
     if (options_.cost_backend != PathCompatibilityBackend::kAuto &&
+        options_.cost_backend != PathCompatibilityBackend::kCpu &&
         options_.cost_backend != PathCompatibilityBackend::kCuda) {
-      result_.reason = "k-opt cost cursor 只接受 auto/cuda 后端";
+      result_.reason = "k-opt cost cursor 收到未知后端";
       finished_ = true;
       return;
     }
@@ -1645,11 +1652,11 @@ public:
       block.works.reserve(options_.cost_batch_size);
       while (has_combination_ && block.works.size() < options_.cost_batch_size) {
         if (options_.max_deletion_sets != 0U &&
-            result_.deletion_sets_tested >= options_.max_deletion_sets) {
+            (result_.deletion_sets_tested >= options_.max_deletion_sets ||
+             block.works.size() >= options_.max_deletion_sets - result_.deletion_sets_tested)) {
           block.budget_blocked = true;
           break;
         }
-        ++result_.deletion_sets_tested;
         KOptCursorWork work;
         work.deleted_positions.reserve(current_k_);
         for (const std::size_t selected : combination_) {
@@ -1690,6 +1697,14 @@ public:
       return stats;
     }
     for (std::size_t work_index = 0U; work_index < block.works.size(); ++work_index) {
+      // cost block 可投机生成尾部 rows；规范 proof 只计入真正消费到的删除集合。
+      if (!AddWithoutOverflow(&result_.deletion_sets_tested, 1U)) {
+        result_.status = KOptSearchStatus::kUnresolved;
+        result_.reason = "k-opt 删除集合计数溢出";
+        pending_.reset();
+        finished_ = true;
+        return stats;
+      }
       ++stats.cost_rows;
       const std::size_t row_offset = work_index * reconnect_table.templates.size();
       const std::span<const std::int64_t> row(costs.added_costs.data() + row_offset,
@@ -1973,6 +1988,7 @@ PathSystemKOptBatchResult ProvePathSystemsByKOpt(
   const bool can_batch_costs = options.max_k >= 3U && options.max_k <= 5U &&
                                options.cost_batch_size != 0U &&
                                (options.cost_backend == PathCompatibilityBackend::kAuto ||
+                                options.cost_backend == PathCompatibilityBackend::kCpu ||
                                 options.cost_backend == PathCompatibilityBackend::kCuda);
 
   struct ActiveSearch {
