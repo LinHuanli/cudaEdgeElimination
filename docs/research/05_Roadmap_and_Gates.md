@@ -83,6 +83,8 @@ leaf 子阶段画像已完成：8-target 混合 leaf 的 GPU cost 仅占 `2.204%
 
 CPU 精确矩阵认证与公平基线均已完成：固定数组 scorer 逐 cell 复算 CUDA 成本，任何差异失败关闭；CPU backend 也复用相同 batch cursor。相同 8-target clean run 的 51,309,996 cells 在四路全部获 CPU 认证，旧 fallback 为 0。CPU matrix leaf/search 为 `4.491/11.015 s`，快于 hybrid 的 `5.034/11.430 s`；旧 CPU scalar 得出的 GPU `2×` 加速已被公平基线否定。当前最大阶段转为 Hamilton reply（CPU search 的 `55.19%`），下一切片先做主机细分画像。
 
+Hamilton reply 主机优化已完成：batch 入口只验证一次图，重复 center 复用规范回复，每邻边的 2-opt 条件只计算一次。8-target 的 27,598 个逻辑 centers 在 batch 内归并为 1,395 次枚举，CPU reply `6.079 s -> 0.019 s`，CPU search `11.015 s -> 4.870 s`。当前 leaf 占 search `91.38%`；下一步拆分 setup 并评估 CPU cost task 并行化。
+
 M5 仍未完成：`rl5915/d15112` 的最优 tour witness、跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义

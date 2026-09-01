@@ -126,3 +126,5 @@ leaf 侧后续可评估 CPU scorer 并行化或 CPU/CUDA 并发差分，但同�
 2. canonical row/template 消费顺序和首次 witness 不变；
 3. 线程异常、CUDA 差异或资源失败只产生 `unresolved`/CPU fallback；
 4. scalar proof 字节、最终图和最优 tour 门禁不变。
+
+Hamilton reply 热点已由提交 `f12c181` 完成优化，CPU search 进一步降至 4.870 s；实现、门禁和新 leaf 占比见 [M5 HT Hamilton reply 主机去重与过滤缓存](33_M5_HT_Hamilton_Reply_Host_Cache.md)。本文保留优化前的公平基线用于对比。

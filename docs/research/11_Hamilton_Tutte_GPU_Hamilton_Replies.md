@@ -54,6 +54,8 @@ point 候选先按目标边中点距离形成候选中心列表，再批量枚�
 
 上述数字是确定性正确性样例，不是加速比。M4.3b3b2b1 已把当前层按父状态数切成 chunk，同一 chunk 的 point centers 共用一次 count/write；固定样例含根阶段在内的 Hamilton batches 从单状态 chunk 的 9 降到 4，详见 [frontier reply batching](13_Hamilton_Tutte_Frontier_Reply_Batching.md)。
 
+M5 后续发现同一 batch 内仍有大量重复 center，并完成[主机去重与每邻边 quick-filter 缓存](33_M5_HT_Hamilton_Reply_Host_Cache.md)。pcb3038 8-target 的 CPU reply 从约 6.079 s 降至 18.914 ms；CUDA 仍逐批与完整 CPU offsets/replies 数组比较。
+
 ## 未完成项
 
 M4.3b3b2a2 已把 end move 的 CSR 提取迁到同一 CUDA 模块，见 [GPU end replies](12_Hamilton_Tutte_GPU_End_Replies.md)；后续跨 frontier reply/path append、child SoA、一般 leaf blocks、驻留缓存、CPU long-tail、cooperative multi-block continuation 与 [epoch commit](21_Hamilton_Tutte_Epoch_Commit.md)均已完成。`NormalizedPathSystem` 和工作图所有权仍在主机；所有设备输出继续先通过 CPU 全量差分，最终 sidecar 还须由提交层独立重放。
