@@ -2,8 +2,11 @@
 #include "cuda_edge_elimination/elimination.hpp"
 #include "cuda_edge_elimination/graph.hpp"
 #include "cuda_edge_elimination/lp_epoch.hpp"
+#include "cuda_edge_elimination/tour.hpp"
 
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -104,12 +107,49 @@ void TestGraphCsrAndVerifierSafety() {
   Check(first_hash == graph.ContentHash(), "graph hash determinism");
 }
 
+void TestProtectedTour() {
+  const std::filesystem::path source = CUDAEE_SOURCE_DIR;
+  cudaee::GraphSnapshot graph = cudaee::GraphSnapshot::Load(
+      source / "tests/data/recursive-point.tsp", source / "tests/data/recursive-point.edg");
+  std::vector<std::int32_t> tour =
+      cudaee::ReadTsplibTour(source / "tests/data/recursive-point.tour", graph.dimension);
+  const cudaee::ProtectedTourCheck checked = cudaee::CheckProtectedTour(graph, tour);
+  Check(checked.cost == 395, "protected tour cost");
+  Check(checked.missing_edges == 0U, "protected tour present in complete fixture");
+
+  graph.edges.front().active = false;
+  graph.RebuildCsr();
+  const cudaee::ProtectedTourCheck damaged = cudaee::CheckProtectedTour(graph, tour);
+  Check(damaged.cost == checked.cost, "protected tour metric cost is independent of sparse graph");
+  Check(damaged.missing_edges == 1U, "protected tour detects removed edge");
+
+  std::reverse(tour.begin() + 1, tour.end());
+  const cudaee::ProtectedTourCheck reversed = cudaee::CheckProtectedTour(graph, tour);
+  Check(reversed.tour_hash == checked.tour_hash, "tour hash ignores direction");
+
+  const std::filesystem::path temporary_directory = CUDAEE_TEST_TMP_DIR;
+  std::filesystem::create_directories(temporary_directory);
+  const std::filesystem::path damaged_tour = temporary_directory / "damaged.tour";
+  {
+    std::ofstream output(damaged_tour);
+    output << "TYPE : TOUR\nDIMENSION : 8\nTOUR_SECTION\n1 2 3 4 5 6 7 7\n-1\nEOF\n";
+  }
+  bool rejected = false;
+  try {
+    static_cast<void>(cudaee::ReadTsplibTour(damaged_tour, graph.dimension));
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  Check(rejected, "tour parser rejects duplicate node");
+}
+
 } // namespace
 
 int main() {
   TestDistances();
   TestLpEpochAndExactBound();
   TestGraphCsrAndVerifierSafety();
+  TestProtectedTour();
   std::cout << "unit tests passed\n";
   return 0;
 }

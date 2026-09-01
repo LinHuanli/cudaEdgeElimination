@@ -18,6 +18,7 @@ set(CUDAEE_SOURCES
     src/common/types.cpp
     src/common/distance.cpp
     src/common/graph.cpp
+    src/common/tour.cpp
     src/cpu/elimination_commit.cpp
     src/cpu/hamilton_tutte.cpp
     src/cpu/ht_epoch.cpp

@@ -20,11 +20,15 @@ row="$(awk -F '\t' -v name="${instance}" '$1 == name { print; found = 1 } END { 
   echo "错误：${config} 中没有实例 ${instance}。" >&2
   exit 2
 }
-IFS=$'\t' read -r _ tsp_relative edges_relative <<<"${row}"
+IFS=$'\t' read -r _ tsp_relative edges_relative certified_optimum <<<"${row}"
 tsp="$(realpath "${repo_root}/${tsp_relative}")"
 edges="$(realpath "${repo_root}/${edges_relative}")"
 if [[ ! -f "${tsp}" || ! -f "${edges}" ]]; then
   echo "错误：实例输入不存在。" >&2
+  exit 2
+fi
+if [[ ! "${certified_optimum}" =~ ^[0-9]+$ ]]; then
+  echo "错误：实例 certified optimum 不是非负整数。" >&2
   exit 2
 fi
 
@@ -64,6 +68,19 @@ mkdir -p "${run_dir}"
 metrics="${run_dir}/metrics.csv"
 summary="${run_dir}/summary.txt"
 manifest="${run_dir}/run-manifest-v1"
+protected_tour_source="${CUDAEE_BENCHMARK_TOUR:-}"
+protected_tour=""
+protected_tour_sha256="none"
+if [[ -n "${protected_tour_source}" ]]; then
+  protected_tour_source="$(realpath "${protected_tour_source}")"
+  if [[ ! -f "${protected_tour_source}" ]]; then
+    echo "错误：CUDAEE_BENCHMARK_TOUR 不存在。" >&2
+    exit 2
+  fi
+  protected_tour="${run_dir}/protected.opt.tour"
+  cp -- "${protected_tour_source}" "${protected_tour}"
+  protected_tour_sha256="$(sha256sum "${protected_tour}" | awk '{ print $1 }')"
+fi
 
 read_edge_header() {
   if [[ "$1" == *.gz ]]; then
@@ -92,6 +109,10 @@ fi
   echo "edges_sha256 $(sha256sum "${edges}" | awk '{ print $1 }')"
   echo "dimension ${dimension}"
   echo "initial_edges ${initial_edges}"
+  echo "certified_optimum ${certified_optimum}"
+  echo "optimum_source https://comopt.ifi.uni-heidelberg.de/software/TSPLIB95/tsp/TSP-BEST.html"
+  echo "protected_tour ${protected_tour:-none}"
+  echo "protected_tour_sha256 ${protected_tour_sha256}"
   echo "timed_runs ${runs}"
   echo "measurement_modes cli_process,in_process"
   echo "physical_gpu ${physical_gpu}"
@@ -174,6 +195,23 @@ run_elimination cpu warmup
 run_elimination cuda warmup
 cmp "${run_dir}/cpu.warmup.edg" "${run_dir}/cuda.warmup.edg"
 
+protected_tour_checked=0
+protected_tour_hash="none"
+if [[ -n "${protected_tour}" ]]; then
+  "${cpu_verifier}" tour-check --tsp "${tsp}" --edges "${edges}" \
+    --tour "${protected_tour}" --expected-cost "${certified_optimum}" \
+    >"${run_dir}/protected.initial.stdout" 2>"${run_dir}/protected.initial.stderr"
+  "${cpu_verifier}" tour-check --tsp "${tsp}" --edges "${run_dir}/cpu.warmup.edg" \
+    --tour "${protected_tour}" --expected-cost "${certified_optimum}" \
+    >"${run_dir}/protected.final.stdout" 2>"${run_dir}/protected.final.stderr"
+  protected_tour_hash="$(awk '{ for (i = 1; i <= NF; ++i) { split($i, pair, "="); if (pair[1] == "tour_hash") print pair[2] } }' "${run_dir}/protected.final.stdout")"
+  if [[ -z "${protected_tour_hash}" ]]; then
+    echo "错误：受保护 tour 门禁没有输出哈希。" >&2
+    exit 2
+  fi
+  protected_tour_checked=1
+fi
+
 for ((run = 1; run <= runs; ++run)); do
   echo "计时 ${instance} ${run}/${runs}"
   run_elimination cpu "${run}"
@@ -234,6 +272,8 @@ inprocess_speedup="$(awk -v cpu="${inprocess_cpu[median_index]}" \
   echo "inprocess_cpu_replay_median_ms ${inprocess_cpu_replay[median_index]}"
   echo "inprocess_cuda_replay_median_ms ${inprocess_cuda_replay[median_index]}"
   echo "inprocess_algorithm_speedup ${inprocess_speedup}"
+  echo "protected_tour_checked ${protected_tour_checked}"
+  echo "protected_tour_hash ${protected_tour_hash}"
   echo "verified_edge_sha256 $(sha256sum "${run_dir}/cpu.warmup.edg" | awk '{ print $1 }')"
   echo "END"
 } >"${summary}"

@@ -5,6 +5,15 @@ target_compile_options(cudaee_unit PRIVATE -Wall -Wextra -Wconversion -Wshadow -
 
 add_test(NAME unit.core COMMAND cudaee_unit)
 
+add_test(
+  NAME integration.protected_tour
+  COMMAND cudaee tour-check
+    --tsp "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+    --edges "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.edg"
+    --tour "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tour"
+    --expected-cost 395)
+set_tests_properties(integration.protected_tour PROPERTIES LABELS "integration;correctness")
+
 add_executable(cudaee_hamilton_tutte_unit unit/test_hamilton_tutte.cpp)
 target_link_libraries(cudaee_hamilton_tutte_unit PRIVATE cudaee_core)
 target_compile_definitions(cudaee_hamilton_tutte_unit PRIVATE

@@ -3,6 +3,7 @@
 #include "cuda_edge_elimination/hamilton_tutte.hpp"
 #include "cuda_edge_elimination/lp_epoch.hpp"
 #include "cuda_edge_elimination/path_system.hpp"
+#include "cuda_edge_elimination/tour.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -33,6 +34,7 @@ void PrintHelp() {
             << "  gpu-eliminate --tsp FILE --edges FILE --output FILE --proof FILE\n"
             << "                [--backend auto|cpu|cuda] [--max-rounds N] [--manifest FILE]\n"
             << "  verify        --tsp FILE --edges FILE --proof FILE\n"
+            << "  tour-check    --tsp FILE --edges FILE --tour FILE --expected-cost COST\n"
             << "  ht-commit     --tsp FILE --edges FILE --output FILE --proof FILE\n"
             << "                --ht-proof FILE [--ht-proof FILE ...] [--manifest FILE]\n"
             << "  lp-solve      --input FILE --output FILE [--cuopt-library FILE]\n"
@@ -250,6 +252,25 @@ void VerifyCommand(const Arguments& arguments) {
   std::cout << "status=VERIFIED records=" << replayed.proof.size()
             << " active_edges=" << graph.ActiveEdgeCount()
             << " final_hash=" << cudaee::HexHash(replayed.final_hash) << '\n';
+}
+
+void TourCheckCommand(const Arguments& arguments) {
+  const cudaee::GraphSnapshot graph =
+      cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
+  const std::vector<std::int32_t> tour =
+      cudaee::ReadTsplibTour(Required(arguments, "tour"), graph.dimension);
+  const cudaee::ProtectedTourCheck check = cudaee::CheckProtectedTour(graph, tour);
+  const std::int64_t expected_cost = RequiredInteger<std::int64_t>(arguments, "expected-cost");
+  if (expected_cost < 0 || check.cost != expected_cost) {
+    throw std::runtime_error("受保护 tour 成本与 expected-cost 不一致: actual=" +
+                             std::to_string(check.cost));
+  }
+  if (check.missing_edges != 0U) {
+    throw std::runtime_error("活动边集缺少受保护 tour 边: " + std::to_string(check.missing_edges));
+  }
+  std::cout << "status=VERIFIED dimension=" << graph.dimension << " tour_cost=" << check.cost
+            << " missing_edges=" << check.missing_edges
+            << " tour_hash=" << cudaee::HexHash(check.tour_hash) << '\n';
 }
 
 void HtCommitCommand(const Arguments& arguments) {
@@ -634,6 +655,8 @@ int main(const int argc, char** argv) {
       RunEliminationCommand(arguments);
     } else if (command == "verify") {
       VerifyCommand(arguments);
+    } else if (command == "tour-check") {
+      TourCheckCommand(arguments);
     } else if (command == "ht-commit") {
       HtCommitCommand(arguments);
     } else if (command == "lp-solve") {
