@@ -27,8 +27,8 @@
 | M4.3b3b2b2b2b2b1 CPU long-tail | 完成（128-cell 基线） | 缓存后交叉点；融合矩阵分流；CPU/CUDA proof 规范计数 |
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
-| M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；CPU/CUDA 工作签名；V2 原子提交；最优 tour 门禁 |
-| M5 中大型调优 | 进行中（JV 三轮 + HT pilot） | JV 三实例门禁；pcb3038 8-target HT 提交 2 边；proof 全重放；跨目标融合待做 |
+| M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
+| M5 中大型调优 | 进行中（JV 三轮 + HT profiling） | JV 三实例门禁；HT leaf 约占 80%；混合后端 1.018×；跨目标融合待做 |
 
 ## 当前基准结果
 
@@ -41,6 +41,8 @@ M5 JV 驻留优化绑定 `25590af`：精确比较坐标、边端点和边权后�
 M5 JV 动态 edge-id 优化绑定 `41feceb`：CUDA CSR 不再重复上传 64 位权重，而用 32 位稳定 edge id 读取驻留权重；三实例算法中位数降为 `1.728/6.503/67.651 ms`，相对 CPU 为 `11.194×/30.517×/41.695×`，峰值驻留降为 `336084/1284024/6962204 bytes`。d15112 的同步 H2D/kernel/D2H 中位数为 `2.965/6.628/0.513 ms`；proof、最终图哈希与输出 SHA-256 均未改变。
 
 M5 HT scan pilot 绑定 `cd5ec3e`：pcb3038 的 CPU JV 固定点有 6,704 条边和 6,476 个度数安全目标；最高权重 8-target 切片的 CPU/CUDA 工作签名均为 12,383 states、14,285 replies、9,120 leaf calls 和 5,085 moves，证明并提交相同 2 条边。CUDA/CPU search 为 `33.646/34.103 s`，仅 `1.014×`；最终 6,702 条边、哈希 `fe11f98414b04c0e`，两份 V2 均独立重放且 pcb3038 最优 tour 为 0 缺边。这是功能与资源 pilot，不是显著性能结论。
+
+M5 HT profiling 绑定 `65f9488`：V2 报告把 work graph 拆成 leaf/path/reply 与 host residual，并用 `--leaf-backend` 建立第三条混合路径。相同 8-target clean run 中，CPU/全 CUDA/混合 search 为 `33.987/33.599/33.401 s`；混合仅 `1.018×`。CPU leaf 为 27.160 s（search 的 `79.914%`），Hamilton reply 为 6.245 s（`18.375%`），host residual 只有 0.228 s。三路 proof 均独立重放、边文件 SHA-256 一致且最优 tour 零缺边。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 

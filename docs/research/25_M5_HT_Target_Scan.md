@@ -48,7 +48,7 @@ immutable graph
 
 ## 4. 报告与复现
 
-`CUDAEE_HT_SCAN_REPORT_V1` 记录总目标数、切片、状态、回复、叶调用、move 数、搜索 wall time 和每个目标的：
+初始 `CUDAEE_HT_SCAN_REPORT_V1` 记录总目标数、切片、状态、回复、叶调用、move 数、搜索 wall time 和每个目标的：
 
 - `PROVEN/UNRESOLVED` 与原因；
 - states/replies/leaves/moves/peak frontier；
@@ -105,3 +105,5 @@ CUDA 处理 51,309,996 个 leaf cost cells、1,835 个 cost batches，leaf devic
 3. 在相同预算下扩展目标数和 pcb3038 重复运行，再进入 rl5915/d15112；
 4. 新图的下一 epoch 从 offset 0 重新排序，测量强度固定点；
 5. 单卡跨目标融合稳定后再按不可变 snapshot 切片到多 GPU。
+
+阶段计时、`CUDAEE_HT_SCAN_REPORT_V2` 与 CPU/全 CUDA/混合三路复测见 [M5 HT 阶段画像与混合后端](26_M5_HT_Phase_Profiling_and_Hybrid.md)。

@@ -73,6 +73,8 @@ JV 基线与第三轮优化已完成：三实例各预热一次、计时五次�
 
 有界全图 HT 调度 baseline 已完成：`ht-scan` 在同一不可变图上按稳定权重/端点顺序选择显式切片，逐目标 wavefront 搜索，成功 sidecar 即时 CPU 重放后再整批复核和原子提交。pcb3038/JV 固定点的 8-target pilot 中，CPU/CUDA 工作签名一致，均证明并提交 2 条边；CUDA/CPU 搜索为 `33.646/34.103 s`，只有 `1.014×`。这说明下一瓶颈是跨目标融合与主机建图/认证，不是继续宣传单 kernel 加速。
 
+阶段画像与混合后端基线也已完成：V2 报告显示 CPU search 的 `79.914%` 在 leaf、`18.375%` 在 Hamilton reply，纯 host build residual 仅 `0.670%`。解耦 `--leaf-backend` 后，CPU 小候选器 + CUDA leaf 的混合 search 为 33.401 s，相对 CPU 33.987 s 仅 `1.018×`；下一切片明确为跨目标 leaf 合批。
+
 M5 仍未完成：`rl5915/d15112` 的最优 tour witness、跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义

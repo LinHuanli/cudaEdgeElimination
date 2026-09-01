@@ -31,5 +31,6 @@
 27. [M5 JV CUDA 驻留缓存](research/23_M5_JV_Device_Residency.md)：精确静态键、动态 CSR 刷新、增长 workspace 与三实例稳态收益。
 28. [M5 JV 动态 CSR edge-id](research/24_M5_JV_Dynamic_CSR_Edge_Ids.md)：复用驻留边权、分段 CUDA 计时与三实例显存/耗时门禁。
 29. [M5 有界全图 HT 目标扫描](research/25_M5_HT_Target_Scan.md)：确定性目标切片、预算失败关闭、V2 原子提交与 pcb3038 CPU/CUDA pilot。
+30. [M5 HT 阶段画像与混合后端](research/26_M5_HT_Phase_Profiling_and_Hybrid.md)：V2 包含式计时、CPU/全 CUDA/混合三路门禁与跨目标 leaf 合批接口。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。
