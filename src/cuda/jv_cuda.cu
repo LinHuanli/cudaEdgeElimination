@@ -2,11 +2,15 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cudaee {
@@ -22,43 +26,115 @@ void CheckCuda(const cudaError_t status, const char* const operation) {
 
 template <typename T> class DeviceBuffer {
 public:
-  explicit DeviceBuffer(const std::size_t count) : count_(count) {
-    if (count_ != 0) {
+  DeviceBuffer() = default;
+
+  DeviceBuffer(const std::size_t count, const int device) : device_(device), count_(count) {
+    if (count_ != 0U) {
+      if (count_ > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+        throw std::overflow_error("CUDA JV buffer 字节数溢出");
+      }
+      CheckCuda(cudaSetDevice(device_), "cudaSetDevice(JV buffer allocate)");
       CheckCuda(cudaMalloc(&data_, sizeof(T) * count_), "cudaMalloc");
     }
   }
 
-  ~DeviceBuffer() {
-    if (data_ != nullptr) {
-      cudaFree(data_);
-    }
-  }
+  ~DeviceBuffer() { Reset(); }
 
   DeviceBuffer(const DeviceBuffer&) = delete;
   DeviceBuffer& operator=(const DeviceBuffer&) = delete;
 
+  DeviceBuffer(DeviceBuffer&& other) noexcept { MoveFrom(&other); }
+
+  DeviceBuffer& operator=(DeviceBuffer&& other) noexcept {
+    if (this != &other) {
+      Reset();
+      MoveFrom(&other);
+    }
+    return *this;
+  }
+
   [[nodiscard]] T* get() { return data_; }
   [[nodiscard]] const T* get() const { return data_; }
-  [[nodiscard]] std::size_t size() const { return count_; }
+  [[nodiscard]] std::size_t count() const { return count_; }
+  [[nodiscard]] std::uint64_t bytes() const {
+    return static_cast<std::uint64_t>(count_) * sizeof(T);
+  }
 
-  void CopyFromHost(const T* source) {
-    if (count_ != 0) {
-      CheckCuda(cudaMemcpy(data_, source, sizeof(T) * count_, cudaMemcpyHostToDevice),
+  void CopyFromHost(const T* const source, const std::size_t count) {
+    if (count > count_) {
+      throw std::logic_error("CUDA JV H2D 超出驻留 buffer");
+    }
+    if (count != 0U) {
+      CheckCuda(cudaSetDevice(device_), "cudaSetDevice(JV H2D)");
+      CheckCuda(cudaMemcpy(data_, source, sizeof(T) * count, cudaMemcpyHostToDevice),
                 "cudaMemcpy H2D");
     }
   }
 
-  void CopyToHost(T* destination) const {
-    if (count_ != 0) {
-      CheckCuda(cudaMemcpy(destination, data_, sizeof(T) * count_, cudaMemcpyDeviceToHost),
+  void CopyToHost(T* const destination, const std::size_t count) const {
+    if (count > count_) {
+      throw std::logic_error("CUDA JV D2H 超出驻留 buffer");
+    }
+    if (count != 0U) {
+      CheckCuda(cudaSetDevice(device_), "cudaSetDevice(JV D2H)");
+      CheckCuda(cudaMemcpy(destination, data_, sizeof(T) * count, cudaMemcpyDeviceToHost),
                 "cudaMemcpy D2H");
     }
   }
 
 private:
+  void Reset() noexcept {
+    if (data_ != nullptr) {
+      // 析构不能抛异常；owner device 防止释放另一个 CUDA context 的指针。
+      static_cast<void>(cudaSetDevice(device_));
+      static_cast<void>(cudaFree(data_));
+    }
+    data_ = nullptr;
+    device_ = -1;
+    count_ = 0U;
+  }
+
+  void MoveFrom(DeviceBuffer* const other) noexcept {
+    data_ = other->data_;
+    device_ = other->device_;
+    count_ = other->count_;
+    other->data_ = nullptr;
+    other->device_ = -1;
+    other->count_ = 0U;
+  }
+
   T* data_{nullptr};
+  int device_{-1};
   std::size_t count_{};
 };
+
+struct JvDeviceCache {
+  explicit JvDeviceCache(const int selected_device) : device(selected_device) {}
+
+  int device{-1};
+  std::int32_t dimension{};
+  DistanceType distance_type{DistanceType::kEuc2D};
+  std::vector<std::int32_t> host_edge_u;
+  std::vector<std::int32_t> host_edge_v;
+  std::vector<std::int64_t> host_edge_weight;
+  std::vector<std::int64_t> host_x;
+  std::vector<std::int64_t> host_y;
+  std::vector<std::int32_t> host_edge_active;
+  std::vector<std::int32_t> host_witnesses;
+  DeviceBuffer<std::int32_t> device_edge_u;
+  DeviceBuffer<std::int32_t> device_edge_v;
+  DeviceBuffer<std::int64_t> device_edge_weight;
+  DeviceBuffer<std::int64_t> device_x;
+  DeviceBuffer<std::int64_t> device_y;
+  DeviceBuffer<std::int32_t> device_edge_active;
+  DeviceBuffer<std::int32_t> device_row_offsets;
+  DeviceBuffer<std::int32_t> device_neighbors;
+  DeviceBuffer<std::int64_t> device_csr_weights;
+  DeviceBuffer<std::int32_t> device_witnesses;
+};
+
+thread_local std::vector<std::unique_ptr<JvDeviceCache>> g_jv_device_caches;
+thread_local int g_jv_preferred_device = -1;
 
 __device__ std::uint64_t IntegerSqrtFloorDevice(const std::uint64_t value) {
   std::uint64_t remainder = value;
@@ -218,6 +294,11 @@ int SelectDevice(std::string* const reason) {
     }
     return -1;
   }
+  if (g_jv_preferred_device >= 0 && g_jv_preferred_device < device_count &&
+      cudaSetDevice(g_jv_preferred_device) == cudaSuccess) {
+    return g_jv_preferred_device;
+  }
+  g_jv_preferred_device = -1;
 
   int best_device = -1;
   std::size_t best_free = 0;
@@ -240,17 +321,154 @@ int SelectDevice(std::string* const reason) {
     return -1;
   }
   CheckCuda(cudaSetDevice(best_device), "cudaSetDevice");
+  g_jv_preferred_device = best_device;
   return best_device;
+}
+
+JvDeviceCache& CacheForDevice(const int device) {
+  const auto iterator = std::find_if(
+      g_jv_device_caches.begin(), g_jv_device_caches.end(),
+      [device](const std::unique_ptr<JvDeviceCache>& cache) { return cache->device == device; });
+  if (iterator != g_jv_device_caches.end()) {
+    return **iterator;
+  }
+  g_jv_device_caches.push_back(std::make_unique<JvDeviceCache>(device));
+  return *g_jv_device_caches.back();
+}
+
+bool StaticGraphMatches(const JvDeviceCache& cache, const GraphSnapshot& graph) {
+  if (cache.dimension != graph.dimension || cache.distance_type != graph.distance_type ||
+      cache.host_x.size() != graph.points.size() || cache.host_y.size() != graph.points.size() ||
+      cache.host_edge_u.size() != graph.edges.size() ||
+      cache.host_edge_v.size() != graph.edges.size() ||
+      cache.host_edge_weight.size() != graph.edges.size()) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < graph.points.size(); ++index) {
+    if (cache.host_x[index] != graph.points[index].integer_x ||
+        cache.host_y[index] != graph.points[index].integer_y) {
+      return false;
+    }
+  }
+  for (std::size_t index = 0U; index < graph.edges.size(); ++index) {
+    if (cache.host_edge_u[index] != graph.edges[index].u ||
+        cache.host_edge_v[index] != graph.edges[index].v ||
+        cache.host_edge_weight[index] != graph.edges[index].weight) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool PrepareStaticGraph(JvDeviceCache* const cache, const GraphSnapshot& graph) {
+  // active 位和 CSR 每个 epoch 都会变化；这里只缓存 kernel 真正不变的完整依赖，
+  // 并逐元素比较而非只信任哈希，防止跨实例错误复用设备数据。
+  if (StaticGraphMatches(*cache, graph)) {
+    return true;
+  }
+
+  std::vector<std::int32_t> host_edge_u(graph.edges.size());
+  std::vector<std::int32_t> host_edge_v(graph.edges.size());
+  std::vector<std::int64_t> host_edge_weight(graph.edges.size());
+  for (std::size_t index = 0U; index < graph.edges.size(); ++index) {
+    host_edge_u[index] = graph.edges[index].u;
+    host_edge_v[index] = graph.edges[index].v;
+    host_edge_weight[index] = graph.edges[index].weight;
+  }
+  std::vector<std::int64_t> host_x(graph.points.size());
+  std::vector<std::int64_t> host_y(graph.points.size());
+  for (std::size_t index = 0U; index < graph.points.size(); ++index) {
+    host_x[index] = graph.points[index].integer_x;
+    host_y[index] = graph.points[index].integer_y;
+  }
+
+  DeviceBuffer<std::int32_t> device_edge_u(host_edge_u.size(), cache->device);
+  DeviceBuffer<std::int32_t> device_edge_v(host_edge_v.size(), cache->device);
+  DeviceBuffer<std::int64_t> device_edge_weight(host_edge_weight.size(), cache->device);
+  DeviceBuffer<std::int64_t> device_x(host_x.size(), cache->device);
+  DeviceBuffer<std::int64_t> device_y(host_y.size(), cache->device);
+  device_edge_u.CopyFromHost(host_edge_u.data(), host_edge_u.size());
+  device_edge_v.CopyFromHost(host_edge_v.data(), host_edge_v.size());
+  device_edge_weight.CopyFromHost(host_edge_weight.data(), host_edge_weight.size());
+  device_x.CopyFromHost(host_x.data(), host_x.size());
+  device_y.CopyFromHost(host_y.data(), host_y.size());
+
+  cache->device_edge_u = std::move(device_edge_u);
+  cache->device_edge_v = std::move(device_edge_v);
+  cache->device_edge_weight = std::move(device_edge_weight);
+  cache->device_x = std::move(device_x);
+  cache->device_y = std::move(device_y);
+  cache->host_edge_u = std::move(host_edge_u);
+  cache->host_edge_v = std::move(host_edge_v);
+  cache->host_edge_weight = std::move(host_edge_weight);
+  cache->host_x = std::move(host_x);
+  cache->host_y = std::move(host_y);
+  cache->dimension = graph.dimension;
+  cache->distance_type = graph.distance_type;
+  return false;
+}
+
+std::size_t GrowthCapacity(const std::size_t current, const std::size_t required) {
+  if (current >= required) {
+    return current;
+  }
+  if (current == 0U || current > std::numeric_limits<std::size_t>::max() / 2U) {
+    return required;
+  }
+  return std::max(required, current * 2U);
+}
+
+bool PrepareWorkspace(JvDeviceCache* const cache, const GraphSnapshot& graph) {
+  const bool hit = cache->device_edge_active.count() >= graph.edges.size() &&
+                   cache->device_row_offsets.count() >= graph.row_offsets.size() &&
+                   cache->device_neighbors.count() >= graph.neighbors.size() &&
+                   cache->device_csr_weights.count() >= graph.csr_weights.size() &&
+                   cache->device_witnesses.count() >= graph.edges.size();
+  if (cache->device_edge_active.count() < graph.edges.size()) {
+    cache->device_edge_active = DeviceBuffer<std::int32_t>(
+        GrowthCapacity(cache->device_edge_active.count(), graph.edges.size()), cache->device);
+  }
+  if (cache->device_row_offsets.count() < graph.row_offsets.size()) {
+    cache->device_row_offsets = DeviceBuffer<std::int32_t>(
+        GrowthCapacity(cache->device_row_offsets.count(), graph.row_offsets.size()), cache->device);
+  }
+  if (cache->device_neighbors.count() < graph.neighbors.size()) {
+    cache->device_neighbors = DeviceBuffer<std::int32_t>(
+        GrowthCapacity(cache->device_neighbors.count(), graph.neighbors.size()), cache->device);
+  }
+  if (cache->device_csr_weights.count() < graph.csr_weights.size()) {
+    cache->device_csr_weights = DeviceBuffer<std::int64_t>(
+        GrowthCapacity(cache->device_csr_weights.count(), graph.csr_weights.size()), cache->device);
+  }
+  if (cache->device_witnesses.count() < graph.edges.size()) {
+    cache->device_witnesses = DeviceBuffer<std::int32_t>(
+        GrowthCapacity(cache->device_witnesses.count(), graph.edges.size()), cache->device);
+  }
+  return hit;
+}
+
+std::uint64_t ResidentBytes(const JvDeviceCache& cache) {
+  return cache.device_edge_u.bytes() + cache.device_edge_v.bytes() +
+         cache.device_edge_weight.bytes() + cache.device_x.bytes() + cache.device_y.bytes() +
+         cache.device_edge_active.bytes() + cache.device_row_offsets.bytes() +
+         cache.device_neighbors.bytes() + cache.device_csr_weights.bytes() +
+         cache.device_witnesses.bytes();
 }
 
 } // namespace
 
 bool CudaBackendAvailable(std::string* const reason) { return SelectDevice(reason) >= 0; }
 
-std::vector<Candidate> FindJvCandidatesCuda(const GraphSnapshot& graph,
-                                            int* const selected_device) {
+std::vector<Candidate> FindJvCandidatesCuda(const GraphSnapshot& graph, int* const selected_device,
+                                            JvCudaCacheUsage* const cache_usage) {
+  if (cache_usage != nullptr) {
+    *cache_usage = {};
+  }
   if (!graph.integer_coordinates || !graph.integer_distance_safe) {
     throw std::runtime_error("CUDA JV 仅支持平方距离不溢出的整数坐标");
+  }
+  if (graph.edges.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+    throw std::overflow_error("CUDA JV 边数超过 int32 kernel 索引范围");
   }
   std::string reason;
   const int device = SelectDevice(&reason);
@@ -264,64 +482,53 @@ std::vector<Candidate> FindJvCandidatesCuda(const GraphSnapshot& graph,
     return {};
   }
 
-  std::vector<std::int32_t> edge_u(graph.edges.size());
-  std::vector<std::int32_t> edge_v(graph.edges.size());
-  std::vector<std::int64_t> edge_weight(graph.edges.size());
-  std::vector<std::int32_t> edge_active(graph.edges.size());
-  for (std::size_t i = 0; i < graph.edges.size(); ++i) {
-    edge_u[i] = graph.edges[i].u;
-    edge_v[i] = graph.edges[i].v;
-    edge_weight[i] = graph.edges[i].weight;
-    edge_active[i] = graph.edges[i].active ? 1 : 0;
+  JvDeviceCache& cache = CacheForDevice(device);
+  const bool static_hit = PrepareStaticGraph(&cache, graph);
+  const bool workspace_hit = PrepareWorkspace(&cache, graph);
+  cache.host_edge_active.resize(graph.edges.size());
+  for (std::size_t index = 0U; index < graph.edges.size(); ++index) {
+    cache.host_edge_active[index] = graph.edges[index].active ? 1 : 0;
   }
-  std::vector<std::int64_t> x(graph.points.size());
-  std::vector<std::int64_t> y(graph.points.size());
-  for (std::size_t i = 0; i < graph.points.size(); ++i) {
-    x[i] = graph.points[i].integer_x;
-    y[i] = graph.points[i].integer_y;
-  }
-  std::vector<std::int32_t> witnesses(graph.edges.size(), -1);
+  cache.host_witnesses.assign(graph.edges.size(), -1);
 
-  DeviceBuffer<std::int32_t> d_edge_u(edge_u.size());
-  DeviceBuffer<std::int32_t> d_edge_v(edge_v.size());
-  DeviceBuffer<std::int64_t> d_edge_weight(edge_weight.size());
-  DeviceBuffer<std::int32_t> d_edge_active(edge_active.size());
-  DeviceBuffer<std::int32_t> d_row_offsets(graph.row_offsets.size());
-  DeviceBuffer<std::int32_t> d_neighbors(graph.neighbors.size());
-  DeviceBuffer<std::int64_t> d_csr_weights(graph.csr_weights.size());
-  DeviceBuffer<std::int64_t> d_x(x.size());
-  DeviceBuffer<std::int64_t> d_y(y.size());
-  DeviceBuffer<std::int32_t> d_witnesses(witnesses.size());
-  d_edge_u.CopyFromHost(edge_u.data());
-  d_edge_v.CopyFromHost(edge_v.data());
-  d_edge_weight.CopyFromHost(edge_weight.data());
-  d_edge_active.CopyFromHost(edge_active.data());
-  d_row_offsets.CopyFromHost(graph.row_offsets.data());
-  d_neighbors.CopyFromHost(graph.neighbors.data());
-  d_csr_weights.CopyFromHost(graph.csr_weights.data());
-  d_x.CopyFromHost(x.data());
-  d_y.CopyFromHost(y.data());
-  d_witnesses.CopyFromHost(witnesses.data());
+  // 动态输入每轮完整覆盖；缓存只省分配和不变数组上传，不改变 snapshot 语义。
+  cache.device_edge_active.CopyFromHost(cache.host_edge_active.data(),
+                                        cache.host_edge_active.size());
+  cache.device_row_offsets.CopyFromHost(graph.row_offsets.data(), graph.row_offsets.size());
+  cache.device_neighbors.CopyFromHost(graph.neighbors.data(), graph.neighbors.size());
+  cache.device_csr_weights.CopyFromHost(graph.csr_weights.data(), graph.csr_weights.size());
+  cache.device_witnesses.CopyFromHost(cache.host_witnesses.data(), cache.host_witnesses.size());
+  if (cache_usage != nullptr) {
+    cache_usage->static_hit = static_hit;
+    cache_usage->workspace_hit = workspace_hit;
+    cache_usage->resident_bytes = ResidentBytes(cache);
+  }
 
   constexpr int kThreads = 128;
   const int blocks = (static_cast<int>(graph.edges.size()) + kThreads - 1) / kThreads;
   JvCandidatesKernel<<<blocks, kThreads>>>(
-      static_cast<std::int32_t>(graph.edges.size()), d_edge_u.get(), d_edge_v.get(),
-      d_edge_weight.get(), d_edge_active.get(), d_row_offsets.get(), d_neighbors.get(),
-      d_csr_weights.get(), d_x.get(), d_y.get(), static_cast<std::uint8_t>(graph.distance_type),
-      d_witnesses.get());
+      static_cast<std::int32_t>(graph.edges.size()), cache.device_edge_u.get(),
+      cache.device_edge_v.get(), cache.device_edge_weight.get(), cache.device_edge_active.get(),
+      cache.device_row_offsets.get(), cache.device_neighbors.get(), cache.device_csr_weights.get(),
+      cache.device_x.get(), cache.device_y.get(), static_cast<std::uint8_t>(graph.distance_type),
+      cache.device_witnesses.get());
   CheckCuda(cudaGetLastError(), "JvCandidatesKernel launch");
   CheckCuda(cudaDeviceSynchronize(), "JvCandidatesKernel synchronize");
-  d_witnesses.CopyToHost(witnesses.data());
+  cache.device_witnesses.CopyToHost(cache.host_witnesses.data(), cache.host_witnesses.size());
 
   std::vector<Candidate> candidates;
-  for (std::size_t edge_id = 0; edge_id < witnesses.size(); ++edge_id) {
-    if (witnesses[edge_id] >= 0) {
-      candidates.push_back(
-          {static_cast<std::int32_t>(edge_id), witnesses[edge_id], EliminationMethod::kJv});
+  for (std::size_t edge_id = 0; edge_id < cache.host_witnesses.size(); ++edge_id) {
+    if (cache.host_witnesses[edge_id] >= 0) {
+      candidates.push_back({static_cast<std::int32_t>(edge_id), cache.host_witnesses[edge_id],
+                            EliminationMethod::kJv});
     }
   }
   return candidates;
+}
+
+void ClearJvCudaCache() {
+  g_jv_device_caches.clear();
+  g_jv_preferred_device = -1;
 }
 
 } // namespace cudaee

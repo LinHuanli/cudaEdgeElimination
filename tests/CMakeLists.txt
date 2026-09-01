@@ -4,6 +4,11 @@ target_compile_definitions(cudaee_unit PRIVATE CUDAEE_TEST_TMP_DIR="${CMAKE_CURR
 target_compile_options(cudaee_unit PRIVATE -Wall -Wextra -Wconversion -Wshadow -Wformat=2)
 
 add_test(NAME unit.core COMMAND cudaee_unit)
+if(CUDAEE_ENABLE_CUDA)
+  set_tests_properties(unit.core PROPERTIES LABELS "correctness;gpu")
+else()
+  set_tests_properties(unit.core PROPERTIES LABELS "correctness")
+endif()
 
 add_test(
   NAME integration.protected_tour

@@ -115,6 +115,7 @@ fi
   echo "protected_tour_sha256 ${protected_tour_sha256}"
   echo "timed_runs ${runs}"
   echo "measurement_modes cli_process,in_process"
+  echo "jv_cuda_cache exact_static_key,dynamic_refresh,growth_workspace"
   echo "physical_gpu ${physical_gpu}"
   echo "cuda_visible_devices ${physical_gpu}"
   echo "cmake_preset cuda-release"
@@ -125,7 +126,7 @@ fi
   echo "END"
 } >"${manifest}"
 
-echo "backend,run,wall_ms,replay_ms,edges_scanned,propose_ms,verify_ms,committed,active_edges,edges_per_second,final_hash,snapshot_ms,commit_ms" >"${metrics}"
+echo "backend,run,wall_ms,replay_ms,edges_scanned,propose_ms,verify_ms,committed,active_edges,edges_per_second,final_hash,snapshot_ms,commit_ms,static_cache_hits,workspace_cache_hits,peak_resident_bytes" >"${metrics}"
 
 run_elimination() {
   local backend="$1"
@@ -168,6 +169,9 @@ run_elimination() {
           if (pair[1] == "propose_ms") propose += pair[2]
           if (pair[1] == "verify_ms") verify += pair[2]
           if (pair[1] == "commit_ms") commit += pair[2]
+          if (pair[1] == "jv_static_cache_hit") static_hits += pair[2]
+          if (pair[1] == "jv_workspace_cache_hit") workspace_hits += pair[2]
+          if (pair[1] == "jv_resident_bytes" && pair[2] > resident) resident = pair[2]
         }
       }
       /^status=OK/ {
@@ -178,17 +182,17 @@ run_elimination() {
           if (pair[1] == "final_hash") hash = pair[2]
         }
       }
-      END { printf "%d,%.6f,%.6f,%d,%d,%s,%.6f,%.6f", scanned, propose, verify, committed, active, hash, snapshot, commit }
+      END { printf "%d,%.6f,%.6f,%d,%d,%s,%.6f,%.6f,%d,%d,%d", scanned, propose, verify, committed, active, hash, snapshot, commit, static_hits, workspace_hits, resident }
     ' "${stdout_file}")"
-    local scanned propose verify committed active hash snapshot commit throughput
-    IFS=',' read -r scanned propose verify committed active hash snapshot commit <<<"${parsed}"
+    local scanned propose verify committed active hash snapshot commit static_hits workspace_hits resident throughput
+    IFS=',' read -r scanned propose verify committed active hash snapshot commit static_hits workspace_hits resident <<<"${parsed}"
     if [[ -z "${hash}" || ! "${scanned}" =~ ^[0-9]+$ || ! "${committed}" =~ ^[0-9]+$ ||
           ! "${active}" =~ ^[0-9]+$ ]]; then
       echo "错误：${backend}.${label} 输出缺少规范指标。" >&2
       exit 2
     fi
     throughput="$(awk -v count="${scanned}" -v elapsed="${wall_ms}" 'BEGIN { printf "%.3f", 1000*count/elapsed }')"
-    echo "${backend},${label},${wall_ms},${replay_ms},${scanned},${propose},${verify},${committed},${active},${throughput},${hash},${snapshot},${commit}" >>"${metrics}"
+    echo "${backend},${label},${wall_ms},${replay_ms},${scanned},${propose},${verify},${committed},${active},${throughput},${hash},${snapshot},${commit},${static_hits},${workspace_hits},${resident}" >>"${metrics}"
   fi
 }
 
@@ -238,13 +242,18 @@ mapfile -t inprocess_cpu_snapshot < <(awk -F',' '$1 == "cpu" { print $11 }' "${r
 mapfile -t inprocess_cuda_snapshot < <(awk -F',' '$1 == "cuda" { print $11 }' "${run_dir}/inprocess.csv" | sort -n)
 mapfile -t inprocess_cpu_commit < <(awk -F',' '$1 == "cpu" { print $12 }' "${run_dir}/inprocess.csv" | sort -n)
 mapfile -t inprocess_cuda_commit < <(awk -F',' '$1 == "cuda" { print $12 }' "${run_dir}/inprocess.csv" | sort -n)
+mapfile -t inprocess_cuda_static_hits < <(awk -F',' '$1 == "cuda" { print $13 }' "${run_dir}/inprocess.csv" | sort -n)
+mapfile -t inprocess_cuda_workspace_hits < <(awk -F',' '$1 == "cuda" { print $14 }' "${run_dir}/inprocess.csv" | sort -n)
+mapfile -t inprocess_cuda_resident < <(awk -F',' '$1 == "cuda" { print $15 }' "${run_dir}/inprocess.csv" | sort -n)
 
 # 所有数据列必须完整，避免部分失败的结果被误汇总为成功。
 for count in "${#cpu_walls[@]}" "${#cuda_walls[@]}" "${#cpu_proposes[@]}" \
   "${#cuda_proposes[@]}" "${#inprocess_cpu[@]}" "${#inprocess_cuda[@]}" \
   "${#inprocess_cpu_replay[@]}" "${#inprocess_cuda_replay[@]}" \
   "${#inprocess_cpu_snapshot[@]}" "${#inprocess_cuda_snapshot[@]}" \
-  "${#inprocess_cpu_commit[@]}" "${#inprocess_cuda_commit[@]}"; do
+  "${#inprocess_cpu_commit[@]}" "${#inprocess_cuda_commit[@]}" \
+  "${#inprocess_cuda_static_hits[@]}" "${#inprocess_cuda_workspace_hits[@]}" \
+  "${#inprocess_cuda_resident[@]}"; do
   if (( count != runs )); then
     echo "错误：基准数据列不完整（期望 ${runs} 行，实际 ${count} 行）。" >&2
     exit 2
@@ -283,6 +292,9 @@ inprocess_speedup="$(awk -v cpu="${inprocess_cpu[median_index]}" \
   echo "inprocess_cuda_snapshot_median_ms ${inprocess_cuda_snapshot[median_index]}"
   echo "inprocess_cpu_commit_median_ms ${inprocess_cpu_commit[median_index]}"
   echo "inprocess_cuda_commit_median_ms ${inprocess_cuda_commit[median_index]}"
+  echo "inprocess_cuda_static_cache_hits_median ${inprocess_cuda_static_hits[median_index]}"
+  echo "inprocess_cuda_workspace_cache_hits_median ${inprocess_cuda_workspace_hits[median_index]}"
+  echo "inprocess_cuda_peak_resident_bytes ${inprocess_cuda_resident[p95_index]}"
   echo "inprocess_algorithm_speedup ${inprocess_speedup}"
   echo "protected_tour_checked ${protected_tour_checked}"
   echo "protected_tour_hash ${protected_tour_hash}"

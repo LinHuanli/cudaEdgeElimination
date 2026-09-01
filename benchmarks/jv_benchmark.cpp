@@ -1,5 +1,6 @@
 #include "cuda_edge_elimination/elimination.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -26,6 +27,9 @@ struct RunMetrics {
   std::size_t committed{};
   std::size_t active_edges{};
   std::uint64_t final_hash{};
+  std::uint64_t static_cache_hits{};
+  std::uint64_t workspace_cache_hits{};
+  std::uint64_t peak_resident_bytes{};
 };
 
 std::size_t ParseRuns(const std::string_view text) {
@@ -78,6 +82,9 @@ RunMetrics RunOnce(const cudaee::GraphSnapshot& initial, const cudaee::Backend b
     metrics.propose_ms += epoch.propose_ms;
     metrics.verify_ms += epoch.verify_ms;
     metrics.commit_ms += epoch.commit_ms;
+    metrics.static_cache_hits += epoch.jv_static_cache_hit ? 1U : 0U;
+    metrics.workspace_cache_hits += epoch.jv_workspace_cache_hit ? 1U : 0U;
+    metrics.peak_resident_bytes = std::max(metrics.peak_resident_bytes, epoch.jv_resident_bytes);
   }
   *final_graph = std::move(graph);
   return metrics;
@@ -89,7 +96,8 @@ void PrintMetrics(const std::string_view backend, const std::size_t run,
             << metrics.algorithm_ms << ',' << metrics.propose_ms << ',' << metrics.verify_ms << ','
             << metrics.replay_ms << ',' << metrics.edges_scanned << ',' << metrics.committed << ','
             << metrics.active_edges << ',' << cudaee::HexHash(metrics.final_hash) << ','
-            << metrics.snapshot_ms << ',' << metrics.commit_ms << '\n';
+            << metrics.snapshot_ms << ',' << metrics.commit_ms << ',' << metrics.static_cache_hits
+            << ',' << metrics.workspace_cache_hits << ',' << metrics.peak_resident_bytes << '\n';
 }
 
 } // namespace
@@ -115,7 +123,8 @@ int main(const int argc, char** argv) {
     CheckSameGraph(cpu_reference, cuda_reference, "JV benchmark CPU/CUDA 预热");
 
     std::cout << "backend,run,algorithm_ms,propose_ms,verify_ms,replay_ms,edges_scanned,committed,"
-                 "active_edges,final_hash,snapshot_ms,commit_ms\n";
+                 "active_edges,final_hash,snapshot_ms,commit_ms,static_cache_hits,"
+                 "workspace_cache_hits,peak_resident_bytes\n";
     for (std::size_t run = 1U; run <= runs; ++run) {
       cudaee::GraphSnapshot cpu_graph;
       const RunMetrics cpu = RunOnce(initial, cudaee::Backend::kCpu, &cpu_graph);

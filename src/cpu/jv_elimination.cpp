@@ -281,10 +281,15 @@ EliminationResult RunJvElimination(GraphSnapshot* const graph, const Backend bac
 
     const auto propose_start = std::chrono::steady_clock::now();
     int selected_device = -1;
+    JvCudaCacheUsage cuda_cache;
     std::vector<Candidate> proposed =
-        use_cuda ? FindJvCandidatesCuda(*graph, &selected_device) : FindJvCandidatesCpu(*graph);
+        use_cuda ? FindJvCandidatesCuda(*graph, &selected_device, &cuda_cache)
+                 : FindJvCandidatesCpu(*graph);
     metrics.propose_ms = ElapsedMilliseconds(propose_start);
     metrics.proposed = proposed.size();
+    metrics.jv_static_cache_hit = cuda_cache.static_hit;
+    metrics.jv_workspace_cache_hit = cuda_cache.workspace_hit;
+    metrics.jv_resident_bytes = cuda_cache.resident_bytes;
 
     const auto verify_start = std::chrono::steady_clock::now();
     std::vector<Candidate> verified = VerifyCandidates(*graph, proposed, &metrics.rejected);

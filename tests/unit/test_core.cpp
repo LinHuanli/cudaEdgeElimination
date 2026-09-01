@@ -150,6 +150,70 @@ void TestProtectedTour() {
   Check(rejected, "tour parser rejects duplicate node");
 }
 
+void CheckSameCandidates(const std::vector<cudaee::Candidate>& expected,
+                         const std::vector<cudaee::Candidate>& actual,
+                         const std::string& description) {
+  Check(expected.size() == actual.size(), description + " candidate count");
+  for (std::size_t index = 0U; index < expected.size(); ++index) {
+    Check(expected[index].edge_id == actual[index].edge_id &&
+              expected[index].witness == actual[index].witness &&
+              expected[index].method == actual[index].method,
+          description + " candidate content");
+  }
+}
+
+void TestJvCudaResidentCache() {
+  std::string reason;
+  if (!cudaee::CudaBackendAvailable(&reason)) {
+    return;
+  }
+  const std::filesystem::path source = CUDAEE_SOURCE_DIR;
+  cudaee::GraphSnapshot graph = cudaee::GraphSnapshot::Load(
+      source / "tests/data/recursive-point.tsp", source / "tests/data/recursive-point.edg");
+  cudaee::ClearJvCudaCache();
+
+  int selected_device = -1;
+  cudaee::JvCudaCacheUsage first_usage;
+  const std::vector<cudaee::Candidate> first =
+      cudaee::FindJvCandidatesCuda(graph, &selected_device, &first_usage);
+  CheckSameCandidates(cudaee::FindJvCandidatesCpu(graph), first, "first CUDA JV cache run");
+  Check(selected_device >= 0 && !first_usage.static_hit && !first_usage.workspace_hit &&
+            first_usage.resident_bytes > 0U,
+        "first CUDA JV cache run uploads static graph and workspace");
+
+  cudaee::JvCudaCacheUsage second_usage;
+  const std::vector<cudaee::Candidate> second =
+      cudaee::FindJvCandidatesCuda(graph, &selected_device, &second_usage);
+  CheckSameCandidates(first, second, "second CUDA JV cache run");
+  Check(second_usage.static_hit && second_usage.workspace_hit &&
+            second_usage.resident_bytes == first_usage.resident_bytes,
+        "second CUDA JV cache run reuses exact resident data");
+
+  graph.edges.front().active = false;
+  graph.RebuildCsr();
+  cudaee::JvCudaCacheUsage active_usage;
+  const std::vector<cudaee::Candidate> active =
+      cudaee::FindJvCandidatesCuda(graph, &selected_device, &active_usage);
+  CheckSameCandidates(cudaee::FindJvCandidatesCpu(graph), active, "active-only CUDA JV cache run");
+  Check(active_usage.static_hit && active_usage.workspace_hit,
+        "active-only change reuses immutable buffers but refreshes dynamic CSR");
+
+  graph.points.front().integer_x += 1000;
+  graph.points.front().x += 1000.0;
+  for (cudaee::Edge& edge : graph.edges) {
+    edge.weight = graph.Distance(edge.u, edge.v);
+  }
+  graph.RebuildCsr();
+  cudaee::JvCudaCacheUsage changed_usage;
+  const std::vector<cudaee::Candidate> changed =
+      cudaee::FindJvCandidatesCuda(graph, &selected_device, &changed_usage);
+  CheckSameCandidates(cudaee::FindJvCandidatesCpu(graph), changed,
+                      "changed-static CUDA JV cache run");
+  Check(!changed_usage.static_hit && changed_usage.workspace_hit,
+        "coordinate change invalidates exact static cache key");
+  cudaee::ClearJvCudaCache();
+}
+
 } // namespace
 
 int main() {
@@ -157,6 +221,7 @@ int main() {
   TestLpEpochAndExactBound();
   TestGraphCsrAndVerifierSafety();
   TestProtectedTour();
+  TestJvCudaResidentCache();
   std::cout << "unit tests passed\n";
   return 0;
 }

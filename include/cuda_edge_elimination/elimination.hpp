@@ -30,6 +30,15 @@ struct EpochMetrics {
   double propose_ms{};
   double verify_ms{};
   double commit_ms{};
+  bool jv_static_cache_hit{false};
+  bool jv_workspace_cache_hit{false};
+  std::uint64_t jv_resident_bytes{};
+};
+
+struct JvCudaCacheUsage {
+  bool static_hit{false};
+  bool workspace_hit{false};
+  std::uint64_t resident_bytes{};
 };
 
 struct EliminationResult {
@@ -48,7 +57,10 @@ struct EliminationResult {
 
 [[nodiscard]] bool CudaBackendAvailable(std::string* reason);
 [[nodiscard]] std::vector<Candidate> FindJvCandidatesCuda(const GraphSnapshot& graph,
-                                                          int* selected_device);
+                                                          int* selected_device,
+                                                          JvCudaCacheUsage* cache_usage = nullptr);
+// 释放当前主机线程在所有设备上的 JV 驻留缓存；测试隔离和显式 teardown 使用。
+void ClearJvCudaCache();
 
 EliminationResult RunJvElimination(GraphSnapshot* graph, Backend backend, std::uint32_t max_rounds);
 
