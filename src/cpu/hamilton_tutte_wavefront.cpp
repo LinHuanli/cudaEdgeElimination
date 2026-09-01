@@ -126,13 +126,18 @@ PointCandidateSelection BuildPointCandidateNodes(const GraphSnapshot& graph, con
   selection.nodes_ranked = static_cast<std::uint64_t>(neighborhood.size());
 
   const auto sort_begin = SteadyClock::now();
-  std::sort(
-      neighborhood.begin(), neighborhood.end(), [](const RankedNode& lhs, const RankedNode& rhs) {
-        return std::tie(lhs.midpoint_score, lhs.node) < std::tie(rhs.midpoint_score, rhs.node);
-      });
+  const auto rank_less = [](const RankedNode& lhs, const RankedNode& rhs) {
+    return std::tie(lhs.midpoint_score, lhs.node) < std::tie(rhs.midpoint_score, rhs.node);
+  };
   if (options.root_options.max_neighborhood != 0U &&
       neighborhood.size() > options.root_options.max_neighborhood) {
+    const auto selected_end =
+        neighborhood.begin() + static_cast<std::ptrdiff_t>(options.root_options.max_neighborhood);
+    // 正式搜索只消费有序 top-k；避免先排序随后丢弃几乎全部候选。
+    std::partial_sort(neighborhood.begin(), selected_end, neighborhood.end(), rank_less);
     neighborhood.resize(options.root_options.max_neighborhood);
+  } else {
+    std::sort(neighborhood.begin(), neighborhood.end(), rank_less);
   }
 
   selection.nodes.reserve(neighborhood.size());
