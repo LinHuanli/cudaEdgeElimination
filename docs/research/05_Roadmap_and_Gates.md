@@ -91,7 +91,7 @@ CPU 精确 cost row 并行已完成：8,192 cells 以上按 task row 静态分�
 
 CPU leaf bucket fusion 组合实验与多实例门禁已完成：V12 增加 CPU 融合为第五路，pcb3038 leaf/search 从 `1.421/1.841 s` 降至 `1.236/1.655 s`。锁定公开最优 tour 后，rl5915/d15112 的 CPU 融合 leaf 为 `1.085×/1.180×`，search 均为 `1.016×`。三实例五路 proof、规范工作量、最终图和 tour 相同。CLI 因此对 CPU leaf 默认融合，auto/CUDA 不变；下一步先画像大实例中占 search 45.76%/70.92% 的 path-append。
 
-path-append V10/V13 画像已完成：CPU fused 的 child 规范化占 pcb3038/rl5915/d15112 path-append 的 `86.972%/92.840%/97.866%`；d15112 的 5,193.507 ms 来自每个小路径 task 都按完整 15,112 节点分配和扫描。下一单变量实验以稀疏有序邻接替换内部 fast path，同时保留通用 dense 规范化作为独立 proof 重放参考。
+path-append V10/V13 画像和稀疏规范化已完成：内部 fast path 按实际节点构造有序邻接，通用 dense 实现继续独立重放 proof。三实例 path-append 获得 `5.503×/9.538×/25.561×`，search 获得 `1.115×/1.679×/3.133×`；五路规范 proof 和最终边逐字节不变。rl5915/d15112 下一瓶颈是占 work graph 约一半的 host-build residual，先画像后优化。
 
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
