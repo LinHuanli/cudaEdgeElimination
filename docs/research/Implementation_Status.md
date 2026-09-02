@@ -28,6 +28,7 @@
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
+| M5 JV—HT 多 epoch 编排 | 完成（有界调度基线） | JV 固定点；无提交 sweep 推进；提交后重排；联合 V2 重放；pcb3038 CPU/CUDA/tour 门禁 |
 | M5 中大型调优 | 进行中（JV 三轮 + HT host fast paths） | point/path/reply/leaf/scan-binding fast paths；d15112 CPU-fused search `0.284 s` |
 
 ## 当前基准结果
@@ -94,6 +95,8 @@ M5 HT CPU cost 输出 workspace 绑定 `900f5d9`：临时画像否定同轮跨 k
 
 M5 HT CPU cost 完全相同 task row 去重绑定 `a4afa29`：8,192-cell 与至少 25% row 缩减双门槛后，只评分完整 `port_nodes[10]+deleted_cost` key 的首次 row，cursor 通过已完整验证的只读映射零展开消费。公开 owning API、CUDA 每逻辑 row 的独立 CPU 矩阵认证和通用 witness verifier 不变；V13/V16 分开记录逻辑认证量与物理 scored/reused rows。三实例 CPU-fused 物理 row 复用为 `3.523×/2.143×/1.938×`，cost evaluate 加速 `1.344×/1.066×/1.102×`；pcb3038 search/wall 加速 `1.186×/1.181×`，d15112 为 `1.021×/1.013×`，rl5915 端到端处于负向噪声。CPU/CUDA 全套、memcheck 和选定三实例的 54 项跨提交精确比较全部通过。
 
+M5 JV—HT 多 epoch 编排绑定 `e74b197`：调度器在工作副本上先达到 JV 固定点，无提交 HT 切片只推进当前 sweep offset，有提交则在新快照重跑 JV 并从 offset 0 重排；各阶段 records 与 HT sidecars 合为一个连续、可独立 CPU 重放的 V2 proof。8 点完整图以 7! 巡回穷举确认 7 条 JV 与 4 条 HT 删除都不属于任何最优巡回。pcb3038 干净提交三轮门禁中，CPU/CUDA 均提交 179 JV + 3 HT，活动边 `6883 -> 6701`、最终哈希 `dce8912b10c3736e`，边文件和规范 proof 完全相同；两份 proof 独立重放且 137,694 最优 tour 为 0 缺边。运行因显式三轮上限返回 `ht-epoch-limit`，不是全图收敛声明。
+
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
 Concorde 随机 20 点 epoch：25 行、43 列；QSopt 与 cuOpt 模型目标均为 `88`。cuOpt primal violation 为 `4.44e-15`，reduced-cost residual 为 `1.57e-14`；完整图 exact lower bound 为 `87.3932819641`，上界为 `88`。
@@ -140,4 +143,4 @@ HT epoch commit：`ht-commit` 可重复接收同一不可变快照上的 recursi
 
 ## 安全边界
 
-`gpu-eliminate` 的自动候选器目前仍只实现 JV；HT 可使用显式 `ht-prove -> ht-commit`，或由 `ht-scan` 在一个不可变快照上扫描有界目标切片并原子提交。后者尚未接入 JV/LP 多 epoch orchestrator，也没有跨目标 GPU 工作图；pcb3038 pilot 不能外推为完整 Local Elimination 加速。`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集；M3.1 仍为 pending。仍严禁从未完整验证的局部结果、过期 HT sidecar 或 cuOpt 浮点 reduced cost 直接构造删除记录。
+`gpu-eliminate` 的自动候选器仍只实现 JV；HT 可使用显式 `ht-prove -> ht-commit`、单快照 `ht-scan`，或由 `local-eliminate` 执行有界 JV—HT 多 epoch 调度。后者尚无跨目标 GPU 工作图，也未接入 LP 删除授权；显式 `ht-epoch-limit` 结果只能视为安全部分消元，不能外推为完整 Local Elimination 固定点或性能加速。`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集；M3.1 仍为 pending。仍严禁从未完整验证的局部结果、过期 HT sidecar 或 cuOpt 浮点 reduced cost 直接构造删除记录。

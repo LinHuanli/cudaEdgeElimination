@@ -121,8 +121,10 @@ CPU cost 输出 workspace 已完成：画像否定跨 k 距离表共享（382 ro
 
 CPU cost 完全相同 task row 去重已完成：端口互异 fast path 因 template-cell 覆盖仅 `2.9%–7.1%` 被否决；精确 task key 则在三实例 CPU-fused 中把 739,641/45,938/41,823 个逻辑 rows 缩为 209,918/21,433/21,577 个物理评分 rows。cursor 以只读索引零展开消费，逻辑认证 cells、proof 和 CUDA 逐 row 完整 CPU 认证均不变。三实例 cost evaluate 加速 `1.344×/1.066×/1.102×`；pcb3038 search/wall 加速 `1.186×/1.181×`，d15112 为 `1.021×/1.013×`，rl5915 端到端处于负向噪声。完整 sanitizer 和选定三实例的 54 项精确比较通过。下一切片先画像去重管理与剩余 scorer 子阶段，不恢复已否决的端口互异分支。
 
-M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
+JV—HT 多 epoch 编排基线已完成：`local-eliminate` 先达到 JV 固定点，再按有界 HT 切片 sweep；无提交时推进 offset，有提交时在新快照重跑 JV 并从 offset 0 重排。子阶段 records/sidecars 连续重编号为一个可独立重放的 V2 proof，异常在图副本上零发布，JV/HT 预算耗尽返回明确的安全部分结果。8 点完整图收敛测试删除 7 条 JV 和 4 条 HT，11 条均由 7! 巡回穷举确认不属于任何最优巡回。pcb3038 三个 8-target epochs 中，CPU/CUDA 均从 6,883 条边提交 182 条、最终 6,701 条，边和规范 proof 完全相同，两份 proof 独立重放且 137,694 最优 tour 为 0 缺边；该有界运行以 `ht-epoch-limit` 结束，不冒充全图收敛。
+
+M5 仍未完成：跨目标 HT 融合、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
 
-当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append、M4.3b3b2b2b1 规范 child edge SoA、M4.3b3b2b2b2a frontier leaf batching、M4.3b3b2b2b2b1 一般 leaf 游标、M4.3b3b2b2b2b2a GPU leaf 驻留缓存、M4.3b3b2b2b2b2b1 CPU long-tail、M4.3b3b2b2b2b2b2 cooperative multi-block continuation、M4.3b3b2b2b2c HT epoch commit，以及 M5 JV 三轮优化和有界全图 HT pilot。M3.1 未完成时必须在状态清单中标为 pending；不得把单切片 pilot 冒充完整多 epoch Local Elimination 性能结论。
+当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append、M4.3b3b2b2b1 规范 child edge SoA、M4.3b3b2b2b2a frontier leaf batching、M4.3b3b2b2b2b1 一般 leaf 游标、M4.3b3b2b2b2b2a GPU leaf 驻留缓存、M4.3b3b2b2b2b2b1 CPU long-tail、M4.3b3b2b2b2b2b2 cooperative multi-block continuation、M4.3b3b2b2c HT epoch commit，以及 M5 JV 三轮优化、有界全图 HT scan 和 JV—HT 多 epoch 调度基线。M3.1 未完成时必须在状态清单中标为 pending；不得把显式 epoch 上限结束的运行冒充完整 Local Elimination 固定点或性能结论。

@@ -19,6 +19,7 @@
 - 主机 BFS 工作图、cooperative multi-block CUDA continuation 传播、跨父状态 Hamilton/end reply count/write、point/end path-append、规范 child edge SoA、增量 k-opt leaf cost block 融合、GPU 驻留缓存与 128-cell CPU long-tail，并由 CPU 完整差分复核；
 - `ht-prove` sidecar 的整批 CPU 重放、不可变快照绑定、规范度数门禁和 `ht-commit` 原子删边；
 - `ht-scan` 的确定性有界目标切片、逐目标 wavefront、CPU 双重复核与 V2 原子提交；
+- `local-eliminate` 的 JV 固定点、HT 无提交 sweep 推进、提交后目标重排，以及单一可重放 V2 证明组合；
 - HT scan V2 阶段计时，以及用 `--leaf-backend` 将 CUDA leaf cost 与 CPU 候选器解耦的混合路径；
 - CPU leaf CLI 默认开启、auto/CUDA 默认关闭且可显式 0/1 覆盖的 `--fuse-leaf-buckets` 调度；
 - HT scan V13 leaf/setup/cost/reply/path/root/point-candidate 子阶段计时及 V16 五路 benchmark summary；
@@ -45,7 +46,7 @@
 - 带锁定来源 SHA-256 和本地精确复核的 pcb3038/rl5915/d15112 最优 tour 获取工具；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 
-尚未完成的研究项（跨目标 HT 融合和多 epoch 调度、M5 后续调优与多 GPU、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。精确困难叶有 18 个 block 的硬上限，超限只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
+尚未完成的研究项（跨目标 HT 融合、活动 edge-id 紧凑 launch、M5 多 GPU、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。精确困难叶有 18 个 block 的硬上限，超限只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
 
 ## 快速开始
 
@@ -126,6 +127,20 @@ build/cpu-release/cudaee verify \
   --tsp tests/data/recursive-point.tsp \
   --edges tests/data/recursive-point.edg \
   --proof artifacts/recursive-point.epoch.proof
+
+# JV 固定点与有界 HT sweep 交替；输出一个可由同一 verify 命令重放的联合证明
+build/cpu-release/cudaee local-eliminate \
+  --tsp tests/data/recursive-point.tsp \
+  --edges tests/data/recursive-point.edg \
+  --output artifacts/recursive-point.local.edg \
+  --proof artifacts/recursive-point.local.proof \
+  --report artifacts/recursive-point.local.report \
+  --backend cpu --max-jv-rounds 100 \
+  --max-ht-epochs 1 --max-targets 1
+build/cpu-release/cudaee verify \
+  --tsp tests/data/recursive-point.tsp \
+  --edges tests/data/recursive-point.edg \
+  --proof artifacts/recursive-point.local.proof
 ```
 
 所有命令会拒绝把输出写到仓库之外。
