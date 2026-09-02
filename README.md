@@ -8,7 +8,7 @@
 - Jonker–Volgenant（JV）快速消元的 CPU 基线与 CUDA 候选生成；
 - JV 跨 epoch 精确静态键、动态 CSR edge-id 刷新与增长型 CUDA 驻留 workspace；
 - epoch 快照、CPU 复核、最小度保护、确定性提交，以及兼容 JV V1 的自包含 HT V2 证明日志；
-- `lp-epoch-v1` CSR 模型、cuOpt C API 动态 sidecar、残差与精确定点下界；
+- `lp-epoch-v1` CSR 模型、cuOpt C API 动态 sidecar、残差与精确定点下界，以及按稳定边/行身份投影且带覆盖率门禁的 PDLP warm start；
 - Concorde 受限 overlay、列—边映射、`CCbigguy` 对偶注入与完整图精确定价证书；
 - 路径系统规范化、`m<=5` CPU 生成/CUDA 查询兼容表与 `m=6,7` CPU 回退；
 - proper 3/4/5-opt CPU 叶 witness、inside coverage 与 `path-kopt-proof-v1` 重放；
@@ -50,6 +50,7 @@
 - TSPLIB 最优 tour 的严格成本、节点置换、活动边完整性与规范哈希门禁；
 - 带锁定来源 SHA-256 和本地精确复核的 pcb3038/rl5915/d15112 最优 tour 获取工具；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
+- TSPLIB 完全图构造、`kh-jq` 锁定 profile、完整 target sweep，以及单 GPU CUDA-JV/作者 KH-HS 固定点端到端复现实验。
 
 尚未完成的研究项（跨 target SoA continuation ready queue、generation cancellation、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。V3 的跨目标 leaf broker 在 d15112 32-target 上保持 `19,498 states/18 proofs`，五对 clean A/B 的单 GPU target execution 相对 CPU 为 `1.009x`，algorithm total 为 `1.001x`，process wall 为 `0.997x`，因此端到端只能判定为持平，`transposed` 继续保持 opt-in。这些结果不是论文 Table 7 的同协议对比，详见 [V3 跨目标 Leaf Broker](docs/research/64_V3_单GPU跨目标LeafBroker.md)。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。CPU 精确困难叶有 18 blocks 上限，CUDA 候选器上限为 13；任何超限或错误只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
 
@@ -95,6 +96,12 @@ tools/run_v3_transposed_single_gpu_ab.sh d15112 2 5
 ./tools/bootstrap_concorde.sh
 ./tools/run_concorde_cuopt_epoch.sh
 ./tools/run_concorde_cuopt_epoch.sh --tamper-model-hash
+
+# cuOpt 冷启动 + 同会话稳定身份 warm start
+./tools/run_cuopt_smoke.sh
+
+# pcb442：完全图 -> 单 GPU JV -> 作者 KH-HS/JV 固定点（自动选择空闲 GPU）
+./tools/run_complete_kh_jq_e2e.sh pcb442
 ```
 
 CLI：

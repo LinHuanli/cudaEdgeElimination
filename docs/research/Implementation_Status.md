@@ -126,6 +126,8 @@ M5 JV—HT 多 epoch 编排绑定 `e74b197`：调度器在工作副本上先达�
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
+cuOpt 连续 epoch warm start：列由规范边端点稳定编号，行由方向/RHS/稳定列系数内容编号；重排按身份映射，重复身份、覆盖不足和未验收解均失败关闭。`CuOptSession` 在 presolve 关闭时调用 26.8.0 的 primal/dual 初值 C API；小 LP 第二轮实测 attempted/applied 均为 1、行列覆盖率均为 1。该路径仍只提供数值候选，不授权删边；完整图迭代负 reduced-cost 补列仍未完成。
+
 Concorde 随机 20 点 epoch：25 行、43 列；QSopt 与 cuOpt 模型目标均为 `88`。cuOpt primal violation 为 `4.44e-15`，reduced-cost residual 为 `1.57e-14`；完整图 exact lower bound 为 `87.3932819641`，上界为 `88`。
 
 pr299 Concorde epoch：454 行、888 列、8561 个非零元；cuOpt 状态 `OPTIMAL`，模型目标 `48187.777777780764`，primal violation `8.37e-11`，reduced-cost residual `4.87e-10`。完整图 exact lower bound 为 `43977.2693797`，合法但较弱；这说明后续需要对偶稳定化/迭代补列，而不是跳过负 reduced-cost penalty。
@@ -171,3 +173,11 @@ HT epoch commit：`ht-commit` 可重复接收同一不可变快照上的 recursi
 ## 安全边界
 
 `gpu-eliminate` 的自动候选器仍只实现 JV；HT 可使用显式 `ht-prove -> ht-commit`、单快照 `ht-scan`，或由 `local-eliminate` 执行有界 JV—HT 多 epoch 调度。目标级静态多 GPU 已可显式启用，reply 的静态设备图和工作区可在各 worker 的 targets 间驻留，同一 batch 的精确重复任务也已折叠；跨 batch/target reply 结果缓存已经画像并因不能消除同步调用而排除，当前仍没有把单个 target 或共享 work graph 拆到多 GPU，也没有 leaf 语义结果缓存或 LP 删除授权。显式 `ht-epoch-limit` 结果只能视为安全部分消元，不能外推为完整 Local Elimination 固定点或性能加速。`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集；M3.1 仍为 pending。仍严禁从未完整验证的局部结果、过期 HT sidecar、cache hit、去重命中或 cuOpt 浮点 reduced cost 直接构造删除记录。
+
+## pcb442 完全图端到端（2026-09-03）
+
+新增 `complete-graph`、`--profile kh-jq`、`--complete-sweep/--target-batch-size`、初始/最终强度门禁，以及隔离构建的作者 KH 工具。`tools/run_complete_kh_jq_e2e.sh` 将作者 `-Jq` 分解为每轮 `CUDA JV -> KH -q/HS -> CUDA JV` 并重复至固定点。
+
+锁定的 pcb442 完全图从 97,461 条边出发。正式调试运行首轮到 12,959 条，略强于作者同实例 12,970 条参考；10 轮固定点到 4,015 条，删除率 95.880403%，最优 tour 50,778 保留。首轮观测时间 96.82 秒，对作者 101.14 秒为 1.045x pilot；尚未达到 1.25x 默认启用门槛。固定点总时间约 102.15 秒，但强度不同，不能作为等强度加速比。
+
+所有 CUDA JV proof 均逐轮独立重放。作者实验 KH-HS 本身是 CPU 精确授权，但不导出可由独立 verifier 重放的 HT tree；V2 manifest 只提供输入/阶段哈希、重算配置、proof 哈希、tour 与固定点门禁，不得标记为 portable-proof。详见 `65_pcb442_完全图固定点端到端.md`。
