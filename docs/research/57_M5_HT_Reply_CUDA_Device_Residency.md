@@ -201,6 +201,8 @@ wall 改善只有 0.450%，不能宣传为大幅端到端加速；保留依据�
 4. 保持线程本地、同步调用基线，不在没有 stream 生命周期协议前跨线程共享 device pointer；
 5. graph miss 继续做完整内容比较，不以地址或短哈希换取命中速度。
 
-下一切片应画像跨 target 的规范 leaf task/reply 结果/work-graph 子结构重复率。只有完整 key
-相等且能保持逐 target 预算、稳定顺序、快照守卫和 proof 字节语义时，才尝试语义结果去重；
-单纯再次扩大 launch 融合边界没有证据。单卡闭环稳定后再进行多 GPU 静态 target 切片。
+后续 [reply 精确任务去重](58_M5_HT_Reply_Task_Deduplication.md) 已先完成 batch-local 切片：
+d15112 的 CUDA reply 提交量从 28,497 降为 418，且保持完整逻辑结果与 proof 不变；报告与
+五路 summary 随之升级为 V16/V19。尚未实现的是跨 batch/target 的语义结果缓存和 work-graph
+子结构共享。只有完整 key 相等且能保持逐 target 预算、稳定顺序、快照守卫和 proof 字节语义
+时，才扩大复用生命周期。单卡闭环稳定后再进行多 GPU 静态 target 切片。

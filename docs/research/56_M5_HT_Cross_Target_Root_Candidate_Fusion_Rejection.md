@@ -4,7 +4,7 @@
 
 当前 HT scan **不采用**跨 target 合并根 `c,d` 候选筛选的方案。d15112 的 8-target、七组交错 clean-commit A/B 中，该原型把 2,400 条 screen tasks 合成一次 CUDA launch，但候选阶段、search、total 和进程 wall 的中位数分别回退 `0.793%`、`0.764%`、`1.268%` 和 `2.514%`。配对差值的中位数也全部为正，不能把结果解释为单次噪声收益。
 
-原型源码已由提交 `cca0b55df3e8a950bd1e0830aa58361547ce1ca7` 完整撤销；当时生产接口和报告格式恢复为 V13/V16。后续 reply CUDA 驻留复用将生产格式推进到 V15/V18，实验性的 `--fuse-target-candidates`、V14 report 和 V17 benchmark 字段仍未保留或复用。路线图中的“跨目标 HT 融合”仍然存在，但范围收窄为 leaf/reply/work-graph 的实质性重复工作共享；根 `c,d` screen 不再作为候选融合边界。
+原型源码已由提交 `cca0b55df3e8a950bd1e0830aa58361547ce1ca7` 完整撤销；当时生产接口和报告格式恢复为 V13/V16。后续 reply CUDA 驻留复用先将生产格式推进到 V15/V18，batch-local reply 精确任务去重再推进到 V16/V19；实验性的 `--fuse-target-candidates`、V14 report 和 V17 benchmark 字段仍未保留或复用。路线图中的“跨目标 HT 融合”仍然存在，但范围收窄为 leaf/reply/work-graph 的实质性重复工作共享；根 `c,d` screen 不再作为候选融合边界。
 
 ## 2. 假设与原型边界
 

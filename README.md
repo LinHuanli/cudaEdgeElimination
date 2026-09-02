@@ -22,7 +22,7 @@
 - `local-eliminate` 的 JV 固定点、HT 无提交 sweep 推进、提交后目标重排，以及单一可重放 V2 证明组合；
 - HT scan V2 阶段计时，以及用 `--leaf-backend` 将 CUDA leaf cost 与 CPU 候选器解耦的混合路径；
 - CPU leaf CLI 默认开启、auto/CUDA 默认关闭且可显式 0/1 覆盖的 `--fuse-leaf-buckets` 调度；
-- HT scan V15 leaf/setup/cost/reply/path/root/point-candidate/cache 子阶段计时及 V18 五路 benchmark summary；
+- HT scan V16 leaf/setup/cost/reply/path/root/point-candidate/cache 子阶段计时及 V19 五路 benchmark summary；
 - point-candidate 严格全序的有界 Top-K 选择，并保留无界分支的完整排序语义；
 - target 级 point-candidate 静态次序缓存与逐 state generation-mark 过滤；
 - 同步 leaf batch 内复用 snapshot binding，同时保持公开 proof verifier 独立哈希；
@@ -41,13 +41,14 @@
 - CPU leaf batch 的完全相同 task row 精确去重、零展开 cursor 映射，以及逻辑/物理 row 分离计数；
 - Hamilton reply 的批内 center 去重、每邻边 quick-filter 缓存与 CPU/CUDA 全数组差分；
 - Hamilton/end reply 跨 batches/targets 的精确 CUDA 图驻留与增长 workspace 复用，以及逐批释放 A/B 开关；
+- Hamilton/end reply 的 batch-local 精确任务去重、完整逻辑 CPU 展开与物理 CUDA 提交量诊断；
 - leaf setup 的 proof/coverage/cursor 画像，以及同一批次只计算一次的不可变快照哈希；
 - 8,192-cell 门槛以上按 task row 静态分片的有界 OpenMP CPU 精确成本矩阵；
 - TSPLIB 最优 tour 的严格成本、节点置换、活动边完整性与规范哈希门禁；
 - 带锁定来源 SHA-256 和本地精确复核的 pcb3038/rl5915/d15112 最优 tour 获取工具；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 
-尚未完成的研究项（跨目标 HT leaf/reply 结果去重与 work-graph 融合、M5 多 GPU、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。reply 的 CUDA 静态图/工作区驻留已经完成；活动 edge-id 紧凑 launch 和跨目标根 `c,d` 候选融合都已在 d15112 上评测并因端到端回退而撤销。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。精确困难叶有 18 个 block 的硬上限，超限只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
+尚未完成的研究项（跨 batch/target 的 HT leaf/reply 语义结果缓存与 work-graph 融合、M5 多 GPU、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。reply 的 CUDA 静态图/工作区驻留和 batch-local 精确任务去重已经完成；活动 edge-id 紧凑 launch 和跨目标根 `c,d` 候选融合都已在 d15112 上评测并因端到端回退而撤销。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。精确困难叶有 18 个 block 的硬上限，超限只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
 
 ## 快速开始
 

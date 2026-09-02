@@ -90,7 +90,7 @@ build/cuda-release/cudaee local-eliminate \
 - stage wall time；
 - 全局 termination、proof record/sidecar 数及 protected-tour 结果。
 
-细粒度 leaf/path/reply 性能画像仍使用单快照 `ht-scan` V15 报告；联合报告只承担调度和哈希链审计，避免复制体积巨大的逐目标 sidecar/attempt 数据。`local-eliminate` 会透传 reply CUDA 驻留开关；同一进程的 graph/增长 workspace 可跨 targets 和 stages 复用，但新 epoch 的完整坐标/CSR 键不相等时必须重新上传。
+细粒度 leaf/path/reply 性能画像仍使用单快照 `ht-scan` V16 报告；联合报告只承担调度和哈希链审计，避免复制体积巨大的逐目标 sidecar/attempt 数据。`local-eliminate` 会透传 reply CUDA 驻留与精确任务去重开关；同一进程的 graph/增长 workspace 可跨 targets 和 stages 复用，但任务结果只在当前 batch 内按完整 key 折叠，新 epoch 的完整坐标/CSR 键不相等时仍必须重新上传。
 
 ## 5. 固定 8 点穷举门禁
 

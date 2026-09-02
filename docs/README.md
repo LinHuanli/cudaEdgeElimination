@@ -63,5 +63,6 @@
 59. [M5 JV 活动 edge-id 紧凑启动排除实验](research/55_M5_JV_Active_Edge_Compact_Launch_Rejection.md)：以 d15112 稳态 A/B 量化空线程节省与紧凑化开销，并撤销端到端回退的原型。
 60. [M5 HT 跨目标根候选融合排除实验](research/56_M5_HT_Cross_Target_Root_Candidate_Fusion_Rejection.md)：以 d15112 七对 clean A/B 量化单次根 `c,d` launch 与逐目标路径，并把后续共享边界收窄到 leaf/reply/work-graph。
 61. [M5 HT reply CUDA 图与工作区驻留复用](research/57_M5_HT_Reply_CUDA_Device_Residency.md)：跨 batches/targets 精确复用坐标、CSR 与增长 workspace，并以 d15112 七对 A/B、proof 和 tour 门禁确认收益。
+62. [M5 HT reply 精确任务去重](research/58_M5_HT_Reply_Task_Deduplication.md)：按首次出现顺序折叠 batch-local Hamilton/end 任务，以完整 CPU 逻辑结果、开关差分和 d15112 七对 A/B 确认收益。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。
