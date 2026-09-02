@@ -41,6 +41,29 @@ private:
   SteadyClock::time_point begin_;
 };
 
+// A/B 基线要求每个 reply batch 都拥有独立的设备分配；首尾同时清理，既隔离调用前状态，
+// 也把最后一批释放成本计入对应 phase，而不是推迟到进程退出。
+class ScopedReplyCudaCacheBaseline {
+public:
+  explicit ScopedReplyCudaCacheBaseline(const bool reuse_cache) : active_(!reuse_cache) {
+    if (active_) {
+      detail::ClearHtReplyCudaCache();
+    }
+  }
+
+  ScopedReplyCudaCacheBaseline(const ScopedReplyCudaCacheBaseline&) = delete;
+  ScopedReplyCudaCacheBaseline& operator=(const ScopedReplyCudaCacheBaseline&) = delete;
+
+  ~ScopedReplyCudaCacheBaseline() {
+    if (active_) {
+      detail::ClearHtReplyCudaCache();
+    }
+  }
+
+private:
+  bool active_;
+};
+
 NodeEdge CanonicalEdge(const std::int32_t first, const std::int32_t second) {
   return first < second ? NodeEdge{first, second} : NodeEdge{second, first};
 }
@@ -238,6 +261,7 @@ struct WaveBuildContext {
   const HtRecursiveOptions* options{};
   PathCompatibilityBackend path_append_backend{PathCompatibilityBackend::kAuto};
   PathCompatibilityBackend hamilton_reply_backend{PathCompatibilityBackend::kAuto};
+  bool reuse_reply_cuda_cache{true};
   std::uint32_t reply_frontier_batch_states{256};
   std::uint32_t leaf_frontier_batch_states{256};
   bool fuse_leaf_buckets{false};
@@ -395,12 +419,28 @@ void RecordHamiltonReplyBatch(WaveBuildContext* const context,
   if (batch.selected_device >= 0) {
     result.hamilton_reply_selected_device = batch.selected_device;
   }
+  if (batch.backend == "cuda") {
+    if (result.reply_cuda_batches == std::numeric_limits<std::uint64_t>::max() ||
+        (batch.cuda_graph_cache_hit &&
+         result.reply_cuda_graph_cache_hits == std::numeric_limits<std::uint64_t>::max()) ||
+        (batch.cuda_workspace_cache_hit &&
+         result.reply_cuda_workspace_cache_hits == std::numeric_limits<std::uint64_t>::max())) {
+      throw std::overflow_error("HT reply CUDA 缓存统计溢出");
+    }
+    ++result.reply_cuda_batches;
+    result.reply_cuda_graph_cache_hits += static_cast<std::uint64_t>(batch.cuda_graph_cache_hit);
+    result.reply_cuda_workspace_cache_hits +=
+        static_cast<std::uint64_t>(batch.cuda_workspace_cache_hit);
+    result.peak_reply_device_cache_bytes =
+        std::max(result.peak_reply_device_cache_bytes, batch.cuda_resident_bytes);
+  }
 }
 
 std::optional<HtHamiltonReplyBatchResult>
 EvaluateHamiltonReplyBatch(WaveBuildContext* const context,
                            const std::vector<std::int32_t>& centers) {
   ScopedPhaseTimer timer(&context->result->hamilton_reply_ms);
+  ScopedReplyCudaCacheBaseline cache_baseline(context->reuse_reply_cuda_cache);
   try {
     if (context->graph_validation_binding == nullptr) {
       throw std::logic_error("HT wavefront 缺少 graph validation binding");
@@ -462,11 +502,27 @@ void RecordEndReplyBatch(WaveBuildContext* const context, const HtEndReplyBatchR
   if (batch.selected_device >= 0) {
     result.end_reply_selected_device = batch.selected_device;
   }
+  if (batch.backend == "cuda") {
+    if (result.reply_cuda_batches == std::numeric_limits<std::uint64_t>::max() ||
+        (batch.cuda_graph_cache_hit &&
+         result.reply_cuda_graph_cache_hits == std::numeric_limits<std::uint64_t>::max()) ||
+        (batch.cuda_workspace_cache_hit &&
+         result.reply_cuda_workspace_cache_hits == std::numeric_limits<std::uint64_t>::max())) {
+      throw std::overflow_error("HT reply CUDA 缓存统计溢出");
+    }
+    ++result.reply_cuda_batches;
+    result.reply_cuda_graph_cache_hits += static_cast<std::uint64_t>(batch.cuda_graph_cache_hit);
+    result.reply_cuda_workspace_cache_hits +=
+        static_cast<std::uint64_t>(batch.cuda_workspace_cache_hit);
+    result.peak_reply_device_cache_bytes =
+        std::max(result.peak_reply_device_cache_bytes, batch.cuda_resident_bytes);
+  }
 }
 
 std::optional<HtEndReplyBatchResult>
 EvaluateEndReplyBatch(WaveBuildContext* const context, const std::vector<HtEndReplyTask>& tasks) {
   ScopedPhaseTimer timer(&context->result->end_reply_ms);
+  ScopedReplyCudaCacheBaseline cache_baseline(context->reuse_reply_cuda_cache);
   try {
     if (context->graph_validation_binding == nullptr) {
       throw std::logic_error("HT wavefront 缺少 graph validation binding");
@@ -1470,6 +1526,7 @@ ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target
                            .options = &options.search_options,
                            .path_append_backend = options.path_append_backend,
                            .hamilton_reply_backend = options.hamilton_reply_backend,
+                           .reuse_reply_cuda_cache = options.reuse_reply_cuda_cache,
                            .reply_frontier_batch_states = options.reply_frontier_batch_states,
                            .leaf_frontier_batch_states = options.leaf_frontier_batch_states,
                            .fuse_leaf_buckets = options.fuse_leaf_buckets,

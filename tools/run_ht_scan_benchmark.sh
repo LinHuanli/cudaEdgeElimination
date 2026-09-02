@@ -25,6 +25,12 @@ export OMP_DYNAMIC=FALSE
 export OMP_PROC_BIND=spread
 export OMP_PLACES=cores
 
+reuse_reply_cuda_cache="${CUDAEE_REUSE_REPLY_CUDA_CACHE:-1}"
+if [[ "${reuse_reply_cuda_cache}" != "0" && "${reuse_reply_cuda_cache}" != "1" ]]; then
+  echo "错误：CUDAEE_REUSE_REPLY_CUDA_CACHE 必须为 0 或 1。" >&2
+  exit 2
+fi
+
 config="${repo_root}/configs/m5_jv_instances.tsv"
 row="$(awk -F '\t' -v name="${instance}" '$1 == name { print; found = 1 } END { if (!found) exit 1 }' "${config}")" || {
   echo "错误：${config} 中没有实例 ${instance}。" >&2
@@ -128,6 +134,7 @@ ht_arguments=(
   --leaf-frontier-batch-states 256
   --cost-batch-size 4096
   --cuda-min-cost-cells 128
+  --reuse-reply-cuda-cache "${reuse_reply_cuda_cache}"
 )
 
 run_scan() {
@@ -596,6 +603,31 @@ if [[ "${cpu_hamilton_reply_batches}" != "${cpu_fused_hamilton_reply_batches}" |
   echo "五路 Hamilton reply 的规范工作计数不一致" >&2
   exit 1
 fi
+cpu_reply_cuda_batches="$(read_field "${run_dir}/cpu.report" reply_cuda_batches)"
+cpu_fused_reply_cuda_batches="$(read_field "${run_dir}/cpu-fused.report" reply_cuda_batches)"
+cuda_reply_cuda_batches="$(read_field "${run_dir}/cuda.report" reply_cuda_batches)"
+hybrid_reply_cuda_batches="$(read_field "${run_dir}/hybrid.report" reply_cuda_batches)"
+fused_reply_cuda_batches="$(read_field "${run_dir}/fused.report" reply_cuda_batches)"
+cuda_reply_graph_cache_hits="$(read_field "${run_dir}/cuda.report" reply_cuda_graph_cache_hits)"
+cuda_reply_workspace_cache_hits="$(read_field "${run_dir}/cuda.report" reply_cuda_workspace_cache_hits)"
+cuda_peak_reply_device_cache_bytes="$(read_field "${run_dir}/cuda.report" peak_reply_device_cache_bytes)"
+if [[ "${cpu_reply_cuda_batches}" != "0" || "${cpu_fused_reply_cuda_batches}" != "0" ||
+      "${hybrid_reply_cuda_batches}" != "0" || "${fused_reply_cuda_batches}" != "0" ||
+      "${cuda_reply_cuda_batches}" == "0" || "${cuda_peak_reply_device_cache_bytes}" == "0" ||
+      "${cuda_reply_workspace_cache_hits}" -gt "${cuda_reply_cuda_batches}" ]]; then
+  echo "HT reply CUDA 驻留缓存计数非法" >&2
+  exit 1
+fi
+if [[ "${reuse_reply_cuda_cache}" == "1" ]]; then
+  if (( cuda_reply_graph_cache_hits + 1 != cuda_reply_cuda_batches )); then
+    echo "HT reply CUDA 驻留图没有保持一批冷启动、后续全命中" >&2
+    exit 1
+  fi
+elif [[ "${cuda_reply_graph_cache_hits}" != "0" ||
+        "${cuda_reply_workspace_cache_hits}" != "0" ]]; then
+  echo "禁用 HT reply CUDA 驻留缓存后仍报告命中" >&2
+  exit 1
+fi
 cpu_end_reply_ms="$(read_field "${run_dir}/cpu.report" end_reply_ms)"
 cpu_fused_end_reply_ms="$(read_field "${run_dir}/cpu-fused.report" end_reply_ms)"
 cuda_end_reply_ms="$(read_field "${run_dir}/cuda.report" end_reply_ms)"
@@ -842,6 +874,7 @@ manifest="${run_dir}/run-manifest-v1"
   echo "leaf_frontier_batch_states 256"
   echo "cost_batch_size 4096"
   echo "cuda_min_cost_cells 128"
+  echo "reuse_reply_cuda_cache ${reuse_reply_cuda_cache}"
   echo "cpu_cost_threads ${cpu_cost_threads}"
   echo "omp_dynamic FALSE"
   echo "omp_proc_bind spread"
@@ -856,7 +889,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V16"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V18"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -1102,6 +1135,11 @@ summary="${run_dir}/summary.txt"
   echo "hamilton_reply_unique_centers ${cpu_hamilton_reply_unique_centers}"
   echo "hamilton_reply_neighbor_pairs_tested ${cpu_hamilton_reply_pairs}"
   echo "hamilton_replies_generated ${cpu_hamilton_replies_generated}"
+  echo "reuse_reply_cuda_cache ${reuse_reply_cuda_cache}"
+  echo "cuda_reply_cuda_batches ${cuda_reply_cuda_batches}"
+  echo "cuda_reply_graph_cache_hits ${cuda_reply_graph_cache_hits}"
+  echo "cuda_reply_workspace_cache_hits ${cuda_reply_workspace_cache_hits}"
+  echo "cuda_peak_reply_device_cache_bytes ${cuda_peak_reply_device_cache_bytes}"
   echo "cpu_end_reply_ms ${cpu_end_reply_ms}"
   echo "cpu_fused_end_reply_ms ${cpu_fused_end_reply_ms}"
   echo "cuda_end_reply_ms ${cuda_end_reply_ms}"

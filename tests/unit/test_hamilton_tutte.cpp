@@ -232,14 +232,32 @@ void TestHamiltonReplyBatch() {
 #ifdef CUDAEE_HAS_CUDA
     std::string reason;
     if (cudaee::detail::HtHamiltonReplyCudaAvailable(&reason)) {
-      const cudaee::HtHamiltonReplyBatchResult gpu = cudaee::EvaluateHtHamiltonReplies(
+      cudaee::detail::ClearHtReplyCudaCache();
+      const cudaee::HtHamiltonReplyBatchResult first_gpu = cudaee::EvaluateHtHamiltonReplies(
           graph, {0, 1}, centers, cudaee::PathCompatibilityBackend::kCuda);
-      Check(gpu.backend == "cuda" && gpu.selected_device >= 0 && gpu.cpu_verified &&
-                gpu.offsets == cpu.offsets && gpu.replies == cpu.replies &&
-                gpu.unique_centers == cpu.unique_centers &&
-                gpu.neighbor_pairs_tested == cpu.neighbor_pairs_tested &&
-                gpu.cuda_evaluate_ms >= 0.0 && gpu.cuda_compare_ms >= 0.0,
+      const cudaee::HtHamiltonReplyBatchResult second_gpu = cudaee::EvaluateHtHamiltonReplies(
+          graph, {0, 1}, centers, cudaee::PathCompatibilityBackend::kCuda);
+      Check(first_gpu.backend == "cuda" && first_gpu.selected_device >= 0 &&
+                first_gpu.cpu_verified && first_gpu.offsets == cpu.offsets &&
+                first_gpu.replies == cpu.replies &&
+                first_gpu.unique_centers == cpu.unique_centers &&
+                first_gpu.neighbor_pairs_tested == cpu.neighbor_pairs_tested &&
+                !first_gpu.cuda_graph_cache_hit && !first_gpu.cuda_workspace_cache_hit &&
+                first_gpu.cuda_resident_bytes > 0U && first_gpu.cuda_evaluate_ms >= 0.0 &&
+                first_gpu.cuda_compare_ms >= 0.0,
             "CUDA Hamilton reply count/write exactly matches the CPU batch");
+      Check(second_gpu.offsets == first_gpu.offsets && second_gpu.replies == first_gpu.replies &&
+                second_gpu.cuda_graph_cache_hit && second_gpu.cuda_workspace_cache_hit &&
+                second_gpu.cuda_resident_bytes == first_gpu.cuda_resident_bytes,
+            "CUDA Hamilton reply reuses an exact graph and sufficient workspace");
+
+      cudaee::GraphSnapshot changed_graph = graph;
+      ++changed_graph.points[2].integer_x;
+      changed_graph.points[2].x = static_cast<double>(changed_graph.points[2].integer_x);
+      const cudaee::HtHamiltonReplyBatchResult changed_gpu = cudaee::EvaluateHtHamiltonReplies(
+          changed_graph, {0, 1}, centers, cudaee::PathCompatibilityBackend::kCuda);
+      Check(!changed_gpu.cuda_graph_cache_hit,
+            "CUDA Hamilton reply refreshes the exact coordinate dependency");
     }
 #else
     const cudaee::HtHamiltonReplyBatchResult fallback = cudaee::EvaluateHtHamiltonReplies(
@@ -316,11 +334,20 @@ void TestEndReplyBatch() {
 #ifdef CUDAEE_HAS_CUDA
   std::string reason;
   if (cudaee::detail::HtEndReplyCudaAvailable(&reason)) {
-    const cudaee::HtEndReplyBatchResult gpu =
+    cudaee::detail::ClearHtReplyCudaCache();
+    const cudaee::HtEndReplyBatchResult first_gpu =
         cudaee::EvaluateHtEndReplies(graph, tasks, cudaee::PathCompatibilityBackend::kCuda);
-    Check(gpu.backend == "cuda" && gpu.selected_device >= 0 && gpu.cpu_verified &&
-              gpu.offsets == cpu.offsets && gpu.replies == cpu.replies,
+    const cudaee::HtEndReplyBatchResult second_gpu =
+        cudaee::EvaluateHtEndReplies(graph, tasks, cudaee::PathCompatibilityBackend::kCuda);
+    Check(first_gpu.backend == "cuda" && first_gpu.selected_device >= 0 && first_gpu.cpu_verified &&
+              first_gpu.offsets == cpu.offsets && first_gpu.replies == cpu.replies &&
+              !first_gpu.cuda_graph_cache_hit && !first_gpu.cuda_workspace_cache_hit &&
+              first_gpu.cuda_resident_bytes > 0U,
           "CUDA end reply count/write exactly matches the CPU batch");
+    Check(second_gpu.offsets == first_gpu.offsets && second_gpu.replies == first_gpu.replies &&
+              second_gpu.cuda_graph_cache_hit && second_gpu.cuda_workspace_cache_hit &&
+              second_gpu.cuda_resident_bytes == first_gpu.cuda_resident_bytes,
+          "CUDA end reply reuses an exact graph and sufficient workspace");
     const cudaee::HtEndReplyBatchResult empty_gpu =
         cudaee::EvaluateHtEndReplies(leaf_graph, {{0, 1}}, cudaee::PathCompatibilityBackend::kCuda);
     Check(empty_gpu.offsets == empty_cpu.offsets && empty_gpu.replies.empty(),
@@ -873,6 +900,12 @@ void TestRecursivePointProof() {
             scan.hamilton_reply_neighbor_pairs_tested ==
                 timed_attempt.hamilton_reply_neighbor_pairs_tested &&
             scan.hamilton_replies_generated == timed_attempt.hamilton_replies_generated &&
+            scan.reply_cuda_batches == timed_attempt.reply_cuda_batches &&
+            scan.reply_cuda_graph_cache_hits == timed_attempt.reply_cuda_graph_cache_hits &&
+            scan.reply_cuda_workspace_cache_hits ==
+                timed_attempt.reply_cuda_workspace_cache_hits &&
+            scan.peak_reply_device_cache_bytes == timed_attempt.peak_reply_device_cache_bytes &&
+            scan.reply_cuda_batches == 0U && scan.peak_reply_device_cache_bytes == 0U &&
             scan.immediate_verify_ms == timed_attempt.immediate_verify_ms &&
             scan.total_ms + 1.0e-6 >= scan.search_ms,
         "HT scan exposes consistent inclusive phase timings");
@@ -1199,6 +1232,7 @@ void TestRecursivePointProof() {
     cuda_wavefront_options.root_options.leaf_options.cost_backend =
         cudaee::PathCompatibilityBackend::kCuda;
     cudaee::detail::ClearKOptCostCudaCache();
+    cudaee::detail::ClearHtReplyCudaCache();
     const cudaee::HtWavefrontResult cuda_wavefront = cudaee::ProveEdgeByWavefrontHt(
         graph, {2, 4},
         {.search_options = cuda_wavefront_options,
@@ -1270,6 +1304,30 @@ void TestRecursivePointProof() {
                       cuda_wavefront.hamilton_reply_cuda_evaluate_ms +
                       cuda_wavefront.hamilton_reply_cuda_compare_ms,
           "CUDA Hamilton replies expose CPU enumeration and full-array comparison timing");
+    Check(cuda_wavefront.reply_cuda_batches ==
+                  cuda_wavefront.hamilton_reply_batches + cuda_wavefront.end_reply_batches &&
+              cuda_wavefront.reply_cuda_batches > 1U &&
+              cuda_wavefront.reply_cuda_graph_cache_hits + 1U ==
+                  cuda_wavefront.reply_cuda_batches &&
+              cuda_wavefront.reply_cuda_workspace_cache_hits <= cuda_wavefront.reply_cuda_batches &&
+              cuda_wavefront.peak_reply_device_cache_bytes > 0U,
+          "CUDA Hamilton/end replies share one exact graph and bounded growth workspace");
+
+    cudaee::detail::ClearHtReplyCudaCache();
+    const cudaee::HtWavefrontResult uncached_reply_wavefront = cudaee::ProveEdgeByWavefrontHt(
+        graph, {2, 4},
+        {.search_options = cuda_wavefront_options,
+         .propagation_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .path_append_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCuda,
+         .reuse_reply_cuda_cache = false});
+    Check(uncached_reply_wavefront.status == cuda_wavefront.status &&
+              cudaee::SerializeHtRecursiveProof(uncached_reply_wavefront.proof) ==
+                  cudaee::SerializeHtRecursiveProof(cuda_wavefront.proof) &&
+              uncached_reply_wavefront.reply_cuda_batches == cuda_wavefront.reply_cuda_batches &&
+              uncached_reply_wavefront.reply_cuda_graph_cache_hits == 0U &&
+              uncached_reply_wavefront.reply_cuda_workspace_cache_hits == 0U,
+          "禁用 reply 驻留缓存只改变调度指标，不改变规范 proof");
     cudaee::HtRecursiveOptions auto_long_tail_options = options;
     auto_long_tail_options.root_options.leaf_options.cost_backend =
         cudaee::PathCompatibilityBackend::kAuto;

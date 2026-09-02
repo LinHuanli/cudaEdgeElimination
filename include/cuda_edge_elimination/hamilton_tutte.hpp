@@ -61,6 +61,9 @@ struct HtHamiltonReplyBatchResult {
   bool cpu_verified{false};
   std::uint64_t unique_centers{};
   std::uint64_t neighbor_pairs_tested{};
+  bool cuda_graph_cache_hit{false};
+  bool cuda_workspace_cache_hit{false};
+  std::uint64_t cuda_resident_bytes{};
   // 同步 wall time 只用于诊断，不进入 proof。
   double validation_ms{};
   double cpu_enumerate_ms{};
@@ -82,6 +85,9 @@ struct HtEndReplyBatchResult {
   std::string backend;
   int selected_device{-1};
   bool cpu_verified{false};
+  bool cuda_graph_cache_hit{false};
+  bool cuda_workspace_cache_hit{false};
+  std::uint64_t cuda_resident_bytes{};
 };
 
 struct HtShallowOptions {
@@ -199,6 +205,8 @@ struct HtWavefrontOptions {
   PathCompatibilityBackend path_append_backend{PathCompatibilityBackend::kAuto};
   // 控制 c,d/point Hamilton 邻边对与 end 活动边的 count/write；CPU 始终完整比较。
   PathCompatibilityBackend hamilton_reply_backend{PathCompatibilityBackend::kAuto};
+  // false 仅用于同一二进制的性能基线；每批前释放 reply CUDA 驻留缓存。
+  bool reuse_reply_cuda_cache{true};
 };
 
 struct HtWavefrontResult {
@@ -259,6 +267,11 @@ struct HtWavefrontResult {
   std::uint64_t hamilton_reply_unique_centers{};
   std::uint64_t hamilton_reply_neighbor_pairs_tested{};
   std::uint64_t hamilton_replies_generated{};
+  // Hamilton/end 共用同一份不可变图和增长型 CUDA workspace。
+  std::uint64_t reply_cuda_batches{};
+  std::uint64_t reply_cuda_graph_cache_hits{};
+  std::uint64_t reply_cuda_workspace_cache_hits{};
+  std::uint64_t peak_reply_device_cache_bytes{};
   std::string end_reply_backend{"none"};
   int end_reply_selected_device{-1};
   bool end_reply_cpu_verified{false};
@@ -484,6 +497,12 @@ struct HtEndReplyDeviceBatch {
   std::vector<NodeEdge> replies;
 };
 
+struct HtReplyCudaCacheUsage {
+  bool graph_hit{false};
+  bool workspace_hit{false};
+  std::uint64_t resident_bytes{};
+};
+
 struct HtWavefrontDeviceResult {
   std::vector<std::uint8_t> status;
   std::uint32_t launched_blocks{};
@@ -499,12 +518,16 @@ ScreenHtCdCandidatesCuda(const GraphSnapshot& graph, NodeEdge target_edge,
 [[nodiscard]] bool HtHamiltonReplyCudaAvailable(std::string* reason);
 [[nodiscard]] HtHamiltonReplyDeviceBatch
 EvaluateHtHamiltonRepliesCuda(const GraphSnapshot& graph, NodeEdge target_edge,
-                              const std::vector<std::int32_t>& centers, int* selected_device);
+                              const std::vector<std::int32_t>& centers, int* selected_device,
+                              HtReplyCudaCacheUsage* cache_usage = nullptr);
 
 [[nodiscard]] bool HtEndReplyCudaAvailable(std::string* reason);
 [[nodiscard]] HtEndReplyDeviceBatch
 EvaluateHtEndRepliesCuda(const GraphSnapshot& graph, const std::vector<HtEndReplyTask>& tasks,
-                         int* selected_device);
+                         int* selected_device, HtReplyCudaCacheUsage* cache_usage = nullptr);
+
+// 释放当前主机线程在所有设备上的 HT reply 驻留缓存；测试隔离和 A/B 基线使用。
+void ClearHtReplyCudaCache();
 
 [[nodiscard]] bool HtWavefrontCudaAvailable(std::string* reason);
 [[nodiscard]] HtWavefrontDeviceResult

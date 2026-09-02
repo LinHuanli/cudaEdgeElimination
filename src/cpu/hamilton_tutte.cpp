@@ -418,10 +418,11 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesImpl(
   }
 
   detail::HtHamiltonReplyDeviceBatch cuda_batch;
+  detail::HtReplyCudaCacheUsage cache_usage;
   const SteadyClock::time_point cuda_begin = SteadyClock::now();
   try {
-    cuda_batch =
-        detail::EvaluateHtHamiltonRepliesCuda(graph, target, centers, &result.selected_device);
+    cuda_batch = detail::EvaluateHtHamiltonRepliesCuda(graph, target, centers,
+                                                       &result.selected_device, &cache_usage);
   } catch (const std::exception&) {
     result.cuda_evaluate_ms = ElapsedMilliseconds(cuda_begin);
     if (backend == PathCompatibilityBackend::kCuda) {
@@ -438,6 +439,9 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesImpl(
   if (!matches) {
     throw std::logic_error("CUDA HT Hamilton replies 与 CPU 完整枚举不一致");
   }
+  result.cuda_graph_cache_hit = cache_usage.graph_hit;
+  result.cuda_workspace_cache_hit = cache_usage.workspace_hit;
+  result.cuda_resident_bytes = cache_usage.resident_bytes;
   result.backend = "cuda";
   return result;
 }
@@ -493,8 +497,10 @@ HtEndReplyBatchResult EvaluateHtEndRepliesImpl(const GraphSnapshot& graph,
   }
 
   detail::HtEndReplyDeviceBatch cuda_batch;
+  detail::HtReplyCudaCacheUsage cache_usage;
   try {
-    cuda_batch = detail::EvaluateHtEndRepliesCuda(graph, tasks, &result.selected_device);
+    cuda_batch =
+        detail::EvaluateHtEndRepliesCuda(graph, tasks, &result.selected_device, &cache_usage);
   } catch (const std::exception&) {
     if (backend == PathCompatibilityBackend::kCuda) {
       throw;
@@ -506,6 +512,9 @@ HtEndReplyBatchResult EvaluateHtEndRepliesImpl(const GraphSnapshot& graph,
   if (cuda_batch.offsets != result.offsets || cuda_batch.replies != result.replies) {
     throw std::logic_error("CUDA HT end replies 与 CPU 完整枚举不一致");
   }
+  result.cuda_graph_cache_hit = cache_usage.graph_hit;
+  result.cuda_workspace_cache_hit = cache_usage.workspace_hit;
+  result.cuda_resident_bytes = cache_usage.resident_bytes;
   result.backend = "cuda";
   return result;
 }

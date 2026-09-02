@@ -6,8 +6,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cudaee::detail {
@@ -21,42 +23,113 @@ void CheckCuda(const cudaError_t status, const char* const operation) {
 
 template <typename T> class DeviceBuffer {
 public:
-  explicit DeviceBuffer(const std::size_t count) : count_(count) {
+  DeviceBuffer() = default;
+
+  DeviceBuffer(const std::size_t count, const int device) : device_(device), count_(count) {
     if (count_ != 0U) {
+      if (count_ > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+        throw std::overflow_error("CUDA HT reply buffer 字节数溢出");
+      }
+      CheckCuda(cudaSetDevice(device_), "cudaSetDevice(HT reply buffer allocate)");
       CheckCuda(cudaMalloc(&data_, sizeof(T) * count_), "cudaMalloc(HT replies)");
     }
   }
 
-  ~DeviceBuffer() {
-    if (data_ != nullptr) {
-      cudaFree(data_);
-    }
-  }
+  ~DeviceBuffer() { Reset(); }
 
   DeviceBuffer(const DeviceBuffer&) = delete;
   DeviceBuffer& operator=(const DeviceBuffer&) = delete;
 
+  DeviceBuffer(DeviceBuffer&& other) noexcept { MoveFrom(&other); }
+
+  DeviceBuffer& operator=(DeviceBuffer&& other) noexcept {
+    if (this != &other) {
+      Reset();
+      MoveFrom(&other);
+    }
+    return *this;
+  }
+
   [[nodiscard]] T* get() { return data_; }
   [[nodiscard]] const T* get() const { return data_; }
+  [[nodiscard]] std::size_t count() const { return count_; }
+  [[nodiscard]] std::uint64_t bytes() const {
+    return static_cast<std::uint64_t>(count_) * sizeof(T);
+  }
 
-  void CopyFromHost(const T* const source) {
-    if (count_ != 0U) {
-      CheckCuda(cudaMemcpy(data_, source, sizeof(T) * count_, cudaMemcpyHostToDevice),
+  void CopyFromHost(const T* const source, const std::size_t count) {
+    if (count > count_) {
+      throw std::logic_error("CUDA HT reply H2D 超出驻留 buffer");
+    }
+    if (count != 0U) {
+      CheckCuda(cudaSetDevice(device_), "cudaSetDevice(HT reply H2D)");
+      CheckCuda(cudaMemcpy(data_, source, sizeof(T) * count, cudaMemcpyHostToDevice),
                 "cudaMemcpy H2D(HT replies)");
     }
   }
 
-  void CopyToHost(T* const destination) const {
-    if (count_ != 0U) {
-      CheckCuda(cudaMemcpy(destination, data_, sizeof(T) * count_, cudaMemcpyDeviceToHost),
+  void CopyToHost(T* const destination, const std::size_t count) const {
+    if (count > count_) {
+      throw std::logic_error("CUDA HT reply D2H 超出驻留 buffer");
+    }
+    if (count != 0U) {
+      CheckCuda(cudaSetDevice(device_), "cudaSetDevice(HT reply D2H)");
+      CheckCuda(cudaMemcpy(destination, data_, sizeof(T) * count, cudaMemcpyDeviceToHost),
                 "cudaMemcpy D2H(HT replies)");
     }
   }
 
 private:
+  void Reset() noexcept {
+    if (data_ != nullptr) {
+      // 析构不能抛异常；owner device 防止释放另一个 CUDA context 的指针。
+      static_cast<void>(cudaSetDevice(device_));
+      static_cast<void>(cudaFree(data_));
+    }
+    data_ = nullptr;
+    device_ = -1;
+    count_ = 0U;
+  }
+
+  void MoveFrom(DeviceBuffer* const other) noexcept {
+    data_ = other->data_;
+    device_ = other->device_;
+    count_ = other->count_;
+    other->data_ = nullptr;
+    other->device_ = -1;
+    other->count_ = 0U;
+  }
+
   T* data_{nullptr};
+  int device_{-1};
   std::size_t count_{};
 };
+
+struct HtReplyDeviceCache {
+  explicit HtReplyDeviceCache(const int selected_device) : device(selected_device) {}
+
+  int device{-1};
+  std::int32_t dimension{};
+  DistanceType distance_type{DistanceType::kEuc2D};
+  std::vector<std::int64_t> host_x;
+  std::vector<std::int64_t> host_y;
+  std::vector<std::int32_t> host_row_offsets;
+  std::vector<std::int32_t> host_neighbors;
+  DeviceBuffer<std::int64_t> device_x;
+  DeviceBuffer<std::int64_t> device_y;
+  DeviceBuffer<std::int32_t> device_row_offsets;
+  DeviceBuffer<std::int32_t> device_neighbors;
+  DeviceBuffer<std::int32_t> device_centers;
+  DeviceBuffer<HtEndReplyTask> device_end_tasks;
+  DeviceBuffer<std::uint64_t> device_counts;
+  DeviceBuffer<std::uint64_t> device_offsets;
+  DeviceBuffer<HtNeighborPair> device_hamilton_replies;
+  DeviceBuffer<NodeEdge> device_end_replies;
+  DeviceBuffer<std::uint32_t> device_error_code;
+};
+
+thread_local std::vector<std::unique_ptr<HtReplyDeviceCache>> g_reply_device_caches;
+thread_local int g_reply_preferred_device = -1;
 
 int SelectDevice(std::string* const reason) {
   int device_count = 0;
@@ -68,6 +141,11 @@ int SelectDevice(std::string* const reason) {
     }
     return -1;
   }
+  if (g_reply_preferred_device >= 0 && g_reply_preferred_device < device_count &&
+      cudaSetDevice(g_reply_preferred_device) == cudaSuccess) {
+    return g_reply_preferred_device;
+  }
+  g_reply_preferred_device = -1;
   int best_device = -1;
   std::size_t best_free_bytes = 0U;
   for (int device = 0; device < device_count; ++device) {
@@ -89,7 +167,148 @@ int SelectDevice(std::string* const reason) {
     return -1;
   }
   CheckCuda(cudaSetDevice(best_device), "cudaSetDevice(HT replies)");
+  g_reply_preferred_device = best_device;
   return best_device;
+}
+
+HtReplyDeviceCache& CacheForDevice(const int device) {
+  const auto iterator = std::find_if(g_reply_device_caches.begin(), g_reply_device_caches.end(),
+                                     [device](const std::unique_ptr<HtReplyDeviceCache>& cache) {
+                                       return cache->device == device;
+                                     });
+  if (iterator != g_reply_device_caches.end()) {
+    return **iterator;
+  }
+  g_reply_device_caches.push_back(std::make_unique<HtReplyDeviceCache>(device));
+  return *g_reply_device_caches.back();
+}
+
+bool GraphMatches(const HtReplyDeviceCache& cache, const GraphSnapshot& graph) {
+  if (cache.dimension != graph.dimension || cache.distance_type != graph.distance_type ||
+      cache.host_x.size() != graph.points.size() || cache.host_y.size() != graph.points.size() ||
+      cache.host_row_offsets != graph.row_offsets || cache.host_neighbors != graph.neighbors) {
+    return false;
+  }
+  // 逐项比较 kernel 的完整输入，避免只凭对象地址或哈希复用过期活动图。
+  for (std::size_t index = 0U; index < graph.points.size(); ++index) {
+    if (cache.host_x[index] != graph.points[index].integer_x ||
+        cache.host_y[index] != graph.points[index].integer_y) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool PrepareGraph(HtReplyDeviceCache* const cache, const GraphSnapshot& graph) {
+  if (GraphMatches(*cache, graph)) {
+    return true;
+  }
+
+  std::vector<std::int64_t> host_x(graph.points.size());
+  std::vector<std::int64_t> host_y(graph.points.size());
+  for (std::size_t index = 0U; index < graph.points.size(); ++index) {
+    host_x[index] = graph.points[index].integer_x;
+    host_y[index] = graph.points[index].integer_y;
+  }
+  std::vector<std::int32_t> host_row_offsets = graph.row_offsets;
+  std::vector<std::int32_t> host_neighbors = graph.neighbors;
+  DeviceBuffer<std::int64_t> device_x(host_x.size(), cache->device);
+  DeviceBuffer<std::int64_t> device_y(host_y.size(), cache->device);
+  DeviceBuffer<std::int32_t> device_row_offsets(host_row_offsets.size(), cache->device);
+  DeviceBuffer<std::int32_t> device_neighbors(host_neighbors.size(), cache->device);
+  device_x.CopyFromHost(host_x.data(), host_x.size());
+  device_y.CopyFromHost(host_y.data(), host_y.size());
+  device_row_offsets.CopyFromHost(host_row_offsets.data(), host_row_offsets.size());
+  device_neighbors.CopyFromHost(host_neighbors.data(), host_neighbors.size());
+
+  cache->device_x = std::move(device_x);
+  cache->device_y = std::move(device_y);
+  cache->device_row_offsets = std::move(device_row_offsets);
+  cache->device_neighbors = std::move(device_neighbors);
+  cache->host_x = std::move(host_x);
+  cache->host_y = std::move(host_y);
+  cache->host_row_offsets = std::move(host_row_offsets);
+  cache->host_neighbors = std::move(host_neighbors);
+  cache->dimension = graph.dimension;
+  cache->distance_type = graph.distance_type;
+  return false;
+}
+
+std::size_t GrowthCapacity(const std::size_t current, const std::size_t required) {
+  if (current >= required) {
+    return current;
+  }
+  if (current == 0U || current > std::numeric_limits<std::size_t>::max() / 2U) {
+    return required;
+  }
+  return std::max(required, current * 2U);
+}
+
+bool PrepareCommonWorkspace(HtReplyDeviceCache* const cache, const std::size_t task_count) {
+  if (task_count == std::numeric_limits<std::size_t>::max()) {
+    throw std::overflow_error("CUDA HT reply offsets 数量溢出");
+  }
+  const bool hit = cache->device_counts.count() >= task_count &&
+                   cache->device_offsets.count() >= task_count + 1U &&
+                   cache->device_error_code.count() >= 1U;
+  if (cache->device_counts.count() < task_count) {
+    cache->device_counts = DeviceBuffer<std::uint64_t>(
+        GrowthCapacity(cache->device_counts.count(), task_count), cache->device);
+  }
+  if (cache->device_offsets.count() < task_count + 1U) {
+    cache->device_offsets = DeviceBuffer<std::uint64_t>(
+        GrowthCapacity(cache->device_offsets.count(), task_count + 1U), cache->device);
+  }
+  if (cache->device_error_code.count() < 1U) {
+    cache->device_error_code = DeviceBuffer<std::uint32_t>(1U, cache->device);
+  }
+  return hit;
+}
+
+bool PrepareHamiltonInput(HtReplyDeviceCache* const cache, const std::size_t center_count) {
+  const bool hit =
+      PrepareCommonWorkspace(cache, center_count) && cache->device_centers.count() >= center_count;
+  if (cache->device_centers.count() < center_count) {
+    cache->device_centers = DeviceBuffer<std::int32_t>(
+        GrowthCapacity(cache->device_centers.count(), center_count), cache->device);
+  }
+  return hit;
+}
+
+bool PrepareEndInput(HtReplyDeviceCache* const cache, const std::size_t task_count) {
+  const bool hit =
+      PrepareCommonWorkspace(cache, task_count) && cache->device_end_tasks.count() >= task_count;
+  if (cache->device_end_tasks.count() < task_count) {
+    cache->device_end_tasks = DeviceBuffer<HtEndReplyTask>(
+        GrowthCapacity(cache->device_end_tasks.count(), task_count), cache->device);
+  }
+  return hit;
+}
+
+bool PrepareHamiltonOutput(HtReplyDeviceCache* const cache, const std::size_t reply_count) {
+  const bool hit = cache->device_hamilton_replies.count() >= reply_count;
+  if (!hit) {
+    cache->device_hamilton_replies = DeviceBuffer<HtNeighborPair>(
+        GrowthCapacity(cache->device_hamilton_replies.count(), reply_count), cache->device);
+  }
+  return hit;
+}
+
+bool PrepareEndOutput(HtReplyDeviceCache* const cache, const std::size_t reply_count) {
+  const bool hit = cache->device_end_replies.count() >= reply_count;
+  if (!hit) {
+    cache->device_end_replies = DeviceBuffer<NodeEdge>(
+        GrowthCapacity(cache->device_end_replies.count(), reply_count), cache->device);
+  }
+  return hit;
+}
+
+std::uint64_t ResidentBytes(const HtReplyDeviceCache& cache) {
+  return cache.device_x.bytes() + cache.device_y.bytes() + cache.device_row_offsets.bytes() +
+         cache.device_neighbors.bytes() + cache.device_centers.bytes() +
+         cache.device_end_tasks.bytes() + cache.device_counts.bytes() +
+         cache.device_offsets.bytes() + cache.device_hamilton_replies.bytes() +
+         cache.device_end_replies.bytes() + cache.device_error_code.bytes();
 }
 
 __device__ std::uint64_t IntegerSqrtFloorDevice(const std::uint64_t value) {
@@ -346,7 +565,11 @@ bool HtHamiltonReplyCudaAvailable(std::string* const reason) { return SelectDevi
 HtHamiltonReplyDeviceBatch EvaluateHtHamiltonRepliesCuda(const GraphSnapshot& graph,
                                                          const NodeEdge target_edge,
                                                          const std::vector<std::int32_t>& centers,
-                                                         int* const selected_device) {
+                                                         int* const selected_device,
+                                                         HtReplyCudaCacheUsage* const cache_usage) {
+  if (cache_usage != nullptr) {
+    *cache_usage = {};
+  }
   ValidateInputs(graph, target_edge, centers);
   std::string reason;
   const int device = SelectDevice(&reason);
@@ -368,31 +591,18 @@ HtHamiltonReplyDeviceBatch EvaluateHtHamiltonRepliesCuda(const GraphSnapshot& gr
     throw std::overflow_error("CUDA HT reply 网格过大");
   }
 
-  std::vector<std::int64_t> host_x(graph.points.size());
-  std::vector<std::int64_t> host_y(graph.points.size());
-  for (std::size_t index = 0; index < graph.points.size(); ++index) {
-    host_x[index] = graph.points[index].integer_x;
-    host_y[index] = graph.points[index].integer_y;
-  }
-  DeviceBuffer<std::int32_t> device_centers(centers.size());
-  DeviceBuffer<std::int32_t> device_row_offsets(graph.row_offsets.size());
-  DeviceBuffer<std::int32_t> device_neighbors(graph.neighbors.size());
-  DeviceBuffer<std::int64_t> device_x(host_x.size());
-  DeviceBuffer<std::int64_t> device_y(host_y.size());
-  DeviceBuffer<std::uint64_t> device_counts(centers.size());
-  device_centers.CopyFromHost(centers.data());
-  device_row_offsets.CopyFromHost(graph.row_offsets.data());
-  device_neighbors.CopyFromHost(graph.neighbors.data());
-  device_x.CopyFromHost(host_x.data());
-  device_y.CopyFromHost(host_y.data());
+  HtReplyDeviceCache& cache = CacheForDevice(device);
+  const bool graph_hit = PrepareGraph(&cache, graph);
+  bool workspace_hit = PrepareHamiltonInput(&cache, centers.size());
+  cache.device_centers.CopyFromHost(centers.data(), centers.size());
 
   CountHtRepliesKernel<<<static_cast<unsigned int>(blocks), static_cast<unsigned int>(kThreads)>>>(
-      target_edge, device_centers.get(), centers.size(), device_row_offsets.get(),
-      device_neighbors.get(), device_x.get(), device_y.get(),
-      static_cast<std::uint8_t>(graph.distance_type), device_counts.get());
+      target_edge, cache.device_centers.get(), centers.size(), cache.device_row_offsets.get(),
+      cache.device_neighbors.get(), cache.device_x.get(), cache.device_y.get(),
+      static_cast<std::uint8_t>(graph.distance_type), cache.device_counts.get());
   CheckCuda(cudaGetLastError(), "CountHtRepliesKernel launch");
   std::vector<std::uint64_t> counts(centers.size());
-  device_counts.CopyToHost(counts.data());
+  cache.device_counts.CopyToHost(counts.data(), counts.size());
   for (std::size_t index = 0; index < counts.size(); ++index) {
     if (counts[index] > std::numeric_limits<std::uint64_t>::max() - result.offsets[index]) {
       throw std::overflow_error("CUDA HT reply 总数溢出");
@@ -405,27 +615,30 @@ HtHamiltonReplyDeviceBatch EvaluateHtHamiltonRepliesCuda(const GraphSnapshot& gr
   const std::size_t reply_count = static_cast<std::size_t>(result.offsets.back());
   result.replies.resize(reply_count);
 
-  DeviceBuffer<std::uint64_t> device_offsets(result.offsets.size());
-  DeviceBuffer<HtNeighborPair> device_replies(reply_count);
-  DeviceBuffer<std::uint32_t> device_error_code(1U);
-  device_offsets.CopyFromHost(result.offsets.data());
-  CheckCuda(cudaMemset(device_error_code.get(), 0, sizeof(std::uint32_t)),
+  workspace_hit = PrepareHamiltonOutput(&cache, reply_count) && workspace_hit;
+  cache.device_offsets.CopyFromHost(result.offsets.data(), result.offsets.size());
+  CheckCuda(cudaMemset(cache.device_error_code.get(), 0, sizeof(std::uint32_t)),
             "cudaMemset(HT reply error_code)");
   WriteHtRepliesKernel<<<static_cast<unsigned int>(blocks), static_cast<unsigned int>(kThreads)>>>(
-      target_edge, device_centers.get(), centers.size(), device_row_offsets.get(),
-      device_neighbors.get(), device_x.get(), device_y.get(),
-      static_cast<std::uint8_t>(graph.distance_type), device_offsets.get(), result.offsets.back(),
-      device_replies.get(), device_error_code.get());
+      target_edge, cache.device_centers.get(), centers.size(), cache.device_row_offsets.get(),
+      cache.device_neighbors.get(), cache.device_x.get(), cache.device_y.get(),
+      static_cast<std::uint8_t>(graph.distance_type), cache.device_offsets.get(),
+      result.offsets.back(), cache.device_hamilton_replies.get(), cache.device_error_code.get());
   CheckCuda(cudaGetLastError(), "WriteHtRepliesKernel launch");
   std::uint32_t error_code = 0U;
-  device_error_code.CopyToHost(&error_code);
+  cache.device_error_code.CopyToHost(&error_code, 1U);
   if (error_code == 1U) {
     throw std::runtime_error("CUDA HT reply 写出越界");
   }
   if (error_code == 2U) {
     throw std::runtime_error("CUDA HT reply count/write 不一致");
   }
-  device_replies.CopyToHost(result.replies.data());
+  cache.device_hamilton_replies.CopyToHost(result.replies.data(), result.replies.size());
+  if (cache_usage != nullptr) {
+    cache_usage->graph_hit = graph_hit;
+    cache_usage->workspace_hit = workspace_hit;
+    cache_usage->resident_bytes = ResidentBytes(cache);
+  }
   return result;
 }
 
@@ -433,7 +646,11 @@ bool HtEndReplyCudaAvailable(std::string* const reason) { return SelectDevice(re
 
 HtEndReplyDeviceBatch EvaluateHtEndRepliesCuda(const GraphSnapshot& graph,
                                                const std::vector<HtEndReplyTask>& tasks,
-                                               int* const selected_device) {
+                                               int* const selected_device,
+                                               HtReplyCudaCacheUsage* const cache_usage) {
+  if (cache_usage != nullptr) {
+    *cache_usage = {};
+  }
   ValidateEndInputs(graph, tasks);
   std::string reason;
   const int device = SelectDevice(&reason);
@@ -455,25 +672,21 @@ HtEndReplyDeviceBatch EvaluateHtEndRepliesCuda(const GraphSnapshot& graph,
     throw std::overflow_error("CUDA HT end reply 网格过大");
   }
 
-  DeviceBuffer<HtEndReplyTask> device_tasks(tasks.size());
-  DeviceBuffer<std::int32_t> device_row_offsets(graph.row_offsets.size());
-  DeviceBuffer<std::int32_t> device_neighbors(graph.neighbors.size());
-  DeviceBuffer<std::uint64_t> device_counts(tasks.size());
-  DeviceBuffer<std::uint32_t> device_error_code(1U);
-  device_tasks.CopyFromHost(tasks.data());
-  device_row_offsets.CopyFromHost(graph.row_offsets.data());
-  device_neighbors.CopyFromHost(graph.neighbors.data());
-  CheckCuda(cudaMemset(device_error_code.get(), 0, sizeof(std::uint32_t)),
+  HtReplyDeviceCache& cache = CacheForDevice(device);
+  const bool graph_hit = PrepareGraph(&cache, graph);
+  bool workspace_hit = PrepareEndInput(&cache, tasks.size());
+  cache.device_end_tasks.CopyFromHost(tasks.data(), tasks.size());
+  CheckCuda(cudaMemset(cache.device_error_code.get(), 0, sizeof(std::uint32_t)),
             "cudaMemset(HT end reply count error_code)");
 
   CountEndRepliesKernel<<<static_cast<unsigned int>(blocks), static_cast<unsigned int>(kThreads)>>>(
-      device_tasks.get(), tasks.size(), device_row_offsets.get(), device_neighbors.get(),
-      device_counts.get(), device_error_code.get());
+      cache.device_end_tasks.get(), tasks.size(), cache.device_row_offsets.get(),
+      cache.device_neighbors.get(), cache.device_counts.get(), cache.device_error_code.get());
   CheckCuda(cudaGetLastError(), "CountEndRepliesKernel launch");
   std::vector<std::uint64_t> counts(tasks.size());
-  device_counts.CopyToHost(counts.data());
+  cache.device_counts.CopyToHost(counts.data(), counts.size());
   std::uint32_t error_code = 0U;
-  device_error_code.CopyToHost(&error_code);
+  cache.device_error_code.CopyToHost(&error_code, 1U);
   if (error_code != 0U) {
     throw std::runtime_error("CUDA HT end reply 未找到路径内部邻点");
   }
@@ -489,16 +702,16 @@ HtEndReplyDeviceBatch EvaluateHtEndRepliesCuda(const GraphSnapshot& graph,
   const std::size_t reply_count = static_cast<std::size_t>(result.offsets.back());
   result.replies.resize(reply_count);
 
-  DeviceBuffer<std::uint64_t> device_offsets(result.offsets.size());
-  DeviceBuffer<NodeEdge> device_replies(reply_count);
-  device_offsets.CopyFromHost(result.offsets.data());
-  CheckCuda(cudaMemset(device_error_code.get(), 0, sizeof(std::uint32_t)),
+  workspace_hit = PrepareEndOutput(&cache, reply_count) && workspace_hit;
+  cache.device_offsets.CopyFromHost(result.offsets.data(), result.offsets.size());
+  CheckCuda(cudaMemset(cache.device_error_code.get(), 0, sizeof(std::uint32_t)),
             "cudaMemset(HT end reply write error_code)");
   WriteEndRepliesKernel<<<static_cast<unsigned int>(blocks), static_cast<unsigned int>(kThreads)>>>(
-      device_tasks.get(), tasks.size(), device_row_offsets.get(), device_neighbors.get(),
-      device_offsets.get(), result.offsets.back(), device_replies.get(), device_error_code.get());
+      cache.device_end_tasks.get(), tasks.size(), cache.device_row_offsets.get(),
+      cache.device_neighbors.get(), cache.device_offsets.get(), result.offsets.back(),
+      cache.device_end_replies.get(), cache.device_error_code.get());
   CheckCuda(cudaGetLastError(), "WriteEndRepliesKernel launch");
-  device_error_code.CopyToHost(&error_code);
+  cache.device_error_code.CopyToHost(&error_code, 1U);
   if (error_code == 2U) {
     throw std::runtime_error("CUDA HT end reply 写出越界");
   }
@@ -508,8 +721,18 @@ HtEndReplyDeviceBatch EvaluateHtEndRepliesCuda(const GraphSnapshot& graph,
   if (error_code != 0U) {
     throw std::runtime_error("CUDA HT end reply 未知设备错误");
   }
-  device_replies.CopyToHost(result.replies.data());
+  cache.device_end_replies.CopyToHost(result.replies.data(), result.replies.size());
+  if (cache_usage != nullptr) {
+    cache_usage->graph_hit = graph_hit;
+    cache_usage->workspace_hit = workspace_hit;
+    cache_usage->resident_bytes = ResidentBytes(cache);
+  }
   return result;
+}
+
+void ClearHtReplyCudaCache() {
+  g_reply_device_caches.clear();
+  g_reply_preferred_device = -1;
 }
 
 } // namespace cudaee::detail

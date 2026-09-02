@@ -50,6 +50,7 @@ void PrintHelp() {
       << "                [--fuse-leaf-buckets 0|1]（CPU leaf 默认 1，其余默认 0）\n"
       << "                [--cost-batch-size N] [--cuda-min-cost-cells N]\n"
       << "                [--path-append-backend auto|cpu|cuda]\n"
+      << "                [--reuse-reply-cuda-cache 0|1]（默认 1）\n"
       << "                [--propagation-backend auto|cpu|cuda] [--propagation-blocks N]\n"
       << "                [--max-depth N] [HT budgets]\n"
       << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
@@ -480,7 +481,8 @@ ParseHtWavefrontOptions(const Arguments& arguments,
           .path_append_backend =
               ParsePathCompatibilityBackend(Optional(arguments, "path-append-backend", "auto")),
           .hamilton_reply_backend =
-              ParsePathCompatibilityBackend(Optional(arguments, "reply-backend", "auto"))};
+              ParsePathCompatibilityBackend(Optional(arguments, "reply-backend", "auto")),
+          .reuse_reply_cuda_cache = ParseBooleanOption(arguments, "reuse-reply-cuda-cache", true)};
 }
 
 cudaee::HtTargetOrder ParseHtTargetOrder(const std::string& value) {
@@ -864,7 +866,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V13\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V15\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
@@ -873,6 +875,8 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "target_end_offset " << scan.target_offset + scan.attempts.size() << '\n';
   output << "max_targets " << options.max_targets << '\n';
   output << "fuse_leaf_buckets " << (options.wavefront_options.fuse_leaf_buckets ? 1 : 0) << '\n';
+  output << "reuse_reply_cuda_cache " << (options.wavefront_options.reuse_reply_cuda_cache ? 1 : 0)
+         << '\n';
   output << "attempted_targets " << scan.attempts.size() << '\n';
   output << "proven_targets " << scan.proven_targets << '\n';
   output << "unresolved_targets " << scan.unresolved_targets << '\n';
@@ -914,6 +918,10 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "hamilton_reply_neighbor_pairs_tested " << scan.hamilton_reply_neighbor_pairs_tested
          << '\n';
   output << "hamilton_replies_generated " << scan.hamilton_replies_generated << '\n';
+  output << "reply_cuda_batches " << scan.reply_cuda_batches << '\n';
+  output << "reply_cuda_graph_cache_hits " << scan.reply_cuda_graph_cache_hits << '\n';
+  output << "reply_cuda_workspace_cache_hits " << scan.reply_cuda_workspace_cache_hits << '\n';
+  output << "peak_reply_device_cache_bytes " << scan.peak_reply_device_cache_bytes << '\n';
   output << "protected_tour_checked " << (protected_tour != nullptr ? 1 : 0) << '\n';
   if (protected_tour != nullptr) {
     output << "protected_tour_cost " << protected_tour->cost << '\n';
@@ -974,7 +982,8 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
             "point_candidate_nodes_selected "
             "hamilton_reply_batches hamilton_reply_centers "
             "hamilton_reply_unique_centers hamilton_reply_neighbor_pairs hamilton_replies "
-            "end_replies candidate_ms work_graph_ms root_child_normalize_ms "
+            "reply_cuda_batches reply_graph_cache_hits reply_workspace_cache_hits "
+            "peak_reply_cache_bytes end_replies candidate_ms work_graph_ms root_child_normalize_ms "
             "point_candidate_scan_ms point_candidate_sort_ms leaf_ms leaf_setup_ms "
             "leaf_proof_initialize_ms leaf_coverage_scan_ms leaf_cursor_construct_ms "
             "leaf_cursor_prepare_ms leaf_cost_evaluate_ms leaf_cost_cpu_certify_ms "
@@ -1017,8 +1026,10 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << ' ' << attempt.point_candidate_nodes_selected << ' ' << attempt.hamilton_reply_batches
            << ' ' << attempt.hamilton_reply_centers << ' ' << attempt.hamilton_reply_unique_centers
            << ' ' << attempt.hamilton_reply_neighbor_pairs_tested << ' '
-           << attempt.hamilton_replies_generated << ' ' << attempt.end_replies_generated << ' '
-           << attempt.candidate_ms << ' ' << attempt.work_graph_ms << ' '
+           << attempt.hamilton_replies_generated << ' ' << attempt.reply_cuda_batches << ' '
+           << attempt.reply_cuda_graph_cache_hits << ' ' << attempt.reply_cuda_workspace_cache_hits
+           << ' ' << attempt.peak_reply_device_cache_bytes << ' ' << attempt.end_replies_generated
+           << ' ' << attempt.candidate_ms << ' ' << attempt.work_graph_ms << ' '
            << attempt.root_child_normalize_ms << ' ' << attempt.point_candidate_scan_ms << ' '
            << attempt.point_candidate_sort_ms << ' ' << attempt.leaf_ms << ' '
            << attempt.leaf_setup_ms << ' ' << attempt.leaf_proof_initialize_ms << ' '
@@ -1171,6 +1182,10 @@ void HtScanCommand(const Arguments& arguments) {
               << " hamilton_reply_validation_ms=" << attempt.hamilton_reply_validation_ms
               << " hamilton_reply_cpu_enumerate_ms=" << attempt.hamilton_reply_cpu_enumerate_ms
               << " hamilton_reply_cuda_evaluate_ms=" << attempt.hamilton_reply_cuda_evaluate_ms
+              << " reply_cuda_batches=" << attempt.reply_cuda_batches
+              << " reply_graph_cache_hits=" << attempt.reply_cuda_graph_cache_hits
+              << " reply_workspace_cache_hits=" << attempt.reply_cuda_workspace_cache_hits
+              << " peak_reply_cache_bytes=" << attempt.peak_reply_device_cache_bytes
               << " propagation_ms=" << attempt.propagation_ms
               << " proof_verify_ms=" << attempt.proof_verify_ms
               << " immediate_verify_ms=" << attempt.immediate_verify_ms
@@ -1182,6 +1197,12 @@ void HtScanCommand(const Arguments& arguments) {
             << " proven=" << scan.proven_targets << " unresolved=" << scan.unresolved_targets
             << " committed=" << scan.elimination.proof.size()
             << " fuse_leaf_buckets=" << (options.wavefront_options.fuse_leaf_buckets ? 1 : 0)
+            << " reuse_reply_cuda_cache="
+            << (options.wavefront_options.reuse_reply_cuda_cache ? 1 : 0)
+            << " reply_cuda_batches=" << scan.reply_cuda_batches
+            << " reply_graph_cache_hits=" << scan.reply_cuda_graph_cache_hits
+            << " reply_workspace_cache_hits=" << scan.reply_cuda_workspace_cache_hits
+            << " peak_reply_cache_bytes=" << scan.peak_reply_device_cache_bytes
             << " search_ms=" << scan.search_ms << " work_graph_ms=" << scan.work_graph_ms
             << " leaf_ms=" << scan.leaf_ms << " hamilton_reply_ms=" << scan.hamilton_reply_ms
             << " propagation_ms=" << scan.propagation_ms << " commit_ms=" << scan.commit_ms

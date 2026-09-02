@@ -12,7 +12,8 @@ bool HtHamiltonReplyCudaAvailable(std::string* const reason) {
 }
 
 HtHamiltonReplyDeviceBatch EvaluateHtHamiltonRepliesCuda(const GraphSnapshot&, const NodeEdge,
-                                                         const std::vector<std::int32_t>&, int*) {
+                                                         const std::vector<std::int32_t>&, int*,
+                                                         HtReplyCudaCacheUsage*) {
   throw std::runtime_error("当前二进制未编译 CUDA HT reply 后端");
 }
 
@@ -24,8 +25,11 @@ bool HtEndReplyCudaAvailable(std::string* const reason) {
 }
 
 HtEndReplyDeviceBatch EvaluateHtEndRepliesCuda(const GraphSnapshot&,
-                                               const std::vector<HtEndReplyTask>&, int*) {
+                                               const std::vector<HtEndReplyTask>&, int*,
+                                               HtReplyCudaCacheUsage*) {
   throw std::runtime_error("当前二进制未编译 CUDA HT end reply 后端");
 }
+
+void ClearHtReplyCudaCache() {}
 
 } // namespace cudaee::detail
