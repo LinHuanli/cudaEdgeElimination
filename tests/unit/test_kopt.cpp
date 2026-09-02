@@ -601,6 +601,17 @@ void TestNoImprovementAndBudget() {
             cudaee::SerializePathSystemKOptProof(cursor_batch.proofs[1]) ==
                 cudaee::SerializePathSystemKOptProof(scalar_cursor),
         "incremental leaf cursors fuse all 3/4/5 deletion blocks without changing proof bytes");
+
+  cudaee::NormalizedPathSystem tampered_paths = seven_node_paths;
+  ++tampered_paths.edge_count;
+  const cudaee::PathSystemKOptProof tampered_scalar = cudaee::ProvePathSystemByKOpt(
+      seven_node_graph, tampered_paths, cudaee::NodeEdge{0, 1}, cursor_options);
+  const cudaee::PathSystemKOptBatchResult tampered_batch = cudaee::ProvePathSystemsByKOpt(
+      seven_node_graph, {tampered_paths}, cudaee::NodeEdge{0, 1}, cursor_options);
+  Check(!tampered_scalar.proven && tampered_batch.proofs.size() == 1U &&
+            cudaee::SerializePathSystemKOptProof(tampered_batch.proofs.front()) ==
+                cudaee::SerializePathSystemKOptProof(tampered_scalar),
+        "sparse batch validation rejects a non-canonical path exactly like the dense scalar path");
 #ifdef CUDAEE_HAS_CUDA
   if (cursor_cuda_available) {
     Check(cursor_batch.cuda_cost_batches == cursor_batch.cost_batches &&

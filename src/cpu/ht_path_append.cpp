@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -41,118 +40,13 @@ struct ParentNodeLocation {
 
 using ParentNodeIndex = std::vector<ParentNodeLocation>;
 
-const ParentNodeLocation* FindParentNode(const ParentNodeIndex& index,
-                                         const std::int32_t node) {
-  const auto found = std::lower_bound(
-      index.begin(), index.end(), node,
-      [](const ParentNodeLocation& location, const std::int32_t value) {
-        return location.node < value;
-      });
+const ParentNodeLocation* FindParentNode(const ParentNodeIndex& index, const std::int32_t node) {
+  const auto found =
+      std::lower_bound(index.begin(), index.end(), node,
+                       [](const ParentNodeLocation& location, const std::int32_t value) {
+                         return location.node < value;
+                       });
   return found != index.end() && found->node == node ? &*found : nullptr;
-}
-
-// HT 每个 child 只含少量实际节点。这里保持 dense 规范化器的全部规则和确定顺序，
-// 但不再按完整 TSP 维度分配邻接表；最终 proof 仍由 dense 实现独立重放。
-NormalizedPathSystem NormalizeSparsePathSystem(const std::vector<Path>& paths,
-                                               const std::int32_t node_count) {
-  if (node_count <= 0) {
-    return InvalidPathSystem("节点数必须为正数");
-  }
-  if (paths.empty()) {
-    return InvalidPathSystem("路径系统不能为空");
-  }
-
-  struct SparseNode {
-    std::vector<std::int32_t> neighbors;
-    bool visited{false};
-  };
-  std::map<std::int32_t, SparseNode> adjacency;
-  std::set<std::pair<std::int32_t, std::int32_t>> edges;
-  for (const Path& path : paths) {
-    if (path.size() < 2U) {
-      return InvalidPathSystem("每条路径至少需要两个节点");
-    }
-    std::set<std::int32_t> seen_in_path;
-    for (const std::int32_t node : path) {
-      if (node < 0 || node >= node_count) {
-        return InvalidPathSystem("路径包含越界节点");
-      }
-      if (!seen_in_path.insert(node).second) {
-        return InvalidPathSystem("单条路径内出现重复节点");
-      }
-    }
-
-    for (std::size_t index = 1U; index < path.size(); ++index) {
-      const std::int32_t raw_u = path[index - 1U];
-      const std::int32_t raw_v = path[index];
-      const std::int32_t u = std::min(raw_u, raw_v);
-      const std::int32_t v = std::max(raw_u, raw_v);
-      if (!edges.emplace(u, v).second) {
-        return InvalidPathSystem("路径系统包含重复边");
-      }
-      SparseNode& u_node = adjacency[raw_u];
-      SparseNode& v_node = adjacency[raw_v];
-      u_node.neighbors.push_back(raw_v);
-      v_node.neighbors.push_back(raw_u);
-      if (u_node.neighbors.size() > 2U || v_node.neighbors.size() > 2U) {
-        return InvalidPathSystem("路径并集存在度数大于 2 的节点");
-      }
-    }
-  }
-
-  NormalizedPathSystem result;
-  result.edge_count = edges.size();
-  for (auto& [start, start_node] : adjacency) {
-    if (start_node.visited || start_node.neighbors.size() != 1U) {
-      continue;
-    }
-
-    Path merged;
-    std::int32_t previous = -1;
-    std::int32_t current = start;
-    while (true) {
-      SparseNode& current_node = adjacency.at(current);
-      if (current_node.visited) {
-        return InvalidPathSystem("路径并集包含回路");
-      }
-      current_node.visited = true;
-      merged.push_back(current);
-
-      std::int32_t next = -1;
-      for (const std::int32_t neighbor : current_node.neighbors) {
-        if (neighbor != previous) {
-          if (next != -1) {
-            return InvalidPathSystem("路径并集不是简单链");
-          }
-          next = neighbor;
-        }
-      }
-      if (next == -1) {
-        break;
-      }
-      previous = current;
-      current = next;
-    }
-    result.paths.push_back(std::move(merged));
-  }
-
-  for (const auto& [node, state] : adjacency) {
-    static_cast<void>(node);
-    if (!state.neighbors.empty() && !state.visited) {
-      return InvalidPathSystem("路径并集包含回路");
-    }
-  }
-
-  std::sort(result.paths.begin(), result.paths.end());
-  std::size_t reconstructed_edges = 0U;
-  for (const Path& path : result.paths) {
-    reconstructed_edges += path.size() - 1U;
-  }
-  if (reconstructed_edges != result.edge_count) {
-    return InvalidPathSystem("规范化路径未能保持边集");
-  }
-  result.valid = true;
-  return result;
 }
 
 std::vector<NodeEdge> BuildCanonicalEdges(const NormalizedPathSystem& paths) {
@@ -219,8 +113,8 @@ void AppendOrientedComponent(Path* const merged, const NormalizedPathSystem& par
   if (!location->endpoint) {
     throw std::logic_error("HT path-append 尝试连接父路径内部节点");
   }
-  const bool forward = node_at_back ? location->offset + 1U == component.size()
-                                    : location->offset == 0U;
+  const bool forward =
+      node_at_back ? location->offset + 1U == component.size() : location->offset == 0U;
   if (forward) {
     merged->insert(merged->end(), component.begin(), component.end());
   } else {
@@ -240,8 +134,7 @@ NormalizedPathSystem AppendToNormalizedPathSystem(const NormalizedPathSystem& pa
       return InvalidPathSystem("路径并集存在度数大于 2 的节点");
     }
   } else {
-    if (resolved.second != nullptr &&
-        LocationsShareEdge(*resolved.first, *resolved.second)) {
+    if (resolved.second != nullptr && LocationsShareEdge(*resolved.first, *resolved.second)) {
       return InvalidPathSystem("路径系统包含重复边");
     }
     if (resolved.second != nullptr && !resolved.second->endpoint) {
@@ -317,7 +210,8 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
   parent_indices.reserve(parents.size());
   const auto parent_prepare_begin = std::chrono::steady_clock::now();
   for (const NormalizedPathSystem& parent : parents) {
-    const NormalizedPathSystem canonical = NormalizeSparsePathSystem(parent.paths, dimension);
+    const NormalizedPathSystem canonical =
+        detail::NormalizeSparsePathSystem(parent.paths, dimension);
     if (!parent.valid || !canonical.valid || !SameCanonicalPathSystem(parent, canonical)) {
       throw std::invalid_argument("HT path-append 父状态不是规范路径系统");
     }
@@ -359,8 +253,7 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
                 return first.node < second.node;
               });
     if (std::adjacent_find(parent_index.begin(), parent_index.end(),
-                           [](const ParentNodeLocation& first,
-                              const ParentNodeLocation& second) {
+                           [](const ParentNodeLocation& first, const ParentNodeLocation& second) {
                              return first.node == second.node;
                            }) != parent_index.end()) {
       throw std::logic_error("HT path-append 规范父状态含重复节点");

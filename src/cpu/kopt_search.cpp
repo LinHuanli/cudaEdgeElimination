@@ -127,6 +127,43 @@ struct TourContext {
   std::vector<std::size_t> selectable_positions;
 };
 
+// batch 生成器只需为同一个 path 对象认证一次；公开 verifier 仍独立走 dense 规范化。
+class KOptPathValidationBinding {
+public:
+  KOptPathValidationBinding(const GraphSnapshot& graph, const NormalizedPathSystem& paths)
+      : graph_(&graph), paths_(&paths) {
+    if (!graph.integer_coordinates || !graph.integer_distance_safe || graph.dimension <= 0 ||
+        graph.points.size() != static_cast<std::size_t>(graph.dimension)) {
+      reason_ = "k-opt 证明只支持平方距离安全的整数坐标图";
+      return;
+    }
+    if (!paths.valid || paths.paths.empty() || paths.paths.size() > kMaxTestablePathCount) {
+      reason_ = "输入不是可测试的规范路径系统";
+      return;
+    }
+    const NormalizedPathSystem checked =
+        detail::NormalizeSparsePathSystem(paths.paths, graph.dimension);
+    if (!checked.valid || checked.paths != paths.paths || checked.edge_count != paths.edge_count) {
+      reason_ = "路径系统未通过独立规范化复核";
+      return;
+    }
+    valid_ = true;
+  }
+
+  [[nodiscard]] bool Matches(const GraphSnapshot& graph, const NormalizedPathSystem& paths) const {
+    return graph_ == &graph && paths_ == &paths;
+  }
+
+  [[nodiscard]] bool valid() const { return valid_; }
+  [[nodiscard]] const std::string& reason() const { return reason_; }
+
+private:
+  const GraphSnapshot* graph_{};
+  const NormalizedPathSystem* paths_{};
+  bool valid_{false};
+  std::string reason_;
+};
+
 bool BuildCycle(const std::int32_t dimension, const std::vector<std::int32_t>& nodes,
                 const EdgeSet& edges, std::vector<std::int32_t>* const tour,
                 std::string* const reason) {
@@ -199,20 +236,31 @@ bool BuildCycle(const std::int32_t dimension, const std::vector<std::int32_t>& n
 
 bool BuildTourContext(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
                       const EndpointMatching& outside, const std::optional<NodeEdge>& required_edge,
-                      TourContext* const context, std::string* const reason) {
-  if (!graph.integer_coordinates || !graph.integer_distance_safe || graph.dimension <= 0 ||
-      graph.points.size() != static_cast<std::size_t>(graph.dimension)) {
-    SetReason(reason, "k-opt 证明只支持平方距离安全的整数坐标图");
-    return false;
-  }
-  if (!paths.valid || paths.paths.empty() || paths.paths.size() > kMaxTestablePathCount) {
-    SetReason(reason, "输入不是可测试的规范路径系统");
-    return false;
-  }
-  const NormalizedPathSystem checked = NormalizePathSystem(paths.paths, graph.dimension);
-  if (!checked.valid || checked.paths != paths.paths || checked.edge_count != paths.edge_count) {
-    SetReason(reason, "路径系统未通过独立规范化复核");
-    return false;
+                      TourContext* const context, std::string* const reason,
+                      const KOptPathValidationBinding* const validation_binding = nullptr) {
+  if (validation_binding != nullptr) {
+    if (!validation_binding->Matches(graph, paths)) {
+      throw std::logic_error("k-opt path validation binding 与输入对象不一致");
+    }
+    if (!validation_binding->valid()) {
+      SetReason(reason, validation_binding->reason());
+      return false;
+    }
+  } else {
+    if (!graph.integer_coordinates || !graph.integer_distance_safe || graph.dimension <= 0 ||
+        graph.points.size() != static_cast<std::size_t>(graph.dimension)) {
+      SetReason(reason, "k-opt 证明只支持平方距离安全的整数坐标图");
+      return false;
+    }
+    if (!paths.valid || paths.paths.empty() || paths.paths.size() > kMaxTestablePathCount) {
+      SetReason(reason, "输入不是可测试的规范路径系统");
+      return false;
+    }
+    const NormalizedPathSystem checked = NormalizePathSystem(paths.paths, graph.dimension);
+    if (!checked.valid || checked.paths != paths.paths || checked.edge_count != paths.edge_count) {
+      SetReason(reason, "路径系统未通过独立规范化复核");
+      return false;
+    }
   }
   const auto path_count = static_cast<std::uint32_t>(paths.paths.size());
   if (!IsPerfectEndpointMatching(outside, path_count)) {
@@ -1656,7 +1704,8 @@ class KOptSearchCursor {
 public:
   KOptSearchCursor(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
                    const EndpointMatching& outside, const std::optional<NodeEdge>& required_edge,
-                   const KOptSearchOptions& options)
+                   const KOptSearchOptions& options,
+                   const KOptPathValidationBinding& validation_binding)
       : graph_(&graph), paths_(&paths), outside_(outside), required_edge_(required_edge),
         options_(options) {
     if (options_.max_k < 3U || options_.max_k > 5U || options_.cost_batch_size == 0U) {
@@ -1671,7 +1720,8 @@ public:
       finished_ = true;
       return;
     }
-    if (!BuildTourContext(graph, paths, outside_, required_edge_, &context_, &result_.reason)) {
+    if (!BuildTourContext(graph, paths, outside_, required_edge_, &context_, &result_.reason,
+                          &validation_binding)) {
       finished_ = true;
     }
   }
@@ -1866,11 +1916,13 @@ private:
 struct BatchedPathProofWork {
   PathSystemKOptProof proof;
   const PathMatchingCatalog* catalog{};
+  std::optional<KOptPathValidationBinding> path_validation;
   std::vector<bool> covered;
   bool finished{false};
 };
 
-BatchedPathProofWork InitializeBatchedPathProof(const NormalizedPathSystem& paths,
+BatchedPathProofWork InitializeBatchedPathProof(const GraphSnapshot& graph,
+                                                const NormalizedPathSystem& paths,
                                                 const std::uint64_t snapshot_hash) {
   BatchedPathProofWork work;
   // 同一 batch 绑定同一不可变快照；主调方只计算一次全图哈希，避免每个 leaf 重扫 CSR。
@@ -1887,6 +1939,7 @@ BatchedPathProofWork InitializeBatchedPathProof(const NormalizedPathSystem& path
   if (work.catalog->table.has_value()) {
     work.proof.compatibility_table_hash = work.catalog->table->generator_hash;
   }
+  work.path_validation.emplace(graph, paths);
   work.covered.assign(work.catalog->outside.size(), false);
   return work;
 }
@@ -2095,7 +2148,7 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
     snapshot_hash = bound_snapshot_hash.has_value() ? *bound_snapshot_hash : graph.ContentHash();
     works.reserve(path_systems.size());
     for (const NormalizedPathSystem& paths : path_systems) {
-      works.push_back(InitializeBatchedPathProof(paths, snapshot_hash));
+      works.push_back(InitializeBatchedPathProof(graph, paths, snapshot_hash));
     }
   }
   const bool can_batch_costs = options.max_k >= 3U && options.max_k <= 5U &&
@@ -2131,10 +2184,13 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
         }
         ActiveSearch search{.path_index = path_index, .source = source, .cursor = std::nullopt};
         if (can_batch_costs) {
+          if (!work.path_validation.has_value()) {
+            throw std::logic_error("path-system k-opt 缺少批内 path validation binding");
+          }
           {
             ScopedPhaseTimer cursor_timer(&result.cursor_construct_ms);
             search.cursor.emplace(graph, path_systems[path_index], work.catalog->outside[source],
-                                  required_edge, options);
+                                  required_edge, options, *work.path_validation);
           }
           if (!AddWithoutOverflow(&result.cursor_searches_started, 1U)) {
             throw std::overflow_error("path-system k-opt cursor 构造计数溢出");

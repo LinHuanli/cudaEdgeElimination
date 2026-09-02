@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -76,6 +77,33 @@ void TestPathNormalization() {
   Check(!cudaee::NormalizePathSystem({{0, 1}, {1, 2}, {2, 0}}, 4).valid, "circuit rejected");
   Check(!cudaee::NormalizePathSystem({{0, 1}, {1, 2}, {1, 3}}, 4).valid, "degree three rejected");
   Check(!cudaee::NormalizePathSystem({{0, 4}}, 4).valid, "out-of-range node rejected");
+
+  std::mt19937 generator(0x5a17c0deU);
+  for (std::uint32_t trial = 0U; trial < 2000U; ++trial) {
+    const std::int32_t node_count = 2 + static_cast<std::int32_t>(generator() % 31U);
+    const std::size_t path_count = 1U + generator() % 8U;
+    std::vector<cudaee::Path> paths;
+    paths.reserve(path_count);
+    for (std::size_t path_index = 0U; path_index < path_count; ++path_index) {
+      const std::size_t path_size = 1U + generator() % 6U;
+      cudaee::Path path;
+      path.reserve(path_size);
+      for (std::size_t node_index = 0U; node_index < path_size; ++node_index) {
+        // 约 1/16 的样例包含边界外节点，用于锁定失败原因顺序。
+        const std::uint32_t draw = static_cast<std::uint32_t>(generator());
+        const std::int32_t node =
+            draw % 16U == 0U ? node_count : static_cast<std::int32_t>(draw % node_count);
+        path.push_back(node);
+      }
+      paths.push_back(std::move(path));
+    }
+    const cudaee::NormalizedPathSystem dense = cudaee::NormalizePathSystem(paths, node_count);
+    const cudaee::NormalizedPathSystem sparse =
+        cudaee::detail::NormalizeSparsePathSystem(paths, node_count);
+    Check(dense.valid == sparse.valid && dense.reason == sparse.reason &&
+              dense.paths == sparse.paths && dense.edge_count == sparse.edge_count,
+          "sparse normalization equals dense oracle");
+  }
 }
 
 void TestMatchingEnumerationAndTables() {

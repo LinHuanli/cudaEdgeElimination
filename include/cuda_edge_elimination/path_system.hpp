@@ -84,6 +84,10 @@ EvaluatePathCompatibility(std::uint32_t path_count,
 
 namespace detail {
 
+// 生成器内部的稀疏规范化快路径；公开 verifier 继续使用上面的 dense 实现独立重放。
+[[nodiscard]] NormalizedPathSystem NormalizeSparsePathSystem(const std::vector<Path>& paths,
+                                                             std::int32_t node_count);
+
 [[nodiscard]] bool PathCompatibilityCudaAvailable(std::string* reason);
 [[nodiscard]] std::vector<std::uint8_t>
 LookupPathCompatibilityCuda(const PathCompatibilityTable& table,

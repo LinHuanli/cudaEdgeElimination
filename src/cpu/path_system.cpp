@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string_view>
@@ -207,6 +208,108 @@ NormalizedPathSystem NormalizePathSystem(const std::vector<Path>& paths,
   std::size_t reconstructed_edges = 0;
   for (const Path& path : result.paths) {
     reconstructed_edges += path.size() - 1;
+  }
+  if (reconstructed_edges != result.edge_count) {
+    return InvalidPathSystem("规范化路径未能保持边集");
+  }
+  result.valid = true;
+  return result;
+}
+
+NormalizedPathSystem detail::NormalizeSparsePathSystem(const std::vector<Path>& paths,
+                                                       const std::int32_t node_count) {
+  if (node_count <= 0) {
+    return InvalidPathSystem("节点数必须为正数");
+  }
+  if (paths.empty()) {
+    return InvalidPathSystem("路径系统不能为空");
+  }
+
+  struct SparseNode {
+    std::vector<std::int32_t> neighbors;
+    bool visited{false};
+  };
+  std::map<std::int32_t, SparseNode> adjacency;
+  std::set<std::pair<std::int32_t, std::int32_t>> edges;
+  for (const Path& path : paths) {
+    if (path.size() < 2U) {
+      return InvalidPathSystem("每条路径至少需要两个节点");
+    }
+    std::set<std::int32_t> seen_in_path;
+    for (const std::int32_t node : path) {
+      if (node < 0 || node >= node_count) {
+        return InvalidPathSystem("路径包含越界节点");
+      }
+      if (!seen_in_path.insert(node).second) {
+        return InvalidPathSystem("单条路径内出现重复节点");
+      }
+    }
+
+    for (std::size_t index = 1U; index < path.size(); ++index) {
+      const std::int32_t raw_u = path[index - 1U];
+      const std::int32_t raw_v = path[index];
+      const std::int32_t u = std::min(raw_u, raw_v);
+      const std::int32_t v = std::max(raw_u, raw_v);
+      if (!edges.emplace(u, v).second) {
+        return InvalidPathSystem("路径系统包含重复边");
+      }
+      SparseNode& u_node = adjacency[raw_u];
+      SparseNode& v_node = adjacency[raw_v];
+      u_node.neighbors.push_back(raw_v);
+      v_node.neighbors.push_back(raw_u);
+      if (u_node.neighbors.size() > 2U || v_node.neighbors.size() > 2U) {
+        return InvalidPathSystem("路径并集存在度数大于 2 的节点");
+      }
+    }
+  }
+
+  NormalizedPathSystem result;
+  result.edge_count = edges.size();
+  for (auto& [start, start_node] : adjacency) {
+    if (start_node.visited || start_node.neighbors.size() != 1U) {
+      continue;
+    }
+
+    Path merged;
+    std::int32_t previous = -1;
+    std::int32_t current = start;
+    while (true) {
+      SparseNode& current_node = adjacency.at(current);
+      if (current_node.visited) {
+        return InvalidPathSystem("路径并集包含回路");
+      }
+      current_node.visited = true;
+      merged.push_back(current);
+
+      std::int32_t next = -1;
+      for (const std::int32_t neighbor : current_node.neighbors) {
+        if (neighbor != previous) {
+          if (next != -1) {
+            return InvalidPathSystem("路径并集不是简单链");
+          }
+          next = neighbor;
+        }
+      }
+      if (next == -1) {
+        break;
+      }
+      previous = current;
+      current = next;
+    }
+    result.paths.push_back(std::move(merged));
+  }
+
+  for (const auto& [node, state] : adjacency) {
+    static_cast<void>(node);
+    if (!state.neighbors.empty() && !state.visited) {
+      return InvalidPathSystem("路径并集包含回路");
+    }
+  }
+
+  std::sort(result.paths.begin(), result.paths.end());
+  std::size_t reconstructed_edges = 0U;
+  for (const Path& path : result.paths) {
+    reconstructed_edges += path.size() - 1U;
   }
   if (reconstructed_edges != result.edge_count) {
     return InvalidPathSystem("规范化路径未能保持边集");
