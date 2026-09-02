@@ -22,8 +22,13 @@ CUDAEE_BENCHMARK_TOUR=artifacts/lkh-tours/pcb3038.opt.tour \
 tools/run_ht_scan_benchmark.sh pcb3038 8
 ```
 
+Hamilton/end reply 的 CUDA 图与增长 workspace 默认跨 batches/targets 驻留。使用
+`CUDAEE_REUSE_REPLY_CUDA_CACHE=0` 可在同一二进制中恢复逐批释放基线；脚本会要求关闭时
+命中为零、开启时除首批外图全部命中，并把配置、batch/hit 数与驻留峰值写入 manifest 和
+summary。
+
 脚本固定记录搜索深度、state/reply/deletion-set 预算；资源耗尽是 `UNRESOLVED`，不是失败或删除授权。五路对照分别是纯 CPU、启用 leaf 复杂度桶融合的 CPU、所有候选器均显式 CUDA、CPU c,d/reply/path/propagation + CUDA leaf cost 的混合路径，以及在混合路径上启用复杂度桶融合；五者必须拥有相同工作签名、最终边集和可独立重放的 proof。脚本显式把 CPU 基线锁定为 `--fuse-leaf-buckets 0`，因此 CPU CLI 默认策略变化不会污染对照。
 
-V12 报告将工作图总时间进一步拆成 leaf、path-append、Hamilton reply 与 end reply，并单列传播、proof 抽取、三层 CPU 重放和最终 commit；它还记录 leaf frontier/bucket/cost batch 数、融合开关、leaf 内部 setup/cursor/cost/consume/apply/verifier、CPU 精确 cost-matrix 认证，以及 Hamilton reply 的 validation/CPU enumerate/CUDA evaluate/compare。path-append 再拆为父状态准备、CPU child 规范化、child 边物化、CUDA 评估和全数组比较；根 `c,d` child 规范化与 point-candidate 的全维扫描/排序也单列次数、规范节点量和 CPU 时间。setup 又细分为 proof 初始化、coverage 扫描和 cursor 构造；这些是包含于上层计时的子项，不能重复相加。`work_graph_ms`、`leaf_ms`、`leaf_setup_ms`、`leaf_cost_evaluate_ms`、`leaf_cursor_consume_ms`、`path_append_ms` 和 `hamilton_reply_ms` 都是包含式总量。V15 summary 要求五路 leaf cursor、cost/consume、root-child、point-candidate 与 Hamilton reply 的规范工作计数完全一致，输出五路 path-append 子阶段、host residual 及扣除已画像 host 子阶段后的 unprofiled residual，并保留 CPU 融合路径相对非融合 CPU 的加速比。正式脚本默认固定 8 个 CPU cost threads、关闭动态线程并按物理 core spread；可用 `CUDAEE_CPU_COST_THREADS=1..8` 做串行或缩放实验。
+V15 报告将工作图总时间进一步拆成 leaf、path-append、Hamilton reply 与 end reply，并单列传播、proof 抽取、三层 CPU 重放和最终 commit；它还记录 leaf frontier/bucket/cost batch 数、融合开关、leaf 内部 setup/cursor/cost/consume/apply/verifier、CPU 精确 cost-matrix 认证，以及 Hamilton reply 的 validation/CPU enumerate/CUDA evaluate/compare。path-append 再拆为父状态准备、CPU child 规范化、child 边物化、CUDA 评估和全数组比较；根 `c,d` child 规范化与 point-candidate 的全维扫描/排序也单列次数、规范节点量和 CPU 时间。setup 又细分为 proof 初始化、coverage 扫描和 cursor 构造；reply cache 另记录 CUDA batches、图/workspace 命中和设备驻留峰值。这些是包含于上层计时的子项，不能重复相加。`work_graph_ms`、`leaf_ms`、`leaf_setup_ms`、`leaf_cost_evaluate_ms`、`leaf_cursor_consume_ms`、`path_append_ms` 和 `hamilton_reply_ms` 都是包含式总量。V18 summary 要求五路 leaf cursor、cost/consume、root-child、point-candidate 与 Hamilton reply 的规范工作计数完全一致，输出五路 path-append 子阶段、host residual、扣除已画像 host 子阶段后的 unprofiled residual 和全 CUDA reply cache 指标，并保留 CPU 融合路径相对非融合 CPU 的加速比。正式脚本默认固定 8 个 CPU cost threads、关闭动态线程并按物理 core spread；可用 `CUDAEE_CPU_COST_THREADS=1..8` 做串行或缩放实验。
 
 `CUDAEE_HT_TARGET_OFFSET` 只选择当前不可变输入上的目标切片；若使用一个已提交的新图开始下一 epoch，必须重新从 offset 0 排序。

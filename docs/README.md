@@ -62,5 +62,6 @@
 58. [M5 JV—HT 多 epoch Local Elimination 编排](research/54_M5_Local_Elimination_Multi_Epoch_Orchestration.md)：JV 固定点、HT 无提交 sweep 推进、提交后重排，以及单一可重放 V2 证明组合。
 59. [M5 JV 活动 edge-id 紧凑启动排除实验](research/55_M5_JV_Active_Edge_Compact_Launch_Rejection.md)：以 d15112 稳态 A/B 量化空线程节省与紧凑化开销，并撤销端到端回退的原型。
 60. [M5 HT 跨目标根候选融合排除实验](research/56_M5_HT_Cross_Target_Root_Candidate_Fusion_Rejection.md)：以 d15112 七对 clean A/B 量化单次根 `c,d` launch 与逐目标路径，并把后续共享边界收窄到 leaf/reply/work-graph。
+61. [M5 HT reply CUDA 图与工作区驻留复用](research/57_M5_HT_Reply_CUDA_Device_Residency.md)：跨 batches/targets 精确复用坐标、CSR 与增长 workspace，并以 d15112 七对 A/B、proof 和 tour 门禁确认收益。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

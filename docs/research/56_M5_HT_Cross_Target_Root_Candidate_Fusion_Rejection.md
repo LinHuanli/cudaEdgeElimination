@@ -4,7 +4,7 @@
 
 当前 HT scan **不采用**跨 target 合并根 `c,d` 候选筛选的方案。d15112 的 8-target、七组交错 clean-commit A/B 中，该原型把 2,400 条 screen tasks 合成一次 CUDA launch，但候选阶段、search、total 和进程 wall 的中位数分别回退 `0.793%`、`0.764%`、`1.268%` 和 `2.514%`。配对差值的中位数也全部为正，不能把结果解释为单次噪声收益。
 
-原型源码已由提交 `cca0b55df3e8a950bd1e0830aa58361547ce1ca7` 完整撤销。生产接口和报告格式恢复为 V13/V16，不保留实验性的 `--fuse-target-candidates`、V14 report 或 V17 benchmark 字段。路线图中的“跨目标 HT 融合”仍然存在，但范围收窄为 leaf/reply/work-graph 的实质性重复工作共享；根 `c,d` screen 不再作为候选融合边界。
+原型源码已由提交 `cca0b55df3e8a950bd1e0830aa58361547ce1ca7` 完整撤销；当时生产接口和报告格式恢复为 V13/V16。后续 reply CUDA 驻留复用将生产格式推进到 V15/V18，实验性的 `--fuse-target-candidates`、V14 report 和 V17 benchmark 字段仍未保留或复用。路线图中的“跨目标 HT 融合”仍然存在，但范围收窄为 leaf/reply/work-graph 的实质性重复工作共享；根 `c,d` screen 不再作为候选融合边界。
 
 ## 2. 假设与原型边界
 
@@ -115,4 +115,4 @@
 4. pcb3038、rl5915、d15112 的 clean-commit 交错 A/B 获得稳定端到端收益；
 5. CPU/CUDA 全量差分、独立 proof 重放、活动边逐字节比较、最优 tour 和 sanitizer 门禁全部通过。
 
-在此之前，跨目标 HT 的下一实验切片应从 leaf/reply 重复度画像开始，而不是恢复本原型。
+后续已先完成不改变语义结果的 [reply CUDA 图与工作区驻留复用](57_M5_HT_Reply_CUDA_Device_Residency.md)；跨目标 HT 的下一实验切片应从 leaf/reply 结果和 work-graph 子结构重复度画像开始，而不是恢复本原型。
