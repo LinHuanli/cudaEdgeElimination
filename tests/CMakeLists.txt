@@ -265,6 +265,65 @@ set_tests_properties(integration.ht_scan_verify PROPERTIES
   DEPENDS integration.ht_scan
   LABELS "integration;hamilton-tutte;scan")
 
+set(LOCAL_ELIMINATION_EDGES "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.local.edg")
+set(LOCAL_ELIMINATION_PROOF "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.local.proof")
+set(LOCAL_ELIMINATION_REPORT "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.local.report")
+add_test(
+  NAME integration.local_elimination
+  COMMAND cudaee local-eliminate
+    --tsp "${HT_RECURSIVE_TSP}"
+    --edges "${HT_RECURSIVE_EDGES}"
+    --output "${LOCAL_ELIMINATION_EDGES}"
+    --proof "${LOCAL_ELIMINATION_PROOF}"
+    --report "${LOCAL_ELIMINATION_REPORT}"
+    --protected-tour "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tour"
+    --expected-cost 395
+    --max-targets 1
+    --max-ht-epochs 1
+    --max-jv-rounds 100
+    --target-order weight-desc
+    --backend cpu
+    --reply-backend cpu
+    --path-append-backend cpu
+    --propagation-backend cpu
+    --max-neighborhood 0
+    --max-cd-candidates 8
+    --max-candidate-degree 0
+    --max-root-replies 1000
+    --max-k 3
+    --max-deletion-sets 1
+    --max-depth 1
+    --max-states 20000
+    --max-total-replies 200000
+    --max-replies-per-move 1000
+    --max-point-candidates 5
+    --max-end-candidates 5)
+set_tests_properties(integration.local_elimination PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "local_status=OK termination=ht-epoch-limit stages=3 committed=8 protected_tour_checked=1"
+  LABELS "integration;hamilton-tutte;local-elimination")
+
+add_test(
+  NAME integration.local_elimination_verify
+  COMMAND cudaee verify
+    --tsp "${HT_RECURSIVE_TSP}"
+    --edges "${HT_RECURSIVE_EDGES}"
+    --proof "${LOCAL_ELIMINATION_PROOF}")
+set_tests_properties(integration.local_elimination_verify PROPERTIES
+  DEPENDS integration.local_elimination
+  LABELS "integration;hamilton-tutte;local-elimination")
+
+add_test(
+  NAME integration.local_elimination_tour
+  COMMAND cudaee tour-check
+    --tsp "${HT_RECURSIVE_TSP}"
+    --edges "${LOCAL_ELIMINATION_EDGES}"
+    --tour "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tour"
+    --expected-cost 395)
+set_tests_properties(integration.local_elimination_tour PROPERTIES
+  DEPENDS integration.local_elimination
+  LABELS "integration;correctness;local-elimination")
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
   add_test(

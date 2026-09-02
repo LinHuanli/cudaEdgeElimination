@@ -927,6 +927,90 @@ void TestRecursivePointProof() {
   Check(past_end_graph.ContentHash() == graph.ContentHash(),
         "past-end HT scan leaves the graph unchanged");
 
+  cudaee::LocalEliminationOptions local_options;
+  local_options.jv_backend = cudaee::Backend::kCpu;
+  local_options.max_jv_rounds = 100U;
+  local_options.max_ht_epochs = 1U;
+  local_options.ht_scan_options = scan_options;
+  local_options.ht_scan_options.target_offset = 0U;
+  cudaee::GraphSnapshot local_graph = graph;
+  const cudaee::LocalEliminationResult local =
+      cudaee::RunLocalElimination(&local_graph, local_options);
+  Check(local.termination == cudaee::LocalEliminationTermination::kHtEpochLimit &&
+            cudaee::ToString(local.termination) == "ht-epoch-limit" && local.stages.size() == 3U &&
+            local.stages[0].kind == cudaee::LocalEliminationStage::kJv &&
+            local.stages[0].committed == 7U && local.stages[0].jv_rounds == 2U &&
+            local.stages[1].kind == cudaee::LocalEliminationStage::kHamiltonTutte &&
+            local.stages[1].target_offset == 0U && local.stages[1].attempted_targets == 1U &&
+            local.stages[1].proven_targets == 1U && local.stages[1].committed == 1U &&
+            local.stages[2].kind == cudaee::LocalEliminationStage::kJv &&
+            local.stages[2].committed == 0U && local.elimination.proof.size() == 8U &&
+            local.elimination.ht_proofs.size() == 1U && local.elimination.epochs.size() == 2U &&
+            local.elimination.proof.front().epoch == 0U &&
+            local.elimination.proof.back().epoch == 1U &&
+            local.elimination.proof.back().certificate_index == 0U &&
+            local_graph.ActiveEdgeCount() == 20U && !local_graph.HasActiveEdge(2, 4),
+        "Local Elimination reaches JV fixed points around a bounded HT commit");
+  cudaee::GraphSnapshot local_replay_graph = graph;
+  const cudaee::EliminationResult local_replay =
+      cudaee::ReplayProof(&local_replay_graph, local.elimination);
+  Check(local_replay.final_hash == local.elimination.final_hash &&
+            local_replay_graph.ContentHash() == local_graph.ContentHash(),
+        "combined JV/HT proof independently replays with contiguous epochs");
+
+  cudaee::LocalEliminationOptions converged_options = local_options;
+  converged_options.max_ht_epochs = 100U;
+  cudaee::GraphSnapshot converged_graph = graph;
+  const cudaee::LocalEliminationResult converged =
+      cudaee::RunLocalElimination(&converged_graph, converged_options);
+  Check(converged.termination == cudaee::LocalEliminationTermination::kConverged &&
+            converged.elimination.proof.size() == 11U &&
+            converged.elimination.ht_proofs.size() == 4U &&
+            converged.elimination.epochs.size() == 5U && converged_graph.ActiveEdgeCount() == 17U,
+        "Local Elimination advances no-commit slices and converges after target reordering");
+  std::uint32_t previous_epoch = 0U;
+  for (std::size_t index = 0U; index < converged.elimination.proof.size(); ++index) {
+    const cudaee::ProofRecord& record = converged.elimination.proof[index];
+    Check(record.epoch == previous_epoch || record.epoch == previous_epoch + 1U,
+          "converged Local Elimination proof epochs remain contiguous");
+    previous_epoch = record.epoch;
+    CheckTargetIsNotOptimal(graph, {record.u, record.v});
+  }
+  cudaee::GraphSnapshot converged_replay_graph = graph;
+  const cudaee::EliminationResult converged_replay =
+      cudaee::ReplayProof(&converged_replay_graph, converged.elimination);
+  Check(converged_replay_graph.ContentHash() == converged_graph.ContentHash(),
+        "multi-epoch converged proof with rebased HT sidecars independently replays");
+
+  cudaee::LocalEliminationOptions jv_limited_options = local_options;
+  jv_limited_options.max_jv_rounds = 1U;
+  cudaee::GraphSnapshot jv_limited_graph = graph;
+  const cudaee::LocalEliminationResult jv_limited =
+      cudaee::RunLocalElimination(&jv_limited_graph, jv_limited_options);
+  Check(jv_limited.termination == cudaee::LocalEliminationTermination::kJvRoundLimit &&
+            jv_limited.stages.size() == 1U && jv_limited.stages.front().committed == 7U &&
+            jv_limited.elimination.ht_proofs.empty() && jv_limited_graph.ActiveEdgeCount() == 21U &&
+            jv_limited_graph.HasActiveEdge(2, 4),
+        "JV budget exhaustion stops before HT and returns a replayable partial result");
+  cudaee::GraphSnapshot jv_limited_replay_graph = graph;
+  const cudaee::EliminationResult jv_limited_replay =
+      cudaee::ReplayProof(&jv_limited_replay_graph, jv_limited.elimination);
+  Check(jv_limited_replay_graph.ContentHash() == jv_limited_graph.ContentHash(),
+        "JV-limited Local Elimination proof independently replays");
+
+  cudaee::LocalEliminationOptions invalid_local_options = local_options;
+  invalid_local_options.ht_scan_options.target_offset = 1U;
+  cudaee::GraphSnapshot invalid_local_graph = graph;
+  CheckThrows(
+      [&] {
+        const auto ignored =
+            cudaee::RunLocalElimination(&invalid_local_graph, invalid_local_options);
+        static_cast<void>(ignored);
+      },
+      "Local Elimination rejects caller-managed target offsets");
+  Check(invalid_local_graph.ContentHash() == graph.ContentHash(),
+        "invalid Local Elimination options leave the graph unchanged");
+
   const cudaee::HtWavefrontResult single_state_batches = cudaee::ProveEdgeByWavefrontHt(
       graph, {2, 4},
       {.search_options = options,

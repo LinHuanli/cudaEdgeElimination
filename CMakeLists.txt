@@ -27,6 +27,7 @@ set(CUDAEE_SOURCES
     src/cpu/hamilton_tutte.cpp
     src/cpu/ht_epoch.cpp
     src/cpu/ht_scan.cpp
+    src/cpu/local_elimination.cpp
     src/cpu/hamilton_tutte_proof.cpp
     src/cpu/hamilton_tutte_recursive.cpp
     src/cpu/hamilton_tutte_wavefront.cpp

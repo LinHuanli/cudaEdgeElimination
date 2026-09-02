@@ -247,6 +247,54 @@ struct HtScanResult {
   std::vector<HtScanAttempt> attempts;
 };
 
+enum class LocalEliminationStage : std::uint8_t {
+  kJv,
+  kHamiltonTutte,
+};
+
+enum class LocalEliminationTermination : std::uint8_t {
+  kConverged,
+  kJvRoundLimit,
+  kHtEpochLimit,
+};
+
+struct LocalEliminationOptions {
+  Backend jv_backend{Backend::kAuto};
+  // 每次 HT 提交后，JV 必须先重新达到固定点；预算耗尽时不进入下一次 HT scan。
+  std::uint32_t max_jv_rounds{100U};
+  // 只计算实际执行的 HT 不可变快照 epoch；0 非法。
+  std::uint32_t max_ht_epochs{100U};
+  // 多 epoch 调度器拥有 offset：调用方必须传 0，提交后重排，无提交时继续当前 sweep。
+  HtScanOptions ht_scan_options{};
+};
+
+struct LocalEliminationStageMetrics {
+  std::uint32_t stage{};
+  LocalEliminationStage kind{LocalEliminationStage::kJv};
+  std::string backend;
+  std::uint64_t initial_hash{};
+  std::uint64_t final_hash{};
+  std::size_t edges_before{};
+  std::size_t edges_after{};
+  std::size_t proposed{};
+  std::size_t verified{};
+  std::size_t rejected{};
+  std::size_t committed{};
+  std::uint32_t jv_rounds{};
+  std::uint64_t eligible_targets{};
+  std::uint64_t target_offset{};
+  std::uint64_t attempted_targets{};
+  std::uint64_t proven_targets{};
+  std::uint64_t unresolved_targets{};
+  double elapsed_ms{};
+};
+
+struct LocalEliminationResult {
+  EliminationResult elimination;
+  std::vector<LocalEliminationStageMetrics> stages;
+  LocalEliminationTermination termination{LocalEliminationTermination::kHtEpochLimit};
+};
+
 [[nodiscard]] std::vector<Candidate> FindJvCandidatesCpu(const GraphSnapshot& graph);
 [[nodiscard]] bool VerifyJvCandidate(const GraphSnapshot& graph, const Candidate& candidate,
                                      std::string* reason);
@@ -267,6 +315,11 @@ EliminationResult RunJvElimination(GraphSnapshot* graph, Backend backend, std::u
 // 在一个不可变快照上顺序搜索有界目标，最后通过 CommitHtProofEpoch 原子发布一次。
 [[nodiscard]] HtScanResult RunHtScanEpoch(GraphSnapshot* graph, const HtScanOptions& options);
 
+// 先把 JV 跑到固定点，再按稳定切片扫描 HT；任一 HT 提交后从新快照重跑 JV 并重排目标。
+// 整个调用在工作副本上完成，异常时调用方图保持不变；返回 proof 可由 ReplayProof 独立重放。
+[[nodiscard]] LocalEliminationResult RunLocalElimination(GraphSnapshot* graph,
+                                                         const LocalEliminationOptions& options);
+
 // 在同一不可变快照上整批复核 HT sidecars，再按规范边序执行一次原子 epoch 提交。
 EliminationResult CommitHtProofEpoch(GraphSnapshot* graph,
                                      const std::vector<HtRecursiveProof>& proofs);
@@ -275,5 +328,8 @@ void WriteProof(const std::filesystem::path& path, const EliminationResult& resu
 [[nodiscard]] EliminationResult ReadProof(const std::filesystem::path& path);
 [[nodiscard]] EliminationResult ReplayProof(GraphSnapshot* graph,
                                             const EliminationResult& expected);
+
+[[nodiscard]] std::string ToString(LocalEliminationStage stage);
+[[nodiscard]] std::string ToString(LocalEliminationTermination termination);
 
 } // namespace cudaee

@@ -57,6 +57,10 @@ void PrintHelp() {
       << "                --max-targets N [--target-offset N]\n"
       << "                [--target-order weight-desc|canonical]\n"
       << "                [--protected-tour FILE --expected-cost COST] [HT wavefront options]\n"
+      << "  local-eliminate --tsp FILE --edges FILE --output FILE --proof FILE --report FILE\n"
+      << "                --max-targets N [--max-ht-epochs N] [--max-jv-rounds N]\n"
+      << "                [--target-order weight-desc|canonical] [--backend auto|cpu|cuda]\n"
+      << "                [--protected-tour FILE --expected-cost COST] [HT wavefront options]\n"
       << "  pipeline      与 gpu-eliminate 相同，可附加 --lp-epoch FILE\n"
       << "                --lp-solution FILE [--cuopt-library FILE]\n\n"
       << "所有输出必须位于源码仓库内；不支持或验证失败时不会删除边。\n";
@@ -1041,6 +1045,51 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   }
 }
 
+void WriteLocalEliminationReport(const std::filesystem::path& path,
+                                 const cudaee::LocalEliminationResult& local,
+                                 const cudaee::LocalEliminationOptions& options,
+                                 const cudaee::ProtectedTourCheck* const protected_tour) {
+  std::ofstream output(path);
+  if (!output) {
+    throw std::runtime_error("无法创建 Local Elimination 报告: " + path.string());
+  }
+  output << "CUDAEE_LOCAL_ELIMINATION_REPORT_V1\n";
+  output << "initial_hash " << cudaee::HexHash(local.elimination.initial_hash) << '\n';
+  output << "final_hash " << cudaee::HexHash(local.elimination.final_hash) << '\n';
+  output << "termination " << cudaee::ToString(local.termination) << '\n';
+  output << "converged "
+         << (local.termination == cudaee::LocalEliminationTermination::kConverged ? 1 : 0) << '\n';
+  output << "max_jv_rounds " << options.max_jv_rounds << '\n';
+  output << "max_ht_epochs " << options.max_ht_epochs << '\n';
+  output << "max_targets_per_ht_epoch " << options.ht_scan_options.max_targets << '\n';
+  output << "target_order " << HtTargetOrderName(options.ht_scan_options.target_order) << '\n';
+  output << "proof_records " << local.elimination.proof.size() << '\n';
+  output << "ht_sidecars " << local.elimination.ht_proofs.size() << '\n';
+  output << "stage_count " << local.stages.size() << '\n';
+  output << "protected_tour_checked " << (protected_tour != nullptr ? 1 : 0) << '\n';
+  if (protected_tour != nullptr) {
+    output << "protected_tour_cost " << protected_tour->cost << '\n';
+    output << "protected_tour_hash " << cudaee::HexHash(protected_tour->tour_hash) << '\n';
+  }
+  output << "stage_fields index kind backend initial_hash final_hash edges_before edges_after "
+            "proposed verified rejected committed jv_rounds eligible_targets target_offset "
+            "attempted_targets proven_targets unresolved_targets elapsed_ms\n";
+  output << std::fixed << std::setprecision(6);
+  for (const cudaee::LocalEliminationStageMetrics& stage : local.stages) {
+    output << "stage " << stage.stage << ' ' << cudaee::ToString(stage.kind) << ' ' << stage.backend
+           << ' ' << cudaee::HexHash(stage.initial_hash) << ' ' << cudaee::HexHash(stage.final_hash)
+           << ' ' << stage.edges_before << ' ' << stage.edges_after << ' ' << stage.proposed << ' '
+           << stage.verified << ' ' << stage.rejected << ' ' << stage.committed << ' '
+           << stage.jv_rounds << ' ' << stage.eligible_targets << ' ' << stage.target_offset << ' '
+           << stage.attempted_targets << ' ' << stage.proven_targets << ' '
+           << stage.unresolved_targets << ' ' << stage.elapsed_ms << '\n';
+  }
+  output << "END\n";
+  if (!output) {
+    throw std::runtime_error("写入 Local Elimination 报告失败: " + path.string());
+  }
+}
+
 void HtScanCommand(const Arguments& arguments) {
   const std::filesystem::path output_path = CheckedOutputPath(Required(arguments, "output"));
   const std::filesystem::path proof_path = CheckedOutputPath(Required(arguments, "proof"));
@@ -1141,6 +1190,89 @@ void HtScanCommand(const Arguments& arguments) {
   PrintEliminationSummary(graph, scan.elimination);
 }
 
+void LocalEliminationCommand(const Arguments& arguments) {
+  const std::filesystem::path output_path = CheckedOutputPath(Required(arguments, "output"));
+  const std::filesystem::path proof_path = CheckedOutputPath(Required(arguments, "proof"));
+  const std::filesystem::path report_path = CheckedOutputPath(Required(arguments, "report"));
+  cudaee::GraphSnapshot graph =
+      cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
+
+  if (arguments.contains("target-offset")) {
+    throw std::invalid_argument("local-eliminate 在每次提交后自动重排，不接受 --target-offset");
+  }
+  if (arguments.contains("scheduler") && Optional(arguments, "scheduler") != "wavefront") {
+    throw std::invalid_argument("local-eliminate 只支持 wavefront HT scheduler");
+  }
+  cudaee::LocalEliminationOptions options;
+  options.jv_backend = ParseBackend(Optional(arguments, "backend", "auto"));
+  options.max_jv_rounds =
+      OptionalInteger<std::uint32_t>(arguments, "max-jv-rounds", options.max_jv_rounds);
+  options.max_ht_epochs =
+      OptionalInteger<std::uint32_t>(arguments, "max-ht-epochs", options.max_ht_epochs);
+  options.ht_scan_options.wavefront_options =
+      ParseHtWavefrontOptions(arguments, ParseHtRecursiveOptions(arguments));
+  options.ht_scan_options.max_targets = RequiredInteger<std::uint64_t>(arguments, "max-targets");
+  options.ht_scan_options.target_order =
+      ParseHtTargetOrder(Optional(arguments, "target-order", "weight-desc"));
+
+  const std::string protected_tour_path = Optional(arguments, "protected-tour");
+  const bool has_protected_tour = !protected_tour_path.empty();
+  const bool has_expected_cost = arguments.contains("expected-cost");
+  if (has_protected_tour != has_expected_cost) {
+    throw std::invalid_argument(
+        "local-eliminate 的 --protected-tour 与 --expected-cost 必须同时提供");
+  }
+  std::vector<std::int32_t> protected_tour_nodes;
+  cudaee::ProtectedTourCheck protected_tour_check;
+  const cudaee::ProtectedTourCheck* protected_tour_report = nullptr;
+  std::int64_t protected_tour_cost = -1;
+  if (has_protected_tour) {
+    protected_tour_cost = RequiredInteger<std::int64_t>(arguments, "expected-cost");
+    if (protected_tour_cost < 0) {
+      throw std::invalid_argument("local-eliminate 的 --expected-cost 不得为负数");
+    }
+    protected_tour_nodes = cudaee::ReadTsplibTour(protected_tour_path, graph.dimension);
+    protected_tour_check = cudaee::CheckProtectedTour(graph, protected_tour_nodes);
+    if (protected_tour_check.cost != protected_tour_cost ||
+        protected_tour_check.missing_edges != 0U) {
+      throw std::runtime_error("Local Elimination 初始图未通过受保护 tour 门禁");
+    }
+    protected_tour_report = &protected_tour_check;
+  }
+
+  const cudaee::LocalEliminationResult local = cudaee::RunLocalElimination(&graph, options);
+  if (!protected_tour_nodes.empty()) {
+    const cudaee::ProtectedTourCheck final_check =
+        cudaee::CheckProtectedTour(graph, protected_tour_nodes);
+    if (final_check.cost != protected_tour_cost || final_check.missing_edges != 0U ||
+        final_check.tour_hash != protected_tour_check.tour_hash) {
+      throw std::runtime_error("Local Elimination 最终图未通过受保护 tour 门禁；未写出结果");
+    }
+  }
+
+  graph.WriteActiveEdges(output_path);
+  cudaee::WriteProof(proof_path, local.elimination);
+  WriteLocalEliminationReport(report_path, local, options, protected_tour_report);
+  const std::string manifest = Optional(arguments, "manifest");
+  if (!manifest.empty()) {
+    WriteManifest(CheckedOutputPath(manifest), graph, local.elimination, arguments);
+  }
+  for (const cudaee::LocalEliminationStageMetrics& stage : local.stages) {
+    std::cout << "local_stage=" << stage.stage << " kind=" << cudaee::ToString(stage.kind)
+              << " backend=" << stage.backend << " edges_before=" << stage.edges_before
+              << " edges_after=" << stage.edges_after << " committed=" << stage.committed
+              << " jv_rounds=" << stage.jv_rounds << " eligible=" << stage.eligible_targets
+              << " target_offset=" << stage.target_offset
+              << " attempted=" << stage.attempted_targets << " proven=" << stage.proven_targets
+              << " unresolved=" << stage.unresolved_targets << " elapsed_ms=" << std::fixed
+              << std::setprecision(3) << stage.elapsed_ms << '\n';
+  }
+  std::cout << "local_status=OK termination=" << cudaee::ToString(local.termination)
+            << " stages=" << local.stages.size() << " committed=" << local.elimination.proof.size()
+            << " protected_tour_checked=" << (protected_tour_report != nullptr ? 1 : 0) << '\n';
+  PrintEliminationSummary(graph, local.elimination);
+}
+
 void HtVerifyCommand(const Arguments& arguments) {
   const cudaee::GraphSnapshot graph =
       cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
@@ -1183,6 +1315,8 @@ int main(const int argc, char** argv) {
       }
     } else if (command == "ht-scan") {
       HtScanCommand(arguments);
+    } else if (command == "local-eliminate") {
+      LocalEliminationCommand(arguments);
     } else if (command == "ht-verify") {
       HtVerifyCommand(arguments);
     } else if (command == "pipeline") {
