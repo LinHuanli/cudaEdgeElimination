@@ -197,6 +197,10 @@ void TestHamiltonReplyBatch() {
     const cudaee::HtCdBatchResult bound_candidates =
         cudaee::detail::EvaluateHtCdCandidatesBoundToValidatedGraph(graph, {0, 1},
                                                                     candidate_options, binding);
+    const std::vector<cudaee::NodeEdge> candidate_targets = {{0, 1}, {0, 2}, {1, 2}};
+    const cudaee::HtCdTargetBatchResult target_candidates =
+        cudaee::detail::EvaluateHtCdCandidatesForTargetsBoundToValidatedGraph(
+            graph, candidate_targets, candidate_options, binding);
     Check(cpu.backend == "cpu" && cpu.cpu_verified && cpu.offsets.size() == centers.size() + 1U &&
               cpu.offsets.front() == 0U && cpu.offsets.back() == cpu.replies.size() &&
               cpu.unique_centers == 10U && cpu.neighbor_pairs_tested == 550U &&
@@ -210,9 +214,48 @@ void TestHamiltonReplyBatch() {
           "validated graph binding preserves every Hamilton reply result");
     Check(bound_candidates.backend == public_candidates.backend &&
               bound_candidates.cpu_verified == public_candidates.cpu_verified &&
-              bound_candidates.candidates == public_candidates.candidates,
+              bound_candidates.candidates == public_candidates.candidates &&
+              bound_candidates.screen_tasks == public_candidates.screen_tasks,
           "validated graph binding preserves every c,d candidate result");
+    std::uint64_t expected_screen_tasks = 0U;
+    Check(target_candidates.backend == "cpu" && target_candidates.cpu_verified &&
+              target_candidates.targets.size() == candidate_targets.size(),
+          "CPU cross-target c,d batch metadata is complete");
+    for (std::size_t target_index = 0U; target_index < candidate_targets.size(); ++target_index) {
+      const cudaee::HtCdBatchResult expected =
+          cudaee::EvaluateHtCdCandidates(graph, candidate_targets[target_index], candidate_options);
+      const cudaee::HtPreparedCdCandidates& prepared = target_candidates.targets[target_index];
+      Check(prepared.graph_identity == &graph &&
+                prepared.target_edge == candidate_targets[target_index] &&
+                prepared.batch.candidates == expected.candidates && prepared.batch.cpu_verified &&
+                prepared.batch.screen_tasks == expected.screen_tasks,
+            "CPU cross-target c,d slices preserve per-target canonical candidates");
+      expected_screen_tasks += expected.screen_tasks;
+    }
+    Check(target_candidates.screen_tasks == expected_screen_tasks,
+          "CPU cross-target c,d batch accounts for every screen task");
+    cudaee::HtWavefrontOptions prepared_wavefront_options;
+    prepared_wavefront_options.search_options.root_options = candidate_options;
+    const cudaee::detail::KOptSnapshotBinding snapshot_binding(graph);
+    cudaee::HtPreparedCdCandidates mismatched_prepared = target_candidates.targets.front();
+    ++mismatched_prepared.max_neighborhood;
+    const cudaee::HtWavefrontResult mismatched_prepared_result =
+        cudaee::detail::ProveEdgeByWavefrontHtWithPreparedCdCandidates(
+            graph, candidate_targets.front(), prepared_wavefront_options, snapshot_binding, binding,
+            mismatched_prepared);
+    Check(mismatched_prepared_result.status == cudaee::HtSearchStatus::kInvalid &&
+              mismatched_prepared_result.proof.reason.find("绑定") != std::string::npos,
+          "wavefront rejects prepared c,d candidates from another option range");
     const cudaee::GraphSnapshot graph_copy = graph;
+    const cudaee::detail::KOptSnapshotBinding copy_snapshot_binding(graph_copy);
+    const cudaee::detail::HtGraphValidationBinding copy_graph_binding(graph_copy);
+    const cudaee::HtWavefrontResult wrong_graph_prepared =
+        cudaee::detail::ProveEdgeByWavefrontHtWithPreparedCdCandidates(
+            graph_copy, candidate_targets.front(), prepared_wavefront_options,
+            copy_snapshot_binding, copy_graph_binding, target_candidates.targets.front());
+    Check(wrong_graph_prepared.status == cudaee::HtSearchStatus::kInvalid &&
+              wrong_graph_prepared.proof.reason.find("绑定") != std::string::npos,
+          "wavefront rejects prepared c,d candidates from an equal graph copy");
     CheckThrows(
         [&] {
           const auto ignored = cudaee::detail::EvaluateHtHamiltonRepliesBoundToValidatedGraph(
@@ -220,6 +263,14 @@ void TestHamiltonReplyBatch() {
           static_cast<void>(ignored);
         },
         "Hamilton reply binding rejects an equal graph copy");
+    CheckThrows(
+        [&] {
+          const auto ignored =
+              cudaee::detail::EvaluateHtCdCandidatesForTargetsBoundToValidatedGraph(
+                  graph_copy, candidate_targets, candidate_options, binding);
+          static_cast<void>(ignored);
+        },
+        "cross-target c,d binding rejects an equal graph copy");
     for (std::size_t index = 0; index < centers.size(); ++index) {
       const std::vector<cudaee::HtNeighborPair> expected =
           ReferenceReplies(graph, {0, 1}, centers[index]);
@@ -391,10 +442,31 @@ void TestCdCandidatesCpuCuda() {
     gpu_options.candidate_backend = cudaee::PathCompatibilityBackend::kCuda;
     const cudaee::HtCdBatchResult cpu = cudaee::EvaluateHtCdCandidates(graph, {0, 1}, cpu_options);
     const cudaee::HtCdBatchResult gpu = cudaee::EvaluateHtCdCandidates(graph, {0, 1}, gpu_options);
+    const std::vector<cudaee::NodeEdge> targets = {{0, 1}, {0, 5}, {1, 6}};
+    const cudaee::detail::HtGraphValidationBinding binding(graph);
+    const cudaee::HtCdTargetBatchResult cpu_batch =
+        cudaee::detail::EvaluateHtCdCandidatesForTargetsBoundToValidatedGraph(graph, targets,
+                                                                              cpu_options, binding);
+    const cudaee::HtCdTargetBatchResult gpu_batch =
+        cudaee::detail::EvaluateHtCdCandidatesForTargetsBoundToValidatedGraph(graph, targets,
+                                                                              gpu_options, binding);
     Check(cpu.backend == "cpu" && cpu.cpu_verified, "CPU c,d batch metadata");
     Check(gpu.backend == "cuda" && gpu.selected_device >= 0 && gpu.cpu_verified,
           "CUDA c,d batch metadata");
     Check(gpu.candidates == cpu.candidates, "CPU/CUDA c,d candidates are exact");
+    Check(cpu_batch.targets.size() == targets.size() &&
+              gpu_batch.targets.size() == targets.size() && gpu_batch.backend == "cuda" &&
+              gpu_batch.selected_device >= 0 && gpu_batch.cpu_verified &&
+              gpu_batch.screen_tasks == cpu_batch.screen_tasks && gpu_batch.screen_tasks > 0U,
+          "CUDA cross-target c,d batch metadata is complete");
+    for (std::size_t target_index = 0U; target_index < targets.size(); ++target_index) {
+      Check(gpu_batch.targets[target_index].target_edge == targets[target_index] &&
+                gpu_batch.targets[target_index].batch.candidates ==
+                    cpu_batch.targets[target_index].batch.candidates &&
+                gpu_batch.targets[target_index].batch.screen_tasks ==
+                    cpu_batch.targets[target_index].batch.screen_tasks,
+            "CUDA cross-target c,d flags preserve every CPU-certified target slice");
+    }
   }
 #endif
 }
@@ -886,6 +958,54 @@ void TestRecursivePointProof() {
   Check(scan_replay.final_hash == scan.elimination.final_hash &&
             scan_replay_graph.ContentHash() == scanned_graph.ContentHash(),
         "HT scan outer V2 proof independently replays");
+
+  cudaee::HtScanOptions fused_target_options = scan_options;
+  fused_target_options.target_offset = 0U;
+  fused_target_options.max_targets = 2U;
+  fused_target_options.fuse_target_candidates = true;
+  cudaee::HtScanOptions sequential_target_options = fused_target_options;
+  sequential_target_options.fuse_target_candidates = false;
+  cudaee::GraphSnapshot fused_target_graph = graph;
+  cudaee::GraphSnapshot sequential_target_graph = graph;
+  const cudaee::HtScanResult fused_target_scan =
+      cudaee::RunHtScanEpoch(&fused_target_graph, fused_target_options);
+  const cudaee::HtScanResult sequential_target_scan =
+      cudaee::RunHtScanEpoch(&sequential_target_graph, sequential_target_options);
+  Check(fused_target_scan.target_candidate_batches == 1U &&
+            fused_target_scan.target_candidate_targets == 2U &&
+            fused_target_scan.target_candidate_screen_tasks > 0U &&
+            fused_target_scan.target_candidate_backend == "cpu" &&
+            fused_target_scan.target_candidate_cpu_verified &&
+            fused_target_scan.target_candidate_batch_ms >= 0.0 &&
+            sequential_target_scan.target_candidate_batches == 0U &&
+            sequential_target_scan.target_candidate_backend == "none",
+        "HT scan exposes one CPU-certified cross-target candidate batch and an explicit baseline");
+  Check(fused_target_scan.attempts.size() == sequential_target_scan.attempts.size() &&
+            fused_target_scan.elimination.proof.size() ==
+                sequential_target_scan.elimination.proof.size() &&
+            fused_target_scan.elimination.ht_proofs.size() ==
+                sequential_target_scan.elimination.ht_proofs.size() &&
+            fused_target_graph.ContentHash() == sequential_target_graph.ContentHash(),
+        "cross-target candidate scheduling preserves the committed graph and proof shape");
+  for (std::size_t index = 0U; index < fused_target_scan.attempts.size(); ++index) {
+    const cudaee::HtScanAttempt& fused_attempt = fused_target_scan.attempts[index];
+    const cudaee::HtScanAttempt& sequential_attempt = sequential_target_scan.attempts[index];
+    Check(fused_attempt.edge_id == sequential_attempt.edge_id &&
+              fused_attempt.target_edge == sequential_attempt.target_edge &&
+              fused_attempt.status == sequential_attempt.status &&
+              fused_attempt.states_expanded == sequential_attempt.states_expanded &&
+              fused_attempt.replies_expanded == sequential_attempt.replies_expanded &&
+              fused_attempt.leaf_calls == sequential_attempt.leaf_calls &&
+              fused_attempt.moves_generated == sequential_attempt.moves_generated &&
+              fused_attempt.reason == sequential_attempt.reason,
+          "cross-target candidate scheduling preserves every target work signature");
+  }
+  for (std::size_t index = 0U; index < fused_target_scan.elimination.ht_proofs.size(); ++index) {
+    Check(
+        cudaee::SerializeHtRecursiveProof(fused_target_scan.elimination.ht_proofs[index]) ==
+            cudaee::SerializeHtRecursiveProof(sequential_target_scan.elimination.ht_proofs[index]),
+        "cross-target candidate scheduling preserves canonical HT sidecar bytes");
+  }
 
   cudaee::HtScanOptions invalid_scan_options = scan_options;
   invalid_scan_options.max_targets = 0U;

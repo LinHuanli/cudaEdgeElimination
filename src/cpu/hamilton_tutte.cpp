@@ -15,6 +15,7 @@ namespace cudaee {
 namespace {
 
 using SteadyClock = std::chrono::steady_clock;
+constexpr std::uint64_t kMaxCrossTargetCdScreenTasks = 1000000U;
 
 double ElapsedMilliseconds(const SteadyClock::time_point begin) {
   return std::chrono::duration<double, std::milli>(SteadyClock::now() - begin).count();
@@ -585,6 +586,7 @@ HtCdBatchResult EvaluateHtCdCandidatesImpl(const GraphSnapshot& graph, const Nod
   const std::vector<std::uint8_t> cpu_flags =
       ScreenCdTasksCpu(graph, target, tasks, options.cd_mode);
   HtCdBatchResult result;
+  result.screen_tasks = tasks.size();
   bool use_cuda = options.candidate_backend == PathCompatibilityBackend::kCuda;
   if (options.candidate_backend == PathCompatibilityBackend::kAuto) {
     use_cuda = detail::HtCdCudaAvailable(&reason);
@@ -623,6 +625,105 @@ HtCdBatchResult detail::EvaluateHtCdCandidatesBoundToValidatedGraph(
   }
   return EvaluateHtCdCandidatesImpl(graph, target_edge, options,
                                     GraphValidationMode::kAlreadyValidated);
+}
+
+HtCdTargetBatchResult detail::EvaluateHtCdCandidatesForTargetsBoundToValidatedGraph(
+    const GraphSnapshot& graph, const std::vector<NodeEdge>& raw_targets,
+    const HtShallowOptions& options, const HtGraphValidationBinding& binding) {
+  if (!binding.Matches(graph)) {
+    throw std::invalid_argument("HT graph validation binding 与图对象不一致");
+  }
+  if (!IsKnownCdMode(options.cd_mode)) {
+    throw std::invalid_argument("HT c,d 模式非法");
+  }
+  if (options.candidate_backend != PathCompatibilityBackend::kAuto &&
+      options.candidate_backend != PathCompatibilityBackend::kCpu &&
+      options.candidate_backend != PathCompatibilityBackend::kCuda) {
+    throw std::invalid_argument("未知 HT c,d 候选后端");
+  }
+
+  HtCdTargetBatchResult result;
+  result.targets.reserve(raw_targets.size());
+  std::vector<std::vector<HtCdScreenTask>> target_tasks;
+  std::vector<std::vector<std::uint8_t>> target_cpu_flags;
+  target_tasks.reserve(raw_targets.size());
+  target_cpu_flags.reserve(raw_targets.size());
+
+  std::string reason;
+  for (const NodeEdge raw_target : raw_targets) {
+    const NodeEdge target = CanonicalEdge(raw_target.u, raw_target.v);
+    if (!ValidateTarget(graph, target, &reason)) {
+      throw std::invalid_argument(reason);
+    }
+    target_tasks.push_back(BuildCdScreenTasks(graph, target, options));
+    target_cpu_flags.push_back(
+        ScreenCdTasksCpu(graph, target, target_tasks.back(), options.cd_mode));
+    if (target_tasks.back().size() >
+        std::numeric_limits<std::uint64_t>::max() - result.screen_tasks) {
+      throw std::overflow_error("跨目标 HT c,d screen task 计数溢出");
+    }
+    result.screen_tasks += static_cast<std::uint64_t>(target_tasks.back().size());
+    if (result.screen_tasks > kMaxCrossTargetCdScreenTasks) {
+      throw std::length_error("跨目标 HT c,d screen task 超过 1000000 条融合上限");
+    }
+    result.targets.push_back({.graph_identity = &graph,
+                              .target_edge = target,
+                              .max_neighborhood = options.max_neighborhood,
+                              .max_cd_candidates = options.max_cd_candidates,
+                              .max_candidate_degree = options.max_candidate_degree,
+                              .cd_mode = options.cd_mode,
+                              .batch = {}});
+  }
+
+  bool use_cuda = options.candidate_backend == PathCompatibilityBackend::kCuda;
+  if (options.candidate_backend == PathCompatibilityBackend::kAuto) {
+    use_cuda = detail::HtCdCudaAvailable(&reason);
+  }
+  std::vector<std::uint8_t> gpu_flags;
+  if (use_cuda) {
+    if (!detail::HtCdCudaAvailable(&reason)) {
+      throw std::runtime_error("CUDA HT c,d 后端不可用: " + reason);
+    }
+    if (result.screen_tasks > std::numeric_limits<std::size_t>::max()) {
+      throw std::overflow_error("跨目标 HT c,d screen task 超过主机索引范围");
+    }
+    std::vector<detail::HtCdTargetScreenTask> flattened;
+    flattened.reserve(static_cast<std::size_t>(result.screen_tasks));
+    for (std::size_t target_index = 0U; target_index < result.targets.size(); ++target_index) {
+      for (const HtCdScreenTask task : target_tasks[target_index]) {
+        flattened.push_back({result.targets[target_index].target_edge, task});
+      }
+    }
+    gpu_flags = detail::ScreenHtCdCandidatesForTargetsCuda(graph, flattened, options.cd_mode,
+                                                           &result.selected_device);
+    if (gpu_flags.size() != flattened.size()) {
+      throw std::runtime_error("CUDA 跨目标 HT c,d flags 数量不一致");
+    }
+  }
+
+  std::size_t flat_offset = 0U;
+  for (std::size_t target_index = 0U; target_index < result.targets.size(); ++target_index) {
+    const std::vector<HtCdScreenTask>& tasks = target_tasks[target_index];
+    const std::vector<std::uint8_t>& cpu_flags = target_cpu_flags[target_index];
+    if (use_cuda &&
+        !std::equal(cpu_flags.begin(), cpu_flags.end(), gpu_flags.begin() + flat_offset)) {
+      throw std::runtime_error("CUDA 跨目标 HT c,d flags 与 CPU 规范结果不一致");
+    }
+    HtCdBatchResult& target_result = result.targets[target_index].batch;
+    target_result.candidates = FinalizeCdCandidates(graph, result.targets[target_index].target_edge,
+                                                    options, tasks, cpu_flags);
+    target_result.backend = use_cuda ? "cuda" : "cpu";
+    target_result.selected_device = use_cuda ? result.selected_device : -1;
+    target_result.cpu_verified = true;
+    target_result.screen_tasks = tasks.size();
+    flat_offset += tasks.size();
+  }
+  if (use_cuda && flat_offset != gpu_flags.size()) {
+    throw std::logic_error("CUDA 跨目标 HT c,d flags 含未消费记录");
+  }
+  result.backend = use_cuda ? "cuda" : "cpu";
+  result.cpu_verified = true;
+  return result;
 }
 
 HtShallowResult ProveEdgeByShallowHt(const GraphSnapshot& graph, const NodeEdge raw_target,

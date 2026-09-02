@@ -56,6 +56,7 @@ void PrintHelp() {
       << "  ht-scan       --tsp FILE --edges FILE --output FILE --proof FILE --report FILE\n"
       << "                --max-targets N [--target-offset N]\n"
       << "                [--target-order weight-desc|canonical]\n"
+      << "                [--fuse-target-candidates 0|1]（默认 1）\n"
       << "                [--protected-tour FILE --expected-cost COST] [HT wavefront options]\n"
       << "  local-eliminate --tsp FILE --edges FILE --output FILE --proof FILE --report FILE\n"
       << "                --max-targets N [--max-ht-epochs N] [--max-jv-rounds N]\n"
@@ -864,7 +865,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V13\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V14\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
@@ -872,6 +873,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "target_offset " << scan.target_offset << '\n';
   output << "target_end_offset " << scan.target_offset + scan.attempts.size() << '\n';
   output << "max_targets " << options.max_targets << '\n';
+  output << "fuse_target_candidates " << (options.fuse_target_candidates ? 1 : 0) << '\n';
   output << "fuse_leaf_buckets " << (options.wavefront_options.fuse_leaf_buckets ? 1 : 0) << '\n';
   output << "attempted_targets " << scan.attempts.size() << '\n';
   output << "proven_targets " << scan.proven_targets << '\n';
@@ -914,6 +916,13 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "hamilton_reply_neighbor_pairs_tested " << scan.hamilton_reply_neighbor_pairs_tested
          << '\n';
   output << "hamilton_replies_generated " << scan.hamilton_replies_generated << '\n';
+  output << "target_candidate_batches " << scan.target_candidate_batches << '\n';
+  output << "target_candidate_targets " << scan.target_candidate_targets << '\n';
+  output << "target_candidate_screen_tasks " << scan.target_candidate_screen_tasks << '\n';
+  output << "target_candidate_backend " << scan.target_candidate_backend << '\n';
+  output << "target_candidate_selected_device " << scan.target_candidate_selected_device << '\n';
+  output << "target_candidate_cpu_verified " << (scan.target_candidate_cpu_verified ? 1 : 0)
+         << '\n';
   output << "protected_tour_checked " << (protected_tour != nullptr ? 1 : 0) << '\n';
   if (protected_tour != nullptr) {
     output << "protected_tour_cost " << protected_tour->cost << '\n';
@@ -921,6 +930,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   }
   output << std::fixed << std::setprecision(6);
   output << "target_selection_ms " << scan.target_selection_ms << '\n';
+  output << "target_candidate_batch_ms " << scan.target_candidate_batch_ms << '\n';
   output << "candidate_ms " << scan.candidate_ms << '\n';
   output << "work_graph_ms " << scan.work_graph_ms << '\n';
   output << "root_child_normalize_ms " << scan.root_child_normalize_ms << '\n';
@@ -1063,6 +1073,8 @@ void WriteLocalEliminationReport(const std::filesystem::path& path,
   output << "max_ht_epochs " << options.max_ht_epochs << '\n';
   output << "max_targets_per_ht_epoch " << options.ht_scan_options.max_targets << '\n';
   output << "target_order " << HtTargetOrderName(options.ht_scan_options.target_order) << '\n';
+  output << "fuse_target_candidates " << (options.ht_scan_options.fuse_target_candidates ? 1 : 0)
+         << '\n';
   output << "proof_records " << local.elimination.proof.size() << '\n';
   output << "ht_sidecars " << local.elimination.ht_proofs.size() << '\n';
   output << "stage_count " << local.stages.size() << '\n';
@@ -1103,6 +1115,7 @@ void HtScanCommand(const Arguments& arguments) {
   options.target_offset = OptionalInteger<std::uint64_t>(arguments, "target-offset", 0U);
   options.max_targets = RequiredInteger<std::uint64_t>(arguments, "max-targets");
   options.target_order = ParseHtTargetOrder(Optional(arguments, "target-order", "weight-desc"));
+  options.fuse_target_candidates = ParseBooleanOption(arguments, "fuse-target-candidates", true);
   if (arguments.contains("scheduler") && Optional(arguments, "scheduler") != "wavefront") {
     throw std::invalid_argument("ht-scan 只支持 wavefront scheduler");
   }
@@ -1181,6 +1194,9 @@ void HtScanCommand(const Arguments& arguments) {
             << " eligible=" << scan.eligible_targets << " attempted=" << scan.attempts.size()
             << " proven=" << scan.proven_targets << " unresolved=" << scan.unresolved_targets
             << " committed=" << scan.elimination.proof.size()
+            << " fuse_target_candidates=" << (options.fuse_target_candidates ? 1 : 0)
+            << " target_candidate_backend=" << scan.target_candidate_backend
+            << " target_candidate_batch_ms=" << scan.target_candidate_batch_ms
             << " fuse_leaf_buckets=" << (options.wavefront_options.fuse_leaf_buckets ? 1 : 0)
             << " search_ms=" << scan.search_ms << " work_graph_ms=" << scan.work_graph_ms
             << " leaf_ms=" << scan.leaf_ms << " hamilton_reply_ms=" << scan.hamilton_reply_ms
@@ -1214,6 +1230,8 @@ void LocalEliminationCommand(const Arguments& arguments) {
   options.ht_scan_options.max_targets = RequiredInteger<std::uint64_t>(arguments, "max-targets");
   options.ht_scan_options.target_order =
       ParseHtTargetOrder(Optional(arguments, "target-order", "weight-desc"));
+  options.ht_scan_options.fuse_target_candidates =
+      ParseBooleanOption(arguments, "fuse-target-candidates", true);
 
   const std::string protected_tour_path = Optional(arguments, "protected-tour");
   const bool has_protected_tour = !protected_tour_path.empty();
