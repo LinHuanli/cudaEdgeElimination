@@ -72,6 +72,7 @@ struct KOptCostBatchResult {
   KOptCudaCacheUsage cuda_cache;
   bool cpu_verified{false};
   std::uint32_t cpu_threads_used{1U};
+  std::uint32_t cpu_distance_cache_nodes{};
   double cpu_certify_ms{};
 };
 

@@ -33,6 +33,8 @@ using EdgeSet = std::set<NodeEdge>;
 constexpr std::array<std::size_t, 3U> kKOptTemplateCounts = {4U, 25U, 208U};
 constexpr std::size_t kKOptCostPortCapacity = KOptCostTask{}.port_nodes.size();
 constexpr std::size_t kKOptCpuParallelMinCells = 8192U;
+constexpr std::size_t kKOptCpuDistanceCacheMaxNodes = 512U;
+constexpr std::size_t kKOptCpuDistanceCacheMaxGraphNodes = 1048576U;
 constexpr int kKOptCpuMaxThreads = 8;
 
 using SteadyClock = std::chrono::steady_clock;
@@ -842,14 +844,121 @@ CachedKOptCpuReconnectPlans(const std::uint32_t k,
   }
 }
 
+class KOptBatchDistanceCache {
+public:
+  KOptBatchDistanceCache(const GraphSnapshot& graph, std::vector<std::int32_t> nodes,
+                         std::vector<std::int32_t> node_to_local)
+      : node_count_(nodes.size()), node_to_local_(std::move(node_to_local)),
+        distances_(node_count_ * node_count_, 0) {
+    for (std::size_t first = 0U; first < node_count_; ++first) {
+      for (std::size_t second = first + 1U; second < node_count_; ++second) {
+        const std::int64_t distance = graph.Distance(nodes[first], nodes[second]);
+        distances_[first * node_count_ + second] = distance;
+        distances_[second * node_count_ + first] = distance;
+      }
+    }
+  }
+
+  [[nodiscard]] std::size_t node_count() const { return node_count_; }
+
+  [[nodiscard]] std::int32_t LocalIndex(const std::int32_t node) const {
+    if (node < 0 || static_cast<std::size_t>(node) >= node_to_local_.size()) {
+      return -1;
+    }
+    return node_to_local_[static_cast<std::size_t>(node)];
+  }
+
+  [[nodiscard]] std::int64_t Distance(const std::int32_t first, const std::int32_t second) const {
+    if (first < 0 || second < 0 || static_cast<std::size_t>(first) >= node_count_ ||
+        static_cast<std::size_t>(second) >= node_count_) {
+      throw std::logic_error("CPU k-opt batch 距离缓存索引越界");
+    }
+    return distances_[static_cast<std::size_t>(first) * node_count_ +
+                      static_cast<std::size_t>(second)];
+  }
+
+private:
+  std::size_t node_count_{};
+  std::vector<std::int32_t> node_to_local_;
+  std::vector<std::int64_t> distances_;
+};
+
+std::optional<KOptBatchDistanceCache> BuildKOptBatchDistanceCache(
+    const GraphSnapshot& graph, const std::uint32_t k, const std::vector<KOptCostTask>& tasks,
+    const std::vector<KOptCpuReconnectPlan>& reconnect_plans, const std::size_t cell_count) {
+  if (cell_count < kKOptCpuParallelMinCells || tasks.empty()) {
+    return std::nullopt;
+  }
+  if (static_cast<std::size_t>(graph.dimension) > kKOptCpuDistanceCacheMaxGraphNodes) {
+    return std::nullopt;
+  }
+  const std::size_t active_port_count = std::size_t{2} * k;
+  if (tasks.size() > std::numeric_limits<std::size_t>::max() / active_port_count) {
+    return std::nullopt;
+  }
+  std::vector<std::int32_t> nodes;
+  nodes.reserve(std::min(tasks.size() * active_port_count, kKOptCpuDistanceCacheMaxNodes));
+  std::vector<std::int32_t> node_to_local(static_cast<std::size_t>(graph.dimension), -1);
+  for (const KOptCostTask& task : tasks) {
+    for (std::size_t port = 0U; port < active_port_count; ++port) {
+      const std::int32_t node = task.port_nodes[port];
+      std::int32_t& local = node_to_local[static_cast<std::size_t>(node)];
+      if (local >= 0) {
+        continue;
+      }
+      if (nodes.size() >= kKOptCpuDistanceCacheMaxNodes) {
+        return std::nullopt;
+      }
+      local = static_cast<std::int32_t>(nodes.size());
+      nodes.push_back(node);
+    }
+  }
+  if (nodes.empty()) {
+    return std::nullopt;
+  }
+
+  std::array<bool, kKOptCostPortCapacity * kKOptCostPortCapacity> used_pairs{};
+  std::size_t used_pair_count = 0U;
+  for (const KOptCpuReconnectPlan& plan : reconnect_plans) {
+    for (std::uint32_t pair = 0U; pair < k; ++pair) {
+      const std::uint8_t flat_index = plan.pair_indices[pair];
+      if (!used_pairs[flat_index]) {
+        used_pairs[flat_index] = true;
+        ++used_pair_count;
+      }
+    }
+  }
+  const std::size_t full_pair_count = nodes.size() * (nodes.size() - 1U) / 2U;
+  if (used_pair_count == 0U ||
+      tasks.size() > std::numeric_limits<std::size_t>::max() / used_pair_count) {
+    return std::nullopt;
+  }
+  // 只有理论距离调用至少可减少一半时才建表；否则保留 task-local 惰性路径。
+  const std::size_t task_pair_upper_bound = tasks.size() * used_pair_count;
+  if (full_pair_count > task_pair_upper_bound / 2U) {
+    return std::nullopt;
+  }
+  return KOptBatchDistanceCache(graph, std::move(nodes), std::move(node_to_local));
+}
+
 class KOptCostTaskCpuScorer {
 public:
-  KOptCostTaskCpuScorer(const GraphSnapshot& graph, const std::uint32_t k, const KOptCostTask& task)
+  KOptCostTaskCpuScorer(const GraphSnapshot& graph, const std::uint32_t k, const KOptCostTask& task,
+                        const KOptBatchDistanceCache* const distance_cache)
       : graph_(&graph), k_(k), task_(&task) {
     for (std::uint32_t edge = 0U; edge < k_; ++edge) {
       const std::size_t first_port = std::size_t{2} * edge;
       deleted_edges_[edge] =
           CanonicalEdge(task_->port_nodes[first_port], task_->port_nodes[first_port + 1U]);
+    }
+    if (distance_cache != nullptr) {
+      distance_cache_ = distance_cache;
+      for (std::size_t port = 0U; port < std::size_t{2} * k_; ++port) {
+        local_ports_[port] = distance_cache_->LocalIndex(task_->port_nodes[port]);
+        if (local_ports_[port] < 0) {
+          throw std::logic_error("CPU k-opt task 端口不在 batch 距离缓存中");
+        }
+      }
     }
   }
 
@@ -895,7 +1004,10 @@ private:
       pair_cost.distance = kInvalidKOptTemplateCost;
       return pair_cost;
     }
-    pair_cost.distance = graph_->Distance(pair_cost.edge.u, pair_cost.edge.v);
+    pair_cost.distance =
+        distance_cache_ == nullptr
+            ? graph_->Distance(pair_cost.edge.u, pair_cost.edge.v)
+            : distance_cache_->Distance(local_ports_[first_port], local_ports_[second_port]);
     if (pair_cost.distance < 0) {
       pair_cost.distance = kInvalidKOptTemplateCost;
     }
@@ -903,21 +1015,29 @@ private:
   }
 
   const GraphSnapshot* graph_{};
+  const KOptBatchDistanceCache* distance_cache_{};
   std::uint32_t k_{};
   const KOptCostTask* task_{};
   std::array<NodeEdge, 5U> deleted_edges_{};
+  std::array<std::int32_t, kKOptCostPortCapacity> local_ports_{};
   std::array<PairCost, kKOptCostPortCapacity * kKOptCostPortCapacity> pair_costs_{};
 };
 
 std::vector<std::int64_t> EvaluateKOptTemplateCostsCpu(
     const GraphSnapshot& graph, const std::uint32_t k, const std::vector<KOptCostTask>& tasks,
-    const std::vector<KOptCpuReconnectPlan>& reconnect_plans, std::uint32_t* const threads_used) {
+    const std::vector<KOptCpuReconnectPlan>& reconnect_plans, std::uint32_t* const threads_used,
+    std::uint32_t* const distance_cache_nodes) {
   const std::size_t template_count = reconnect_plans.size();
   const std::size_t cell_count = tasks.size() * template_count;
+  const std::optional<KOptBatchDistanceCache> distance_cache =
+      BuildKOptBatchDistanceCache(graph, k, tasks, reconnect_plans, cell_count);
+  *distance_cache_nodes =
+      distance_cache.has_value() ? static_cast<std::uint32_t>(distance_cache->node_count()) : 0U;
   std::vector<std::int64_t> costs(cell_count);
   *threads_used = 1U;
   const auto score_task = [&](const std::size_t task_index) {
-    KOptCostTaskCpuScorer scorer(graph, k, tasks[task_index]);
+    KOptCostTaskCpuScorer scorer(graph, k, tasks[task_index],
+                                 distance_cache.has_value() ? &*distance_cache : nullptr);
     const std::size_t row_begin = task_index * template_count;
     for (std::size_t template_index = 0U; template_index < template_count; ++template_index) {
       // 每个 task 独占连续 row；静态调度只改变计算时序，不改变规范矩阵布局。
@@ -1161,8 +1281,8 @@ KOptCostBatchResult EvaluateKOptTemplateCosts(const GraphSnapshot& graph, const 
     result.added_costs = detail::EvaluateKOptTemplateCostsCuda(
         graph, table, tasks, &result.selected_device, &result.cuda_cache);
     const SteadyClock::time_point cpu_begin = SteadyClock::now();
-    const std::vector<std::int64_t> cpu_costs =
-        EvaluateKOptTemplateCostsCpu(graph, k, tasks, cpu_plans, &result.cpu_threads_used);
+    const std::vector<std::int64_t> cpu_costs = EvaluateKOptTemplateCostsCpu(
+        graph, k, tasks, cpu_plans, &result.cpu_threads_used, &result.cpu_distance_cache_nodes);
     const auto mismatch = std::mismatch(result.added_costs.begin(), result.added_costs.end(),
                                         cpu_costs.begin(), cpu_costs.end());
     result.cpu_certify_ms = ElapsedMilliseconds(cpu_begin);
@@ -1176,8 +1296,8 @@ KOptCostBatchResult EvaluateKOptTemplateCosts(const GraphSnapshot& graph, const 
     result.cpu_verified = true;
   } else {
     const SteadyClock::time_point cpu_begin = SteadyClock::now();
-    result.added_costs =
-        EvaluateKOptTemplateCostsCpu(graph, k, tasks, cpu_plans, &result.cpu_threads_used);
+    result.added_costs = EvaluateKOptTemplateCostsCpu(
+        graph, k, tasks, cpu_plans, &result.cpu_threads_used, &result.cpu_distance_cache_nodes);
     result.cpu_certify_ms = ElapsedMilliseconds(cpu_begin);
     result.backend = "cpu";
     result.cpu_verified = true;

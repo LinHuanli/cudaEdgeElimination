@@ -193,7 +193,7 @@ void TestKOptCostMatrixCpuCuda() {
     const cudaee::KOptCostBatchResult cpu =
         cudaee::EvaluateKOptTemplateCosts(graph, k, tasks, cudaee::PathCompatibilityBackend::kCpu);
     Check(cpu.backend == "cpu" && cpu.cpu_verified && cpu.cpu_threads_used == 1U &&
-              cpu.cpu_certify_ms >= 0.0,
+              cpu.cpu_distance_cache_nodes == 0U && cpu.cpu_certify_ms >= 0.0,
           "CPU k-opt cost backend");
     Check(cpu.template_count == kExpectedTemplateCounts[static_cast<std::size_t>(k - 3U)],
           "k-opt cost template count");
@@ -248,6 +248,7 @@ void TestKOptCostMatrixCpuCuda() {
   const cudaee::KOptCostBatchResult parallel_cpu = cudaee::EvaluateKOptTemplateCosts(
       graph, 5U, repeated_tasks, cudaee::PathCompatibilityBackend::kCpu);
   Check(parallel_cpu.cpu_threads_used >= 1U && parallel_cpu.cpu_threads_used <= 8U &&
+            parallel_cpu.cpu_distance_cache_nodes == 10U &&
             parallel_cpu.added_costs.size() == 40U * 208U,
         "large CPU cost matrix reports bounded parallelism");
   for (std::size_t task_index = 1U; task_index < repeated_tasks.size(); ++task_index) {
@@ -256,16 +257,50 @@ void TestKOptCostMatrixCpuCuda() {
                          static_cast<std::ptrdiff_t>(task_index * 208U)),
           "parallel CPU cost rows preserve deterministic matrix layout");
   }
+  const cudaee::KOptReconnectTable five_opt_table = cudaee::BuildKOptReconnectTable(5U);
+  for (std::size_t template_index = 0U; template_index < five_opt_table.templates.size();
+       ++template_index) {
+    Check(parallel_cpu.added_costs[template_index] ==
+              ReferenceKOptTemplateCost(graph, 5U, repeated_task,
+                                        five_opt_table.templates[template_index]),
+          "batch distance cache matches the independent edge-list oracle");
+  }
 #ifdef CUDAEE_HAS_CUDA
   if (cuda_available) {
     const cudaee::KOptCostBatchResult parallel_gpu = cudaee::EvaluateKOptTemplateCosts(
         graph, 5U, repeated_tasks, cudaee::PathCompatibilityBackend::kCuda);
     Check(parallel_gpu.cpu_verified && parallel_gpu.cpu_threads_used >= 1U &&
               parallel_gpu.cpu_threads_used <= 8U &&
+              parallel_gpu.cpu_distance_cache_nodes == parallel_cpu.cpu_distance_cache_nodes &&
               parallel_gpu.added_costs == parallel_cpu.added_costs,
           "large CUDA matrix passes the bounded parallel CPU certification");
   }
 #endif
+
+  std::vector<cudaee::Point> bounded_points;
+  bounded_points.reserve(520U);
+  for (std::int64_t node = 0; node < 520; ++node) {
+    bounded_points.push_back(
+        {static_cast<double>(node), static_cast<double>(node % 17), node, node % 17});
+  }
+  const cudaee::GraphSnapshot bounded_graph = MakeGraph(bounded_points);
+  std::vector<cudaee::KOptCostTask> bounded_tasks(52U);
+  for (std::size_t task_index = 0U; task_index < bounded_tasks.size(); ++task_index) {
+    cudaee::KOptCostTask& task = bounded_tasks[task_index];
+    for (std::size_t port = 0U; port < 10U; ++port) {
+      task.port_nodes[port] = static_cast<std::int32_t>(task_index * 10U + port);
+    }
+    for (std::size_t edge = 0U; edge < 5U; ++edge) {
+      const std::size_t first_port = 2U * edge;
+      task.deleted_cost +=
+          bounded_graph.Distance(task.port_nodes[first_port], task.port_nodes[first_port + 1U]);
+    }
+  }
+  const cudaee::KOptCostBatchResult bounded_cpu = cudaee::EvaluateKOptTemplateCosts(
+      bounded_graph, 5U, bounded_tasks, cudaee::PathCompatibilityBackend::kCpu);
+  Check(bounded_cpu.cpu_distance_cache_nodes == 0U &&
+            bounded_cpu.added_costs.size() == bounded_tasks.size() * 208U,
+        "batch distance cache falls back when the 512-node hard cap is exceeded");
 
   cudaee::GraphSnapshot ceil_graph = graph;
   ceil_graph.distance_type = cudaee::DistanceType::kCeil2D;
