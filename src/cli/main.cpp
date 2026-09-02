@@ -51,6 +51,7 @@ void PrintHelp() {
       << "                [--cost-batch-size N] [--cuda-min-cost-cells N]\n"
       << "                [--path-append-backend auto|cpu|cuda]\n"
       << "                [--reuse-reply-cuda-cache 0|1]（默认 1）\n"
+      << "                [--deduplicate-reply-tasks 0|1]（默认 1）\n"
       << "                [--propagation-backend auto|cpu|cuda] [--propagation-blocks N]\n"
       << "                [--max-depth N] [HT budgets]\n"
       << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
@@ -482,7 +483,9 @@ ParseHtWavefrontOptions(const Arguments& arguments,
               ParsePathCompatibilityBackend(Optional(arguments, "path-append-backend", "auto")),
           .hamilton_reply_backend =
               ParsePathCompatibilityBackend(Optional(arguments, "reply-backend", "auto")),
-          .reuse_reply_cuda_cache = ParseBooleanOption(arguments, "reuse-reply-cuda-cache", true)};
+          .reuse_reply_cuda_cache = ParseBooleanOption(arguments, "reuse-reply-cuda-cache", true),
+          .deduplicate_reply_tasks =
+              ParseBooleanOption(arguments, "deduplicate-reply-tasks", true)};
 }
 
 cudaee::HtTargetOrder ParseHtTargetOrder(const std::string& value) {
@@ -866,7 +869,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V15\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V16\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
@@ -877,6 +880,8 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "fuse_leaf_buckets " << (options.wavefront_options.fuse_leaf_buckets ? 1 : 0) << '\n';
   output << "reuse_reply_cuda_cache " << (options.wavefront_options.reuse_reply_cuda_cache ? 1 : 0)
          << '\n';
+  output << "deduplicate_reply_tasks "
+         << (options.wavefront_options.deduplicate_reply_tasks ? 1 : 0) << '\n';
   output << "attempted_targets " << scan.attempts.size() << '\n';
   output << "proven_targets " << scan.proven_targets << '\n';
   output << "unresolved_targets " << scan.unresolved_targets << '\n';
@@ -919,9 +924,14 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
          << '\n';
   output << "hamilton_replies_generated " << scan.hamilton_replies_generated << '\n';
   output << "reply_cuda_batches " << scan.reply_cuda_batches << '\n';
+  output << "reply_cuda_tasks_submitted " << scan.reply_cuda_tasks_submitted << '\n';
   output << "reply_cuda_graph_cache_hits " << scan.reply_cuda_graph_cache_hits << '\n';
   output << "reply_cuda_workspace_cache_hits " << scan.reply_cuda_workspace_cache_hits << '\n';
   output << "peak_reply_device_cache_bytes " << scan.peak_reply_device_cache_bytes << '\n';
+  output << "end_reply_batches " << scan.end_reply_batches << '\n';
+  output << "end_reply_tasks " << scan.end_reply_tasks << '\n';
+  output << "end_reply_unique_tasks " << scan.end_reply_unique_tasks << '\n';
+  output << "end_replies_generated " << scan.end_replies_generated << '\n';
   output << "protected_tour_checked " << (protected_tour != nullptr ? 1 : 0) << '\n';
   if (protected_tour != nullptr) {
     output << "protected_tour_cost " << protected_tour->cost << '\n';
@@ -982,8 +992,9 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
             "point_candidate_nodes_selected "
             "hamilton_reply_batches hamilton_reply_centers "
             "hamilton_reply_unique_centers hamilton_reply_neighbor_pairs hamilton_replies "
-            "reply_cuda_batches reply_graph_cache_hits reply_workspace_cache_hits "
-            "peak_reply_cache_bytes end_replies candidate_ms work_graph_ms root_child_normalize_ms "
+            "reply_cuda_batches reply_cuda_tasks_submitted reply_graph_cache_hits "
+            "reply_workspace_cache_hits peak_reply_cache_bytes end_reply_batches end_reply_tasks "
+            "end_reply_unique_tasks end_replies candidate_ms work_graph_ms root_child_normalize_ms "
             "point_candidate_scan_ms point_candidate_sort_ms leaf_ms leaf_setup_ms "
             "leaf_proof_initialize_ms leaf_coverage_scan_ms leaf_cursor_construct_ms "
             "leaf_cursor_prepare_ms leaf_cost_evaluate_ms leaf_cost_cpu_certify_ms "
@@ -1027,24 +1038,27 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << ' ' << attempt.hamilton_reply_centers << ' ' << attempt.hamilton_reply_unique_centers
            << ' ' << attempt.hamilton_reply_neighbor_pairs_tested << ' '
            << attempt.hamilton_replies_generated << ' ' << attempt.reply_cuda_batches << ' '
-           << attempt.reply_cuda_graph_cache_hits << ' ' << attempt.reply_cuda_workspace_cache_hits
-           << ' ' << attempt.peak_reply_device_cache_bytes << ' ' << attempt.end_replies_generated
-           << ' ' << attempt.candidate_ms << ' ' << attempt.work_graph_ms << ' '
-           << attempt.root_child_normalize_ms << ' ' << attempt.point_candidate_scan_ms << ' '
-           << attempt.point_candidate_sort_ms << ' ' << attempt.leaf_ms << ' '
-           << attempt.leaf_setup_ms << ' ' << attempt.leaf_proof_initialize_ms << ' '
-           << attempt.leaf_coverage_scan_ms << ' ' << attempt.leaf_cursor_construct_ms << ' '
-           << attempt.leaf_cursor_prepare_ms << ' ' << attempt.leaf_cost_evaluate_ms << ' '
-           << attempt.leaf_cost_cpu_certify_ms << ' ' << attempt.leaf_cost_scatter_ms << ' '
-           << attempt.leaf_cursor_consume_ms << ' ' << attempt.leaf_candidate_recheck_ms << ' '
-           << attempt.leaf_completeness_fallback_ms << ' ' << attempt.leaf_scalar_search_ms << ' '
-           << attempt.leaf_apply_ms << ' ' << attempt.leaf_proof_verify_ms << ' '
-           << attempt.path_append_ms << ' ' << attempt.path_append_parent_prepare_ms << ' '
-           << attempt.path_append_child_normalize_ms << ' ' << attempt.path_append_child_edges_ms
-           << ' ' << attempt.path_append_cuda_evaluate_ms << ' '
-           << attempt.path_append_cuda_compare_ms << ' ' << attempt.hamilton_reply_ms << ' '
-           << attempt.hamilton_reply_validation_ms << ' ' << attempt.hamilton_reply_cpu_enumerate_ms
-           << ' ' << attempt.hamilton_reply_cuda_evaluate_ms << ' '
+           << attempt.reply_cuda_tasks_submitted << ' ' << attempt.reply_cuda_graph_cache_hits
+           << ' ' << attempt.reply_cuda_workspace_cache_hits << ' '
+           << attempt.peak_reply_device_cache_bytes << ' ' << attempt.end_reply_batches << ' '
+           << attempt.end_reply_tasks << ' ' << attempt.end_reply_unique_tasks << ' '
+           << attempt.end_replies_generated << ' ' << attempt.candidate_ms << ' '
+           << attempt.work_graph_ms << ' ' << attempt.root_child_normalize_ms << ' '
+           << attempt.point_candidate_scan_ms << ' ' << attempt.point_candidate_sort_ms << ' '
+           << attempt.leaf_ms << ' ' << attempt.leaf_setup_ms << ' '
+           << attempt.leaf_proof_initialize_ms << ' ' << attempt.leaf_coverage_scan_ms << ' '
+           << attempt.leaf_cursor_construct_ms << ' ' << attempt.leaf_cursor_prepare_ms << ' '
+           << attempt.leaf_cost_evaluate_ms << ' ' << attempt.leaf_cost_cpu_certify_ms << ' '
+           << attempt.leaf_cost_scatter_ms << ' ' << attempt.leaf_cursor_consume_ms << ' '
+           << attempt.leaf_candidate_recheck_ms << ' ' << attempt.leaf_completeness_fallback_ms
+           << ' ' << attempt.leaf_scalar_search_ms << ' ' << attempt.leaf_apply_ms << ' '
+           << attempt.leaf_proof_verify_ms << ' ' << attempt.path_append_ms << ' '
+           << attempt.path_append_parent_prepare_ms << ' ' << attempt.path_append_child_normalize_ms
+           << ' ' << attempt.path_append_child_edges_ms << ' '
+           << attempt.path_append_cuda_evaluate_ms << ' ' << attempt.path_append_cuda_compare_ms
+           << ' ' << attempt.hamilton_reply_ms << ' ' << attempt.hamilton_reply_validation_ms << ' '
+           << attempt.hamilton_reply_cpu_enumerate_ms << ' '
+           << attempt.hamilton_reply_cuda_evaluate_ms << ' '
            << attempt.hamilton_reply_cuda_compare_ms << ' ' << attempt.end_reply_ms << ' '
            << attempt.propagation_ms << ' ' << attempt.proof_extract_ms << ' '
            << attempt.proof_verify_ms << ' ' << attempt.immediate_verify_ms << ' '
@@ -1183,9 +1197,13 @@ void HtScanCommand(const Arguments& arguments) {
               << " hamilton_reply_cpu_enumerate_ms=" << attempt.hamilton_reply_cpu_enumerate_ms
               << " hamilton_reply_cuda_evaluate_ms=" << attempt.hamilton_reply_cuda_evaluate_ms
               << " reply_cuda_batches=" << attempt.reply_cuda_batches
+              << " reply_cuda_tasks_submitted=" << attempt.reply_cuda_tasks_submitted
               << " reply_graph_cache_hits=" << attempt.reply_cuda_graph_cache_hits
               << " reply_workspace_cache_hits=" << attempt.reply_cuda_workspace_cache_hits
               << " peak_reply_cache_bytes=" << attempt.peak_reply_device_cache_bytes
+              << " end_reply_batches=" << attempt.end_reply_batches
+              << " end_reply_tasks=" << attempt.end_reply_tasks
+              << " end_reply_unique_tasks=" << attempt.end_reply_unique_tasks
               << " propagation_ms=" << attempt.propagation_ms
               << " proof_verify_ms=" << attempt.proof_verify_ms
               << " immediate_verify_ms=" << attempt.immediate_verify_ms
@@ -1199,10 +1217,16 @@ void HtScanCommand(const Arguments& arguments) {
             << " fuse_leaf_buckets=" << (options.wavefront_options.fuse_leaf_buckets ? 1 : 0)
             << " reuse_reply_cuda_cache="
             << (options.wavefront_options.reuse_reply_cuda_cache ? 1 : 0)
+            << " deduplicate_reply_tasks="
+            << (options.wavefront_options.deduplicate_reply_tasks ? 1 : 0)
             << " reply_cuda_batches=" << scan.reply_cuda_batches
+            << " reply_cuda_tasks_submitted=" << scan.reply_cuda_tasks_submitted
             << " reply_graph_cache_hits=" << scan.reply_cuda_graph_cache_hits
             << " reply_workspace_cache_hits=" << scan.reply_cuda_workspace_cache_hits
             << " peak_reply_cache_bytes=" << scan.peak_reply_device_cache_bytes
+            << " end_reply_batches=" << scan.end_reply_batches
+            << " end_reply_tasks=" << scan.end_reply_tasks
+            << " end_reply_unique_tasks=" << scan.end_reply_unique_tasks
             << " search_ms=" << scan.search_ms << " work_graph_ms=" << scan.work_graph_ms
             << " leaf_ms=" << scan.leaf_ms << " hamilton_reply_ms=" << scan.hamilton_reply_ms
             << " propagation_ms=" << scan.propagation_ms << " commit_ms=" << scan.commit_ms

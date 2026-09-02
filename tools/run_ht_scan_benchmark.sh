@@ -31,6 +31,12 @@ if [[ "${reuse_reply_cuda_cache}" != "0" && "${reuse_reply_cuda_cache}" != "1" ]
   exit 2
 fi
 
+deduplicate_reply_tasks="${CUDAEE_DEDUPLICATE_REPLY_TASKS:-1}"
+if [[ "${deduplicate_reply_tasks}" != "0" && "${deduplicate_reply_tasks}" != "1" ]]; then
+  echo "错误：CUDAEE_DEDUPLICATE_REPLY_TASKS 必须为 0 或 1。" >&2
+  exit 2
+fi
+
 config="${repo_root}/configs/m5_jv_instances.tsv"
 row="$(awk -F '\t' -v name="${instance}" '$1 == name { print; found = 1 } END { if (!found) exit 1 }' "${config}")" || {
   echo "错误：${config} 中没有实例 ${instance}。" >&2
@@ -135,6 +141,7 @@ ht_arguments=(
   --cost-batch-size 4096
   --cuda-min-cost-cells 128
   --reuse-reply-cuda-cache "${reuse_reply_cuda_cache}"
+  --deduplicate-reply-tasks "${deduplicate_reply_tasks}"
 )
 
 run_scan() {
@@ -606,16 +613,74 @@ fi
 cpu_reply_cuda_batches="$(read_field "${run_dir}/cpu.report" reply_cuda_batches)"
 cpu_fused_reply_cuda_batches="$(read_field "${run_dir}/cpu-fused.report" reply_cuda_batches)"
 cuda_reply_cuda_batches="$(read_field "${run_dir}/cuda.report" reply_cuda_batches)"
+cpu_reply_cuda_tasks_submitted="$(read_field "${run_dir}/cpu.report" reply_cuda_tasks_submitted)"
+cpu_fused_reply_cuda_tasks_submitted="$(read_field "${run_dir}/cpu-fused.report" reply_cuda_tasks_submitted)"
+cuda_reply_cuda_tasks_submitted="$(read_field "${run_dir}/cuda.report" reply_cuda_tasks_submitted)"
 hybrid_reply_cuda_batches="$(read_field "${run_dir}/hybrid.report" reply_cuda_batches)"
 fused_reply_cuda_batches="$(read_field "${run_dir}/fused.report" reply_cuda_batches)"
+hybrid_reply_cuda_tasks_submitted="$(read_field "${run_dir}/hybrid.report" reply_cuda_tasks_submitted)"
+fused_reply_cuda_tasks_submitted="$(read_field "${run_dir}/fused.report" reply_cuda_tasks_submitted)"
 cuda_reply_graph_cache_hits="$(read_field "${run_dir}/cuda.report" reply_cuda_graph_cache_hits)"
 cuda_reply_workspace_cache_hits="$(read_field "${run_dir}/cuda.report" reply_cuda_workspace_cache_hits)"
 cuda_peak_reply_device_cache_bytes="$(read_field "${run_dir}/cuda.report" peak_reply_device_cache_bytes)"
 if [[ "${cpu_reply_cuda_batches}" != "0" || "${cpu_fused_reply_cuda_batches}" != "0" ||
       "${hybrid_reply_cuda_batches}" != "0" || "${fused_reply_cuda_batches}" != "0" ||
+      "${cpu_reply_cuda_tasks_submitted}" != "0" ||
+      "${cpu_fused_reply_cuda_tasks_submitted}" != "0" ||
+      "${hybrid_reply_cuda_tasks_submitted}" != "0" ||
+      "${fused_reply_cuda_tasks_submitted}" != "0" ||
       "${cuda_reply_cuda_batches}" == "0" || "${cuda_peak_reply_device_cache_bytes}" == "0" ||
       "${cuda_reply_workspace_cache_hits}" -gt "${cuda_reply_cuda_batches}" ]]; then
   echo "HT reply CUDA 驻留缓存计数非法" >&2
+  exit 1
+fi
+cpu_end_reply_batches="$(read_field "${run_dir}/cpu.report" end_reply_batches)"
+cpu_fused_end_reply_batches="$(read_field "${run_dir}/cpu-fused.report" end_reply_batches)"
+cuda_end_reply_batches="$(read_field "${run_dir}/cuda.report" end_reply_batches)"
+hybrid_end_reply_batches="$(read_field "${run_dir}/hybrid.report" end_reply_batches)"
+fused_end_reply_batches="$(read_field "${run_dir}/fused.report" end_reply_batches)"
+cpu_end_reply_tasks="$(read_field "${run_dir}/cpu.report" end_reply_tasks)"
+cpu_fused_end_reply_tasks="$(read_field "${run_dir}/cpu-fused.report" end_reply_tasks)"
+cuda_end_reply_tasks="$(read_field "${run_dir}/cuda.report" end_reply_tasks)"
+hybrid_end_reply_tasks="$(read_field "${run_dir}/hybrid.report" end_reply_tasks)"
+fused_end_reply_tasks="$(read_field "${run_dir}/fused.report" end_reply_tasks)"
+cpu_end_reply_unique_tasks="$(read_field "${run_dir}/cpu.report" end_reply_unique_tasks)"
+cpu_fused_end_reply_unique_tasks="$(read_field "${run_dir}/cpu-fused.report" end_reply_unique_tasks)"
+cuda_end_reply_unique_tasks="$(read_field "${run_dir}/cuda.report" end_reply_unique_tasks)"
+hybrid_end_reply_unique_tasks="$(read_field "${run_dir}/hybrid.report" end_reply_unique_tasks)"
+fused_end_reply_unique_tasks="$(read_field "${run_dir}/fused.report" end_reply_unique_tasks)"
+cpu_end_replies_generated="$(read_field "${run_dir}/cpu.report" end_replies_generated)"
+cpu_fused_end_replies_generated="$(read_field "${run_dir}/cpu-fused.report" end_replies_generated)"
+cuda_end_replies_generated="$(read_field "${run_dir}/cuda.report" end_replies_generated)"
+hybrid_end_replies_generated="$(read_field "${run_dir}/hybrid.report" end_replies_generated)"
+fused_end_replies_generated="$(read_field "${run_dir}/fused.report" end_replies_generated)"
+if [[ "${cpu_end_reply_batches}" != "${cpu_fused_end_reply_batches}" ||
+      "${cpu_end_reply_batches}" != "${cuda_end_reply_batches}" ||
+      "${cpu_end_reply_batches}" != "${hybrid_end_reply_batches}" ||
+      "${cpu_end_reply_batches}" != "${fused_end_reply_batches}" ||
+      "${cpu_end_reply_tasks}" != "${cpu_fused_end_reply_tasks}" ||
+      "${cpu_end_reply_tasks}" != "${cuda_end_reply_tasks}" ||
+      "${cpu_end_reply_tasks}" != "${hybrid_end_reply_tasks}" ||
+      "${cpu_end_reply_tasks}" != "${fused_end_reply_tasks}" ||
+      "${cpu_end_reply_unique_tasks}" != "${cpu_fused_end_reply_unique_tasks}" ||
+      "${cpu_end_reply_unique_tasks}" != "${cuda_end_reply_unique_tasks}" ||
+      "${cpu_end_reply_unique_tasks}" != "${hybrid_end_reply_unique_tasks}" ||
+      "${cpu_end_reply_unique_tasks}" != "${fused_end_reply_unique_tasks}" ||
+      "${cpu_end_replies_generated}" != "${cpu_fused_end_replies_generated}" ||
+      "${cpu_end_replies_generated}" != "${cuda_end_replies_generated}" ||
+      "${cpu_end_replies_generated}" != "${hybrid_end_replies_generated}" ||
+      "${cpu_end_replies_generated}" != "${fused_end_replies_generated}" ||
+      "${cuda_end_reply_unique_tasks}" -gt "${cuda_end_reply_tasks}" ]]; then
+  echo "五路 end reply 的规范工作计数不一致" >&2
+  exit 1
+fi
+if [[ "${deduplicate_reply_tasks}" == "1" ]]; then
+  expected_cuda_reply_tasks=$((cuda_hamilton_reply_unique_centers + cuda_end_reply_unique_tasks))
+else
+  expected_cuda_reply_tasks=$((cuda_hamilton_reply_centers + cuda_end_reply_tasks))
+fi
+if [[ "${cuda_reply_cuda_tasks_submitted}" != "${expected_cuda_reply_tasks}" ]]; then
+  echo "HT reply CUDA 物理任务计数与去重配置不一致" >&2
   exit 1
 fi
 if [[ "${reuse_reply_cuda_cache}" == "1" ]]; then
@@ -875,6 +940,7 @@ manifest="${run_dir}/run-manifest-v1"
   echo "cost_batch_size 4096"
   echo "cuda_min_cost_cells 128"
   echo "reuse_reply_cuda_cache ${reuse_reply_cuda_cache}"
+  echo "deduplicate_reply_tasks ${deduplicate_reply_tasks}"
   echo "cpu_cost_threads ${cpu_cost_threads}"
   echo "omp_dynamic FALSE"
   echo "omp_proc_bind spread"
@@ -889,7 +955,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V18"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V19"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -1136,10 +1202,16 @@ summary="${run_dir}/summary.txt"
   echo "hamilton_reply_neighbor_pairs_tested ${cpu_hamilton_reply_pairs}"
   echo "hamilton_replies_generated ${cpu_hamilton_replies_generated}"
   echo "reuse_reply_cuda_cache ${reuse_reply_cuda_cache}"
+  echo "deduplicate_reply_tasks ${deduplicate_reply_tasks}"
   echo "cuda_reply_cuda_batches ${cuda_reply_cuda_batches}"
+  echo "cuda_reply_cuda_tasks_submitted ${cuda_reply_cuda_tasks_submitted}"
   echo "cuda_reply_graph_cache_hits ${cuda_reply_graph_cache_hits}"
   echo "cuda_reply_workspace_cache_hits ${cuda_reply_workspace_cache_hits}"
   echo "cuda_peak_reply_device_cache_bytes ${cuda_peak_reply_device_cache_bytes}"
+  echo "end_reply_batches ${cpu_end_reply_batches}"
+  echo "end_reply_tasks ${cpu_end_reply_tasks}"
+  echo "end_reply_unique_tasks ${cpu_end_reply_unique_tasks}"
+  echo "end_replies_generated ${cpu_end_replies_generated}"
   echo "cpu_end_reply_ms ${cpu_end_reply_ms}"
   echo "cpu_fused_end_reply_ms ${cpu_fused_end_reply_ms}"
   echo "cuda_end_reply_ms ${cuda_end_reply_ms}"

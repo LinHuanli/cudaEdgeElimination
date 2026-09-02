@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -267,6 +268,19 @@ void AppendHtHamiltonRepliesUnchecked(const GraphSnapshot& graph, const NodeEdge
   }
 }
 
+void AppendHtEndRepliesUnchecked(const GraphSnapshot& graph, const HtEndReplyTask task,
+                                 std::vector<NodeEdge>* const replies) {
+  const std::int32_t begin = graph.row_offsets[static_cast<std::size_t>(task.endpoint)];
+  const std::int32_t end = graph.row_offsets[static_cast<std::size_t>(task.endpoint) + 1U];
+  replies->reserve(static_cast<std::size_t>(end - begin - 1));
+  for (std::int32_t offset = begin; offset < end; ++offset) {
+    const std::int32_t neighbor = graph.neighbors[static_cast<std::size_t>(offset)];
+    if (neighbor != task.internal_neighbor) {
+      replies->push_back(CanonicalEdge(task.endpoint, neighbor));
+    }
+  }
+}
+
 std::vector<HtCdCandidate> FinalizeCdCandidates(const GraphSnapshot& graph, const NodeEdge target,
                                                 const HtShallowOptions& options,
                                                 const std::vector<HtCdScreenTask>& tasks,
@@ -346,9 +360,35 @@ enum class GraphValidationMode : std::uint8_t {
   kAlreadyValidated,
 };
 
-HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesImpl(
-    const GraphSnapshot& graph, const NodeEdge raw_target, const std::vector<std::int32_t>& centers,
-    const PathCompatibilityBackend backend, const GraphValidationMode validation_mode) {
+template <typename Reply>
+bool DeviceBatchMatchesUniqueReplies(const std::vector<std::uint64_t>& device_offsets,
+                                     const std::vector<Reply>& device_replies,
+                                     const std::vector<std::vector<Reply>>& cpu_replies) {
+  if (device_offsets.size() != cpu_replies.size() + 1U || device_offsets.empty() ||
+      device_offsets.front() != 0U || device_offsets.back() != device_replies.size()) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < cpu_replies.size(); ++index) {
+    const std::uint64_t begin = device_offsets[index];
+    const std::uint64_t end = device_offsets[index + 1U];
+    if (begin > end || end > device_replies.size() || end - begin != cpu_replies[index].size()) {
+      return false;
+    }
+    const auto device_begin =
+        device_replies.begin() + static_cast<std::ptrdiff_t>(device_offsets[index]);
+    if (!std::equal(cpu_replies[index].begin(), cpu_replies[index].end(), device_begin)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesImpl(const GraphSnapshot& graph,
+                                                         const NodeEdge raw_target,
+                                                         const std::vector<std::int32_t>& centers,
+                                                         const PathCompatibilityBackend backend,
+                                                         const GraphValidationMode validation_mode,
+                                                         const bool deduplicate_cuda_tasks) {
   HtHamiltonReplyBatchResult result;
   const SteadyClock::time_point validation_begin = SteadyClock::now();
   std::string reason;
@@ -373,6 +413,8 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesImpl(
   result.offsets.reserve(centers.size() + 1U);
   result.offsets.push_back(0U);
   std::vector<std::int32_t> cache_index(static_cast<std::size_t>(graph.dimension), -1);
+  std::vector<std::int32_t> unique_centers;
+  unique_centers.reserve(std::min(centers.size(), static_cast<std::size_t>(graph.dimension)));
   std::vector<std::vector<HtNeighborPair>> reply_cache;
   reply_cache.reserve(std::min(centers.size(), static_cast<std::size_t>(graph.dimension)));
   const SteadyClock::time_point cpu_begin = SteadyClock::now();
@@ -384,6 +426,7 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesImpl(
         throw std::overflow_error("HT Hamilton reply 中心缓存索引溢出");
       }
       cached = static_cast<std::int32_t>(reply_cache.size());
+      unique_centers.push_back(center);
       reply_cache.emplace_back();
       AppendHtHamiltonRepliesUnchecked(graph, target, center, &reply_cache.back());
       ++result.unique_centers;
@@ -420,8 +463,9 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesImpl(
   detail::HtHamiltonReplyDeviceBatch cuda_batch;
   detail::HtReplyCudaCacheUsage cache_usage;
   const SteadyClock::time_point cuda_begin = SteadyClock::now();
+  const std::vector<std::int32_t>& cuda_centers = deduplicate_cuda_tasks ? unique_centers : centers;
   try {
-    cuda_batch = detail::EvaluateHtHamiltonRepliesCuda(graph, target, centers,
+    cuda_batch = detail::EvaluateHtHamiltonRepliesCuda(graph, target, cuda_centers,
                                                        &result.selected_device, &cache_usage);
   } catch (const std::exception&) {
     result.cuda_evaluate_ms = ElapsedMilliseconds(cuda_begin);
@@ -434,7 +478,10 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesImpl(
   }
   result.cuda_evaluate_ms = ElapsedMilliseconds(cuda_begin);
   const SteadyClock::time_point compare_begin = SteadyClock::now();
-  const bool matches = cuda_batch.offsets == result.offsets && cuda_batch.replies == result.replies;
+  const bool matches =
+      deduplicate_cuda_tasks
+          ? DeviceBatchMatchesUniqueReplies(cuda_batch.offsets, cuda_batch.replies, reply_cache)
+          : cuda_batch.offsets == result.offsets && cuda_batch.replies == result.replies;
   result.cuda_compare_ms = ElapsedMilliseconds(compare_begin);
   if (!matches) {
     throw std::logic_error("CUDA HT Hamilton replies 与 CPU 完整枚举不一致");
@@ -442,6 +489,7 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesImpl(
   result.cuda_graph_cache_hit = cache_usage.graph_hit;
   result.cuda_workspace_cache_hit = cache_usage.workspace_hit;
   result.cuda_resident_bytes = cache_usage.resident_bytes;
+  result.cuda_tasks_submitted = cuda_centers.size();
   result.backend = "cuda";
   return result;
 }
@@ -449,7 +497,8 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesImpl(
 HtEndReplyBatchResult EvaluateHtEndRepliesImpl(const GraphSnapshot& graph,
                                                const std::vector<HtEndReplyTask>& tasks,
                                                const PathCompatibilityBackend backend,
-                                               const GraphValidationMode validation_mode) {
+                                               const GraphValidationMode validation_mode,
+                                               const bool deduplicate_tasks) {
   std::string reason;
   if (validation_mode == GraphValidationMode::kValidate && !ValidateHtGraph(graph, &reason)) {
     throw std::invalid_argument(reason);
@@ -460,27 +509,52 @@ HtEndReplyBatchResult EvaluateHtEndRepliesImpl(const GraphSnapshot& graph,
   }
 
   HtEndReplyBatchResult result;
-  result.offsets.reserve(tasks.size() + 1U);
-  result.offsets.push_back(0U);
+  std::vector<std::size_t> logical_to_unique;
+  logical_to_unique.reserve(tasks.size());
+  std::vector<HtEndReplyTask> unique_tasks;
+  unique_tasks.reserve(tasks.size());
+  std::unordered_map<std::uint64_t, std::size_t> unique_index;
+  unique_index.reserve(tasks.size());
   for (const HtEndReplyTask& task : tasks) {
     if (task.endpoint < 0 || task.endpoint >= graph.dimension || task.internal_neighbor < 0 ||
         task.internal_neighbor >= graph.dimension || task.endpoint == task.internal_neighbor ||
         !graph.HasActiveEdge(task.endpoint, task.internal_neighbor)) {
       throw std::invalid_argument("HT end reply task 必须指定一条活动的路径内部边");
     }
-    const std::int32_t begin = graph.row_offsets[static_cast<std::size_t>(task.endpoint)];
-    const std::int32_t end = graph.row_offsets[static_cast<std::size_t>(task.endpoint) + 1U];
-    const std::uint64_t reply_count = static_cast<std::uint64_t>(end - begin - 1);
-    if (reply_count > std::numeric_limits<std::uint64_t>::max() - result.offsets.back()) {
+    const std::uint64_t key =
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(task.endpoint)) << 32U) |
+        static_cast<std::uint32_t>(task.internal_neighbor);
+    const auto [iterator, inserted] = unique_index.try_emplace(key, unique_tasks.size());
+    if (inserted) {
+      unique_tasks.push_back(task);
+    }
+    logical_to_unique.push_back(iterator->second);
+  }
+  result.unique_tasks = unique_tasks.size();
+
+  result.offsets.reserve(tasks.size() + 1U);
+  result.offsets.push_back(0U);
+  std::vector<std::vector<NodeEdge>> reply_cache;
+  if (deduplicate_tasks) {
+    reply_cache.resize(unique_tasks.size());
+    for (std::size_t index = 0U; index < unique_tasks.size(); ++index) {
+      AppendHtEndRepliesUnchecked(graph, unique_tasks[index], &reply_cache[index]);
+    }
+  }
+  for (std::size_t task_index = 0U; task_index < tasks.size(); ++task_index) {
+    std::vector<NodeEdge> logical_replies;
+    const std::vector<NodeEdge>* replies = nullptr;
+    if (deduplicate_tasks) {
+      replies = &reply_cache[logical_to_unique[task_index]];
+    } else {
+      AppendHtEndRepliesUnchecked(graph, tasks[task_index], &logical_replies);
+      replies = &logical_replies;
+    }
+    if (replies->size() > std::numeric_limits<std::uint64_t>::max() - result.offsets.back()) {
       throw std::overflow_error("HT end reply 总数溢出");
     }
-    for (std::int32_t offset = begin; offset < end; ++offset) {
-      const std::int32_t neighbor = graph.neighbors[static_cast<std::size_t>(offset)];
-      if (neighbor != task.internal_neighbor) {
-        result.replies.push_back(CanonicalEdge(task.endpoint, neighbor));
-      }
-    }
-    result.offsets.push_back(result.offsets.back() + reply_count);
+    result.replies.insert(result.replies.end(), replies->begin(), replies->end());
+    result.offsets.push_back(result.offsets.back() + replies->size());
   }
   result.cpu_verified = true;
   if (backend == PathCompatibilityBackend::kCpu) {
@@ -498,9 +572,10 @@ HtEndReplyBatchResult EvaluateHtEndRepliesImpl(const GraphSnapshot& graph,
 
   detail::HtEndReplyDeviceBatch cuda_batch;
   detail::HtReplyCudaCacheUsage cache_usage;
+  const std::vector<HtEndReplyTask>& cuda_tasks = deduplicate_tasks ? unique_tasks : tasks;
   try {
     cuda_batch =
-        detail::EvaluateHtEndRepliesCuda(graph, tasks, &result.selected_device, &cache_usage);
+        detail::EvaluateHtEndRepliesCuda(graph, cuda_tasks, &result.selected_device, &cache_usage);
   } catch (const std::exception&) {
     if (backend == PathCompatibilityBackend::kCuda) {
       throw;
@@ -509,12 +584,17 @@ HtEndReplyBatchResult EvaluateHtEndRepliesImpl(const GraphSnapshot& graph,
     result.backend = "cpu-fallback";
     return result;
   }
-  if (cuda_batch.offsets != result.offsets || cuda_batch.replies != result.replies) {
+  const bool matches =
+      deduplicate_tasks
+          ? DeviceBatchMatchesUniqueReplies(cuda_batch.offsets, cuda_batch.replies, reply_cache)
+          : cuda_batch.offsets == result.offsets && cuda_batch.replies == result.replies;
+  if (!matches) {
     throw std::logic_error("CUDA HT end replies 与 CPU 完整枚举不一致");
   }
   result.cuda_graph_cache_hit = cache_usage.graph_hit;
   result.cuda_workspace_cache_hit = cache_usage.workspace_hit;
   result.cuda_resident_bytes = cache_usage.resident_bytes;
+  result.cuda_tasks_submitted = cuda_tasks.size();
   result.backend = "cuda";
   return result;
 }
@@ -524,35 +604,41 @@ HtEndReplyBatchResult EvaluateHtEndRepliesImpl(const GraphSnapshot& graph,
 HtHamiltonReplyBatchResult EvaluateHtHamiltonReplies(const GraphSnapshot& graph,
                                                      const NodeEdge raw_target,
                                                      const std::vector<std::int32_t>& centers,
-                                                     const PathCompatibilityBackend backend) {
+                                                     const PathCompatibilityBackend backend,
+                                                     const bool deduplicate_cuda_tasks) {
   return EvaluateHtHamiltonRepliesImpl(graph, raw_target, centers, backend,
-                                       GraphValidationMode::kValidate);
+                                       GraphValidationMode::kValidate, deduplicate_cuda_tasks);
 }
 
 HtHamiltonReplyBatchResult detail::EvaluateHtHamiltonRepliesBoundToValidatedGraph(
     const GraphSnapshot& graph, const NodeEdge target_edge,
     const std::vector<std::int32_t>& centers, const HtGraphValidationBinding& binding,
-    const PathCompatibilityBackend backend) {
+    const PathCompatibilityBackend backend, const bool deduplicate_cuda_tasks) {
   if (!binding.Matches(graph)) {
     throw std::invalid_argument("HT graph validation binding 与图对象不一致");
   }
   return EvaluateHtHamiltonRepliesImpl(graph, target_edge, centers, backend,
-                                       GraphValidationMode::kAlreadyValidated);
+                                       GraphValidationMode::kAlreadyValidated,
+                                       deduplicate_cuda_tasks);
 }
 
 HtEndReplyBatchResult EvaluateHtEndReplies(const GraphSnapshot& graph,
                                            const std::vector<HtEndReplyTask>& tasks,
-                                           const PathCompatibilityBackend backend) {
-  return EvaluateHtEndRepliesImpl(graph, tasks, backend, GraphValidationMode::kValidate);
+                                           const PathCompatibilityBackend backend,
+                                           const bool deduplicate_tasks) {
+  return EvaluateHtEndRepliesImpl(graph, tasks, backend, GraphValidationMode::kValidate,
+                                  deduplicate_tasks);
 }
 
 HtEndReplyBatchResult detail::EvaluateHtEndRepliesBoundToValidatedGraph(
     const GraphSnapshot& graph, const std::vector<HtEndReplyTask>& tasks,
-    const HtGraphValidationBinding& binding, const PathCompatibilityBackend backend) {
+    const HtGraphValidationBinding& binding, const PathCompatibilityBackend backend,
+    const bool deduplicate_tasks) {
   if (!binding.Matches(graph)) {
     throw std::invalid_argument("HT graph validation binding 与图对象不一致");
   }
-  return EvaluateHtEndRepliesImpl(graph, tasks, backend, GraphValidationMode::kAlreadyValidated);
+  return EvaluateHtEndRepliesImpl(graph, tasks, backend, GraphValidationMode::kAlreadyValidated,
+                                  deduplicate_tasks);
 }
 
 std::vector<HtCdCandidate> GenerateHtCdCandidates(const GraphSnapshot& graph,

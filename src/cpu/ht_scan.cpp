@@ -154,9 +154,13 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.hamilton_reply_neighbor_pairs_tested = wavefront.hamilton_reply_neighbor_pairs_tested;
     attempt.hamilton_replies_generated = wavefront.hamilton_replies_generated;
     attempt.reply_cuda_batches = wavefront.reply_cuda_batches;
+    attempt.reply_cuda_tasks_submitted = wavefront.reply_cuda_tasks_submitted;
     attempt.reply_cuda_graph_cache_hits = wavefront.reply_cuda_graph_cache_hits;
     attempt.reply_cuda_workspace_cache_hits = wavefront.reply_cuda_workspace_cache_hits;
     attempt.peak_reply_device_cache_bytes = wavefront.peak_reply_device_cache_bytes;
+    attempt.end_reply_batches = wavefront.end_reply_batches;
+    attempt.end_reply_tasks = wavefront.end_reply_tasks;
+    attempt.end_reply_unique_tasks = wavefront.end_reply_unique_tasks;
     attempt.end_replies_generated = wavefront.end_replies_generated;
     attempt.candidate_ms = wavefront.candidate_ms;
     attempt.work_graph_ms = wavefront.work_graph_ms;
@@ -235,10 +239,15 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.hamilton_reply_neighbor_pairs_tested += attempt.hamilton_reply_neighbor_pairs_tested;
     scan.hamilton_replies_generated += attempt.hamilton_replies_generated;
     scan.reply_cuda_batches += attempt.reply_cuda_batches;
+    scan.reply_cuda_tasks_submitted += attempt.reply_cuda_tasks_submitted;
     scan.reply_cuda_graph_cache_hits += attempt.reply_cuda_graph_cache_hits;
     scan.reply_cuda_workspace_cache_hits += attempt.reply_cuda_workspace_cache_hits;
     scan.peak_reply_device_cache_bytes =
         std::max(scan.peak_reply_device_cache_bytes, attempt.peak_reply_device_cache_bytes);
+    scan.end_reply_batches += attempt.end_reply_batches;
+    scan.end_reply_tasks += attempt.end_reply_tasks;
+    scan.end_reply_unique_tasks += attempt.end_reply_unique_tasks;
+    scan.end_replies_generated += attempt.end_replies_generated;
     scan.candidate_ms += attempt.candidate_ms;
     scan.work_graph_ms += attempt.work_graph_ms;
     scan.root_child_normalize_ms += attempt.root_child_normalize_ms;

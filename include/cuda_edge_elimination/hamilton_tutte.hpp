@@ -61,6 +61,8 @@ struct HtHamiltonReplyBatchResult {
   bool cpu_verified{false};
   std::uint64_t unique_centers{};
   std::uint64_t neighbor_pairs_tested{};
+  // 实际交给 CUDA 的 center 数；CPU/fallback 后端保持为 0。
+  std::uint64_t cuda_tasks_submitted{};
   bool cuda_graph_cache_hit{false};
   bool cuda_workspace_cache_hit{false};
   std::uint64_t cuda_resident_bytes{};
@@ -85,6 +87,9 @@ struct HtEndReplyBatchResult {
   std::string backend;
   int selected_device{-1};
   bool cpu_verified{false};
+  std::uint64_t unique_tasks{};
+  // 实际交给 CUDA 的有向 end task 数；CPU/fallback 后端保持为 0。
+  std::uint64_t cuda_tasks_submitted{};
   bool cuda_graph_cache_hit{false};
   bool cuda_workspace_cache_hit{false};
   std::uint64_t cuda_resident_bytes{};
@@ -207,6 +212,8 @@ struct HtWavefrontOptions {
   PathCompatibilityBackend hamilton_reply_backend{PathCompatibilityBackend::kAuto};
   // false 仅用于同一二进制的性能基线；每批前释放 reply CUDA 驻留缓存。
   bool reuse_reply_cuda_cache{true};
+  // 精确相同的 center/end task 只向 CUDA 提交一次；CPU 仍构造完整逻辑结果。
+  bool deduplicate_reply_tasks{true};
 };
 
 struct HtWavefrontResult {
@@ -269,6 +276,7 @@ struct HtWavefrontResult {
   std::uint64_t hamilton_replies_generated{};
   // Hamilton/end 共用同一份不可变图和增长型 CUDA workspace。
   std::uint64_t reply_cuda_batches{};
+  std::uint64_t reply_cuda_tasks_submitted{};
   std::uint64_t reply_cuda_graph_cache_hits{};
   std::uint64_t reply_cuda_workspace_cache_hits{};
   std::uint64_t peak_reply_device_cache_bytes{};
@@ -277,6 +285,7 @@ struct HtWavefrontResult {
   bool end_reply_cpu_verified{false};
   std::uint64_t end_reply_batches{};
   std::uint64_t end_reply_tasks{};
+  std::uint64_t end_reply_unique_tasks{};
   std::uint64_t end_replies_generated{};
   std::uint64_t reply_frontier_batches{};
   std::uint64_t reply_frontier_states{};
@@ -395,16 +404,20 @@ GenerateHtCdCandidates(const GraphSnapshot& graph, NodeEdge target_edge,
 [[nodiscard]] std::vector<HtNeighborPair>
 EnumerateHtHamiltonReplies(const GraphSnapshot& graph, NodeEdge target_edge, std::int32_t center);
 
-// 批量枚举多个中心的 surviving 邻边对；CUDA count/write 返回前与 CPU 完整列表比较。
+// 批量枚举多个中心的 surviving 邻边对。CPU 始终展开完整逻辑列表；启用去重时，
+// CUDA 仅执行首次出现的唯一 center，并逐项与对应 CPU 唯一列表核对。
 [[nodiscard]] HtHamiltonReplyBatchResult
 EvaluateHtHamiltonReplies(const GraphSnapshot& graph, NodeEdge target_edge,
                           const std::vector<std::int32_t>& centers,
-                          PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto);
+                          PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto,
+                          bool deduplicate_cuda_tasks = true);
 
-// 批量枚举 end move 的活动边 replies；每项排除指向路径内部的唯一邻边。
+// 批量枚举 end move 的活动边 replies；每项排除指向路径内部的唯一邻边。启用去重时，
+// 精确相同的有向 task 只枚举/提交一次，再按原始 task 顺序展开完整逻辑列表。
 [[nodiscard]] HtEndReplyBatchResult
 EvaluateHtEndReplies(const GraphSnapshot& graph, const std::vector<HtEndReplyTask>& tasks,
-                     PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto);
+                     PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto,
+                     bool deduplicate_tasks = true);
 
 // 依次尝试 c,d OR move；一个 move 只有在全部 Hamilton replies 有叶证明时才成功。
 [[nodiscard]] HtShallowResult ProveEdgeByShallowHt(const GraphSnapshot& graph, NodeEdge target_edge,
@@ -461,12 +474,14 @@ EvaluateHtCdCandidatesBoundToValidatedGraph(const GraphSnapshot& graph, NodeEdge
 [[nodiscard]] HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesBoundToValidatedGraph(
     const GraphSnapshot& graph, NodeEdge target_edge, const std::vector<std::int32_t>& centers,
     const HtGraphValidationBinding& binding,
-    PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto);
+    PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto,
+    bool deduplicate_cuda_tasks = true);
 
 [[nodiscard]] HtEndReplyBatchResult EvaluateHtEndRepliesBoundToValidatedGraph(
     const GraphSnapshot& graph, const std::vector<HtEndReplyTask>& tasks,
     const HtGraphValidationBinding& binding,
-    PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto);
+    PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto,
+    bool deduplicate_tasks = true);
 
 struct HtPathStateSpan {
   std::uint32_t node_begin{};

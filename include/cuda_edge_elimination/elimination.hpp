@@ -122,9 +122,13 @@ struct HtScanAttempt {
   std::uint64_t hamilton_reply_neighbor_pairs_tested{};
   std::uint64_t hamilton_replies_generated{};
   std::uint64_t reply_cuda_batches{};
+  std::uint64_t reply_cuda_tasks_submitted{};
   std::uint64_t reply_cuda_graph_cache_hits{};
   std::uint64_t reply_cuda_workspace_cache_hits{};
   std::uint64_t peak_reply_device_cache_bytes{};
+  std::uint64_t end_reply_batches{};
+  std::uint64_t end_reply_tasks{};
+  std::uint64_t end_reply_unique_tasks{};
   std::uint64_t end_replies_generated{};
   double candidate_ms{};
   double work_graph_ms{};
@@ -209,9 +213,14 @@ struct HtScanResult {
   std::uint64_t hamilton_reply_neighbor_pairs_tested{};
   std::uint64_t hamilton_replies_generated{};
   std::uint64_t reply_cuda_batches{};
+  std::uint64_t reply_cuda_tasks_submitted{};
   std::uint64_t reply_cuda_graph_cache_hits{};
   std::uint64_t reply_cuda_workspace_cache_hits{};
   std::uint64_t peak_reply_device_cache_bytes{};
+  std::uint64_t end_reply_batches{};
+  std::uint64_t end_reply_tasks{};
+  std::uint64_t end_reply_unique_tasks{};
+  std::uint64_t end_replies_generated{};
   double target_selection_ms{};
   double candidate_ms{};
   double work_graph_ms{};

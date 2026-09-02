@@ -262,6 +262,7 @@ struct WaveBuildContext {
   PathCompatibilityBackend path_append_backend{PathCompatibilityBackend::kAuto};
   PathCompatibilityBackend hamilton_reply_backend{PathCompatibilityBackend::kAuto};
   bool reuse_reply_cuda_cache{true};
+  bool deduplicate_reply_tasks{true};
   std::uint32_t reply_frontier_batch_states{256};
   std::uint32_t leaf_frontier_batch_states{256};
   bool fuse_leaf_buckets{false};
@@ -387,6 +388,9 @@ void RecordHamiltonReplyBatch(WaveBuildContext* const context,
   if (center_count == 0U) {
     return;
   }
+  if (batch.unique_centers > center_count) {
+    throw std::logic_error("HT Hamilton reply 唯一 center 多于逻辑 center");
+  }
   HtWavefrontResult& result = *context->result;
   if (result.hamilton_reply_batches == std::numeric_limits<std::uint64_t>::max() ||
       center_count > std::numeric_limits<std::uint64_t>::max() - result.hamilton_reply_centers ||
@@ -420,7 +424,12 @@ void RecordHamiltonReplyBatch(WaveBuildContext* const context,
     result.hamilton_reply_selected_device = batch.selected_device;
   }
   if (batch.backend == "cuda") {
+    if (batch.cuda_tasks_submitted > center_count) {
+      throw std::logic_error("HT Hamilton reply CUDA 提交任务多于逻辑 center");
+    }
     if (result.reply_cuda_batches == std::numeric_limits<std::uint64_t>::max() ||
+        batch.cuda_tasks_submitted >
+            std::numeric_limits<std::uint64_t>::max() - result.reply_cuda_tasks_submitted ||
         (batch.cuda_graph_cache_hit &&
          result.reply_cuda_graph_cache_hits == std::numeric_limits<std::uint64_t>::max()) ||
         (batch.cuda_workspace_cache_hit &&
@@ -428,6 +437,7 @@ void RecordHamiltonReplyBatch(WaveBuildContext* const context,
       throw std::overflow_error("HT reply CUDA 缓存统计溢出");
     }
     ++result.reply_cuda_batches;
+    result.reply_cuda_tasks_submitted += batch.cuda_tasks_submitted;
     result.reply_cuda_graph_cache_hits += static_cast<std::uint64_t>(batch.cuda_graph_cache_hit);
     result.reply_cuda_workspace_cache_hits +=
         static_cast<std::uint64_t>(batch.cuda_workspace_cache_hit);
@@ -447,7 +457,7 @@ EvaluateHamiltonReplyBatch(WaveBuildContext* const context,
     }
     HtHamiltonReplyBatchResult batch = detail::EvaluateHtHamiltonRepliesBoundToValidatedGraph(
         *context->graph, context->target, centers, *context->graph_validation_binding,
-        context->hamilton_reply_backend);
+        context->hamilton_reply_backend, context->deduplicate_reply_tasks);
     RecordHamiltonReplyBatch(context, batch, centers.size());
     return batch;
   } catch (const std::bad_alloc&) {
@@ -481,15 +491,21 @@ void RecordEndReplyBatch(WaveBuildContext* const context, const HtEndReplyBatchR
   if (task_count == 0U) {
     return;
   }
+  if (batch.unique_tasks > task_count) {
+    throw std::logic_error("HT end reply 唯一任务多于逻辑 task");
+  }
   HtWavefrontResult& result = *context->result;
   if (result.end_reply_batches == std::numeric_limits<std::uint64_t>::max() ||
       task_count > std::numeric_limits<std::uint64_t>::max() - result.end_reply_tasks ||
+      batch.unique_tasks >
+          std::numeric_limits<std::uint64_t>::max() - result.end_reply_unique_tasks ||
       batch.replies.size() >
           std::numeric_limits<std::uint64_t>::max() - result.end_replies_generated) {
     throw std::overflow_error("HT end reply 批处理统计溢出");
   }
   ++result.end_reply_batches;
   result.end_reply_tasks += static_cast<std::uint64_t>(task_count);
+  result.end_reply_unique_tasks += batch.unique_tasks;
   result.end_replies_generated += static_cast<std::uint64_t>(batch.replies.size());
   result.end_reply_cpu_verified = result.end_reply_batches == 1U
                                       ? batch.cpu_verified
@@ -503,7 +519,12 @@ void RecordEndReplyBatch(WaveBuildContext* const context, const HtEndReplyBatchR
     result.end_reply_selected_device = batch.selected_device;
   }
   if (batch.backend == "cuda") {
+    if (batch.cuda_tasks_submitted > task_count) {
+      throw std::logic_error("HT end reply CUDA 提交任务多于逻辑 task");
+    }
     if (result.reply_cuda_batches == std::numeric_limits<std::uint64_t>::max() ||
+        batch.cuda_tasks_submitted >
+            std::numeric_limits<std::uint64_t>::max() - result.reply_cuda_tasks_submitted ||
         (batch.cuda_graph_cache_hit &&
          result.reply_cuda_graph_cache_hits == std::numeric_limits<std::uint64_t>::max()) ||
         (batch.cuda_workspace_cache_hit &&
@@ -511,6 +532,7 @@ void RecordEndReplyBatch(WaveBuildContext* const context, const HtEndReplyBatchR
       throw std::overflow_error("HT reply CUDA 缓存统计溢出");
     }
     ++result.reply_cuda_batches;
+    result.reply_cuda_tasks_submitted += batch.cuda_tasks_submitted;
     result.reply_cuda_graph_cache_hits += static_cast<std::uint64_t>(batch.cuda_graph_cache_hit);
     result.reply_cuda_workspace_cache_hits +=
         static_cast<std::uint64_t>(batch.cuda_workspace_cache_hit);
@@ -528,8 +550,8 @@ EvaluateEndReplyBatch(WaveBuildContext* const context, const std::vector<HtEndRe
       throw std::logic_error("HT wavefront 缺少 graph validation binding");
     }
     HtEndReplyBatchResult batch = detail::EvaluateHtEndRepliesBoundToValidatedGraph(
-        *context->graph, tasks, *context->graph_validation_binding,
-        context->hamilton_reply_backend);
+        *context->graph, tasks, *context->graph_validation_binding, context->hamilton_reply_backend,
+        context->deduplicate_reply_tasks);
     RecordEndReplyBatch(context, batch, tasks.size());
     return batch;
   } catch (const std::bad_alloc&) {
@@ -1527,6 +1549,7 @@ ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target
                            .path_append_backend = options.path_append_backend,
                            .hamilton_reply_backend = options.hamilton_reply_backend,
                            .reuse_reply_cuda_cache = options.reuse_reply_cuda_cache,
+                           .deduplicate_reply_tasks = options.deduplicate_reply_tasks,
                            .reply_frontier_batch_states = options.reply_frontier_batch_states,
                            .leaf_frontier_batch_states = options.leaf_frontier_batch_states,
                            .fuse_leaf_buckets = options.fuse_leaf_buckets,
