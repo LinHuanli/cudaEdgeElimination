@@ -28,7 +28,7 @@
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
-| M5 中大型调优 | 进行中（JV 三轮 + HT host fast paths） | point/path/reply/leaf/scan-binding fast paths；d15112 CPU-fused search `0.302 s` |
+| M5 中大型调优 | 进行中（JV 三轮 + HT host fast paths） | point/path/reply/leaf/scan-binding fast paths；d15112 CPU-fused search `0.298 s` |
 
 ## 当前基准结果
 
@@ -83,6 +83,8 @@ M5 HT scan 跨目标快照绑定复用绑定 `649f3f4`：同一只读 scan 只�
 M5 HT leaf path 稀疏验证绑定复用绑定 `8c19740`：batch 内每个 path 以实际节点规模认证一次，后续 outside cursors 只检查 graph/path 对象身份；公开 scalar 与成功 proof 的 dense verifier 完全不变。2,000 组随机 sparse/dense 规范结果和失败原因一致，篡改 path 的 batch/scalar proof 字节一致。三实例 leaf setup 加速 `2.487×/4.641×/6.814×`，CPU-fused search 加速 `1.051×/1.105×/1.196×`；d15112 search/total/wall 降至 `312.481/478.235/627.747 ms`。三实例五路规范工作、边、proof、JV 固定点和 tour 均经 54 项跨提交精确比较确认不变。
 
 M5 HT CPU cost 固定计划绑定 `273ac9d`：task 验证不再为 3–5 条边构造 `std::set`，每阶 canonical templates 编译为固定端口对，task 内规范边/冲突/距离惰性复用。CUDA kernel 不变且输出仍逐 cell 经完整 CPU 矩阵认证。三实例 cost evaluate 加速 `1.510×/1.580×/1.431×`，CPU-fused search 加速 `1.274×/1.131×/1.035×`；pcb3038 search/wall 降至 `913.156/950.567 ms`，d15112 search 为 `301.853 ms`。三实例五路规范工作、边、proof、JV 固定点和 tour 均经 54 项跨提交精确比较确认不变。
+
+M5 HT CPU batch 距离表绑定 `0d506ab`：同步 cost batch 在 512 节点和约 6 MiB 硬上限内一次计算精确对称距离表，预计不足 2× 重用、图过大或小矩阵均回退 task-local scorer。pcb3038/d15112 画像的 batch 内 pair 重用上界为 `282.948×/131.206×`；三实例 cost evaluate 加速 `1.195×/1.057×/1.216×`。pcb3038 search/wall 降至 `843.266/881.674 ms`，d15112 search 降至 `298.238 ms`；rl5915 cost 改善但单次端到端回退 2.89%，不作为整体收益。CPU/CUDA 完整矩阵认证、sanitizer 和 54 项跨提交精确比较全部通过。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 

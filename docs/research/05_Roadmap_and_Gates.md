@@ -111,6 +111,8 @@ leaf path 稀疏验证绑定复用已完成：batch 内每个 path 对象只执�
 
 CPU exact cost 固定验证与重连计划已完成：3–5 条删除边用固定数组认证，规范 templates 一次编译为端口对计划，task 内规范边/冲突/整数距离按 pair 复用；CUDA 结果仍逐 cell 由完整 CPU 矩阵认证。三实例 cost evaluate 加速 `1.510×/1.580×/1.431×`，CPU-fused search 加速 `1.274×/1.131×/1.035×`；54 项跨提交精确比较全部通过。下一切片先测量融合 batch 的实际 node-pair 重复率，再决定 batch-local 距离缓存或 cursor prepare 优化。
 
+CPU batch 精确距离表复用已完成：画像确认 pcb3038/d15112 的 batch 内 task-pair 对局部 unique pair 分别有 `282.948×/131.206×` 重用空间；同步 cost 调用在最多 512 个端口节点、约 6 MiB 总额外内存且预计至少 2× 减少距离计算时建表，其他情况安全回退。三实例 cost evaluate 加速 `1.195×/1.057×/1.216×`，pcb3038 CPU-fused search/wall 加速 `1.083×/1.078×`，d15112 search 加速 `1.012×`；rl5915 距离阶段改善但端到端处于负向噪声。54 项跨提交精确比较与完整 sanitizer 门禁通过。下一切片消除融合矩阵按 cursor slice 的 scatter 复制。
+
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
