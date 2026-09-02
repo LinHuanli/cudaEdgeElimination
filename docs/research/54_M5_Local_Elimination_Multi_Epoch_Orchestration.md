@@ -143,7 +143,7 @@ artifact：`artifacts/pcb3038-local-elimination-20260902-OiRUCG`。运行绑定�
 
 多 epoch 重排已经成为可执行基线，但 pcb3038 的三个 8-target epochs 只覆盖目标序列的一小部分。下一阶段仍需：
 
-1. 在同一不可变快照中跨 target 合并 leaf/reply 工作，保持每目标预算与 proof 顺序；
+1. 根 `c,d` screen 跨 target 融合已在 d15112 七对 A/B 中因 candidate/search/total/wall 全部回退而排除；下一步只画像并合并实质重复的 leaf/reply/work-graph 工作，同时保持每目标预算与 proof 顺序；
 2. 活动 edge-id 紧凑 launch 已在 d15112 上因端到端回退而排除；只有 inactive 比例显著提高或设备端能免费维护索引时才重新评估；
 3. 单卡闭环稳定后再做多 GPU 静态切片和 CPU 汇总复核；
 4. M3.1 能输出逐边安全 LP 授权后，再评测 LP—JV—HT 交替固定点；

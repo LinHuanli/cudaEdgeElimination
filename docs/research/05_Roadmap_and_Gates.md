@@ -125,7 +125,9 @@ JV—HT 多 epoch 编排基线已完成：`local-eliminate` 先达到 JV 固定�
 
 JV 活动 edge-id 紧凑 launch 已完成排除实验：d15112 三个 JV epochs 的物理行仅从 499,497 减至 484,885（`-2.925%`）。最终原型的 kernel 中位数改善 `1.272%`，但 host compaction/H2D 使 propose 回退 `7.722%`、算法总时间回退 `1.052%`；候选、删除数和最终哈希保持一致。原型已完整撤销，除非 inactive 比例显著提高或设备端能免费维护索引，否则不重新引入。
 
-M5 仍未完成：跨目标 HT 融合、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
+HT 跨目标根 `c,d` 候选融合也已完成排除实验：同一 clean commit 上七对交错 d15112 A/B 将 8 targets、2,400 条 screen tasks 合为一次 CUDA launch，但 candidate/search/total/wall 中位数分别回退 `0.793%/0.764%/1.268%/2.514%`，配对差值方向一致。14 份 proof 均独立重放，活动边、工作签名、最优 tour 和最终哈希不变。原型已完整撤销；后续跨目标工作只聚焦真正占主导的 leaf/reply/work-graph 共享。
+
+M5 仍未完成：跨目标 HT leaf/reply/work-graph 融合、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending；根 `c,d` screen 融合不再列为 pending。
 
 ## 当前完成定义
 

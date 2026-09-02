@@ -30,6 +30,7 @@
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
 | M5 JV—HT 多 epoch 编排 | 完成（有界调度基线） | JV 固定点；无提交 sweep 推进；提交后重排；联合 V2 重放；pcb3038 CPU/CUDA/tour 门禁 |
 | M5 JV 活动 edge-id 紧凑启动 | 已评测并排除 | d15112 启动行 `-2.925%`，kernel `+1.272%`，算法总时间反而回退 `1.052%`；原型已撤销 |
+| M5 HT 跨目标根 `c,d` 候选融合 | 已评测并排除 | d15112 七对 A/B 的 candidate/search/total/wall 均回退；14 份 proof 重放、边集和 tour 门禁通过；原型已撤销 |
 | M5 中大型调优 | 进行中（JV 三轮 + HT host fast paths） | point/path/reply/leaf/scan-binding fast paths；d15112 CPU-fused search `0.284 s` |
 
 ## 当前基准结果
@@ -43,6 +44,8 @@ M5 JV 驻留优化绑定 `25590af`：精确比较坐标、边端点和边权后�
 M5 JV 动态 edge-id 优化绑定 `41feceb`：CUDA CSR 不再重复上传 64 位权重，而用 32 位稳定 edge id 读取驻留权重；三实例算法中位数降为 `1.728/6.503/67.651 ms`，相对 CPU 为 `11.194×/30.517×/41.695×`，峰值驻留降为 `336084/1284024/6962204 bytes`。d15112 的同步 H2D/kernel/D2H 中位数为 `2.965/6.628/0.513 ms`；proof、最终图哈希与输出 SHA-256 均未改变。
 
 M5 JV 活动 edge-id 紧凑 launch 排除实验基于 `5bf92d6`：d15112 三个 JV epochs 的 kernel 行数从 499,497 降至 484,885（`-2.925%`），候选、7,312 条删除、159,187 条最终活动边和哈希 `76e196dd53d887d5` 不变。最终原型的 kernel 中位数从 `6.614268` 降至 `6.530124 ms`，但 propose 从 `11.408986` 升至 `12.289997 ms`，算法总时间从 `63.425767` 升至 `64.093234 ms`。该方案端到端回退 `1.052%`，源码已撤销，只保留项目内实验 artifact。
+
+M5 HT 跨目标根候选排除实验绑定 `a520591`：把 d15112 的 8 targets、2,400 条根 `c,d` screen tasks 合为一次 CUDA launch，仍逐 target 做 CPU flags、规范收尾、预算和 proof。七对交错 clean A/B 的 candidate/search/total/wall 中位数由 `149.537/777.077/940.211/1168.401 ms` 变为 `150.723/783.016/952.132/1197.778 ms`，分别回退 `0.793%/0.764%/1.268%/2.514%`；配对中位差也全部回退。14 份 proof 均独立重放，活动边文件一致，d15112 最优 tour 成本 1,573,084 且零缺边，最终哈希均为 `29c3b8fccaf1a3fc`。源码由 `cca0b55` 完整撤销，后续跨目标研究只保留 leaf/reply/work-graph 共享。
 
 M5 HT scan pilot 绑定 `cd5ec3e`：pcb3038 的 CPU JV 固定点有 6,704 条边和 6,476 个度数安全目标；最高权重 8-target 切片的 CPU/CUDA 工作签名均为 12,383 states、14,285 replies、9,120 leaf calls 和 5,085 moves，证明并提交相同 2 条边。CUDA/CPU search 为 `33.646/34.103 s`，仅 `1.014×`；最终 6,702 条边、哈希 `fe11f98414b04c0e`，两份 V2 均独立重放且 pcb3038 最优 tour 为 0 缺边。这是功能与资源 pilot，不是显著性能结论。
 
