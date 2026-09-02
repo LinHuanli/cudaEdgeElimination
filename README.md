@@ -50,7 +50,7 @@
 - 带锁定来源 SHA-256 和本地精确复核的 pcb3038/rl5915/d15112 最优 tour 获取工具；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 
-尚未完成的研究项（跨 target 的 heterogeneous leaf broker/continuation work graph、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。V3 的 transposed host-window 原型在 d15112 32-target 上把逻辑 states 从 40,044 降到 19,498、提交边从 11 增到 18，但因产生 19,504 个小 leaf batches 而显著慢于 wavefront，所以保持 opt-in；当前最佳单 GPU混合 pilot 相对旧 A5000 GPU 基线约 `1.64×`，仍比当前 CPU 慢约 10%。这些结果不是论文 Table 7 的同协议对比，详见 [V3 实现与 Pilot](docs/research/63_V3_单GPU原型实现与Pilot.md)。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。CPU 精确困难叶有 18 blocks 上限，CUDA 候选器上限为 13；任何超限或错误只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
+尚未完成的研究项（跨 target 的 heterogeneous leaf broker/continuation work graph、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。V3 的 transposed host-window 原型在 d15112 32-target 上把逻辑 states 从 40,044 降到 19,498、提交边从 11 增到 18，但因产生 19,504 个小 leaf batches 而显著慢于 wavefront，所以保持 opt-in；clean-commit 七对 A/B 中，当前最佳单 GPU混合路径相对旧 A5000 GPU 基线约 `1.53×`，但 process wall 仍比当前 CPU 慢约 18.8%。这些结果不是论文 Table 7 的同协议对比，详见 [V3 实现与 Pilot](docs/research/63_V3_单GPU原型实现与Pilot.md)。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。CPU 精确困难叶有 18 blocks 上限，CUDA 候选器上限为 13；任何超限或错误只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
 
 ## 快速开始
 

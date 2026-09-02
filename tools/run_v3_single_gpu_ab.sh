@@ -365,6 +365,20 @@ awk -F ',' '
         hybrid_median, p25s["hybrid" SUBSEP column], p75s["hybrid" SUBSEP column],
         hybrid_median == 0 ? 0 : cpu_median / hybrid_median
     }
+    print "paired_metric median_speedup p25 p75"
+    run_count = counts["cpu" SUBSEP 3]
+    for (column = 3; column <= 6; ++column) {
+      delete sorted
+      for (run = 1; run <= run_count; ++run) {
+        cpu_value = cpu_by_run[run SUBSEP column]
+        hybrid_value = hybrid_by_run[run SUBSEP column]
+        if (cpu_value <= 0 || hybrid_value <= 0) exit 21
+        sorted[run] = cpu_value / hybrid_value
+      }
+      sort_values(sorted, run_count)
+      printf "%s %.6f %.6f %.6f\n", labels[column], quantile(run_count, 0.5),
+        quantile(run_count, 0.25), quantile(run_count, 0.75)
+    }
     print "strength_fields states,replies,leaf_calls,committed"
     print "cpu_strength " strength["cpu"]
     print "hybrid_strength " strength["hybrid"]
@@ -406,6 +420,10 @@ manifest="${run_dir}/manifest.txt"
   echo "verified_edge_sha256 $(sha256sum "${run_dir}/cpu.1.edg" | awk '{ print $1 }')"
   echo "canonical_proof_sha256 $(sha256sum "${run_dir}/cpu.1.proof.canonical" | awk '{ print $1 }')"
   echo "work_signature_sha256 $(sha256sum "${run_dir}/cpu.1.work-signature" | awk '{ print $1 }')"
+  echo "timed_proof_replays $((2 * pairs))"
+  echo "timed_protected_tour_checks $((2 * pairs))"
+  echo "total_independent_proof_replays $((2 * pairs + 3))"
+  echo "total_independent_tour_checks $((2 * pairs + 3))"
   echo "compiler $(c++ --version | awk 'NR == 1')"
   echo "nvcc $(nvcc --version | awk '/release/ { print; exit }')"
   while IFS= read -r gpu_row; do echo "gpu_initial ${gpu_row}"; done <<<"${gpu_initial_snapshot}"

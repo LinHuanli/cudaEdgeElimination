@@ -2,7 +2,7 @@
 
 ## 结论
 
-V3 中可独立验收的 A0、A1 和验证热路径已经落地；C1 完成的是保持 DFS 规范次序的 host-window 转置原型，还不是设计稿要求的跨目标 continuation broker。当前最好的单 GPU 混合 wavefront 相对本分支之前的 A5000 全 CUDA 基线明显改善，但仍未超过当前 8 线程 CPU 基线，因此默认调度继续保持 `wavefront`，`transposed` 仅作为显式研究后端。
+V3 中可独立验收的 A0、A1 和验证热路径已经落地；C1 完成的是保持 DFS 规范次序的 host-window 转置原型，还不是设计稿要求的跨目标 continuation broker。正式七对 A/B 表明，当前单 GPU 混合 wavefront 相对本分支之前的 A5000 全 CUDA 基线明显改善，但仍未超过当前 8 线程 CPU 基线，因此默认调度继续保持 `wavefront`，`transposed` 仅作为显式研究后端。
 
 所有 GPU 路径仍是候选器。实际删除只发生在同一不可变快照上的完整 CPU sidecar 重放、最小度门禁和原子 epoch 提交之后。
 
@@ -87,7 +87,33 @@ V3 中可独立验收的 A0、A1 和验证热路径已经落地；C1 完成的�
 
 六路均为 40,044 states、52,917 replies、4,100 leaf calls 和 11 条提交边；最终边文件 SHA-256 都是 `3001cd0734256acfe31a2bc28480c403df48d4261d86818e2eafe28717d59905`，规范 proof、工作签名和受保护 tour 均通过比较。
 
-最佳混合路径相对旧 A5000 全 CUDA wall `2.845 s` 约为 `1.64x`；但相对当前 CPU pilot `1.57 s` 仍慢约 10.2%。这不满足设计门禁的“单 GPU 至少比 CPU 快 1.25x”，所以不能改变默认后端。
+这组一次性消融中的最佳混合路径相对旧 A5000 全 CUDA wall `2.845 s` 约为 `1.64x`；但相对同轮 CPU pilot `1.57 s` 仍慢约 10.2%。一次性结果只用于选择正式 A/B 的后端组合，不作为最终速度结论。
+
+### Clean-commit 七对 A/B
+
+正式实验绑定提交 `a8faebb6ed7107f2ce50b9dd4264fa1613710bce`，`git_dirty=0`，在同一 `cuda08`/GPU UUID 上先各预热一次，再按奇数对 CPU→hybrid、偶数对 hybrid→CPU 交替运行七对。CPU 使用一个 target worker 和 8 个 OpenMP cost threads；hybrid 使用四个共享单 GPU 的 target workers、每 worker 2 个 CPU cost threads，只把 candidate 与 leaf 放到 CUDA，reply/path/propagation/exact/verification/commit 保持 CPU。
+
+| 指标 | CPU 中位数 [P25,P75] (ms) | Hybrid 中位数 [P25,P75] (ms) | CPU/Hybrid |
+|---|---:|---:|---:|
+| target execution | 1,157.346 [1,155.321,1,158.722] | 1,223.906 [1,212.441,1,225.691] | 0.946x |
+| algorithm total | 1,398.865 [1,394.984,1,401.637] | 1,595.436 [1,548.427,1,625.286] | 0.877x |
+| process wall | 1,564.663 [1,558.524,1,567.197] | 1,858.134 [1,819.663,1,861.787] | 0.842x |
+| commit | 204.902 [203.720,208.499] | 217.685 [216.528,218.768] | 0.941x |
+
+混合路径的 target execution、algorithm total 和 process wall 分别比 CPU 慢约 `5.75%/14.05%/18.76%`。相对旧 A5000 全 CUDA wall `2.845 s`，正式混合中位数仍有 `1.53x` 改善；但它没有达到相对 CPU 的 `1.25x` Go 门槛。
+
+按同一 pair 直接计算的 CPU/Hybrid speedup 中位数为 target execution `0.946x`、algorithm total `0.873x`、process wall `0.838x`；它们与两路分别取中位数的结论一致。
+
+两路每次都保持 40,044 states、52,917 replies、4,100 leaf calls 和 11 条提交边。两次预热与 14 次计时输出的边 SHA-256 全部为 `3001cd0734256acfe31a2bc28480c403df48d4261d86818e2eafe28717d59905`；规范 proof SHA-256 为 `ddf89f79194f6590beb88317fdb6f50cf14fc3cc0fa4ab61fefdbc7818cd9b97`，工作签名 SHA-256 为 `0b09bf354d628a4bb4d20737ea0b4250ac7c71d0242cd0b0b81b62c9c3dc3108`。每次 proof 都由 CPU 可执行文件独立重放，每次结果都通过 1,573,084 最优 tour 门禁。
+
+原始结果位于忽略提交的 `artifacts/d15112-v3-single-gpu-ab-20260902T102225Z-3499737/`；manifest 记录 CUDA 12.6、驱动 610.43.02、GCC 16.1.1、GPU UUID、全部输入哈希和 `CUDAEE_HT_SCAN_REPORT_V18`。phase `search_ms` 是并行 targets 的逐任务耗时求和，不能与 `target_execution_ms` 墙钟相加，也不能用来计算单 GPU 端到端加速。
+
+## 验证状态
+
+- CPU Debug CTest `23/23` 通过，包含真实 Trace→replay 和 transposed CLI→独立 verifier。
+- A5000 `cuda-sm86-release` CTest `26/26` 通过，包含 pr299 CPU/CUDA 差分、单卡多 worker 与 `k=13` exact DP。
+- `compute-sanitizer --tool memcheck` 分别覆盖 k-opt/exact 和 Hamilton–Tutte，均为 `0 errors`。
+- `tools/check_workspace.py`、`git diff --check`、benchmark shell 语法和 clean-worktree 门禁通过。
 
 ## 与论文 Table 7 的关系
 
@@ -97,6 +123,6 @@ V3 中可独立验收的 A0、A1 和验证热路径已经落地；C1 完成的�
 
 ## 可复现实验与下一步
 
-正式单 GPU A/B 入口是 `tools/run_v3_single_gpu_ab.sh INSTANCE PHYSICAL_GPU [PAIRS]`。脚本要求 clean worktree 和最优 tour，固定 GPU UUID，先重建/重放 JV 固定点，再交替执行七对 CPU 与单 GPU混合 wavefront；每次运行都独立验证 proof、tour、边文件和规范工作签名，并输出中位数、P25/P75。
+正式单 GPU A/B 入口是 `tools/run_v3_single_gpu_ab.sh INSTANCE PHYSICAL_GPU [PAIRS]`。脚本要求 clean worktree 和最优 tour，固定 GPU UUID，先重建/重放 JV 固定点，再交替执行七对 CPU 与单 GPU混合 wavefront；每次运行都独立验证 proof、tour、边文件和规范工作签名，并输出普通及配对 speedup 的中位数、P25/P75。
 
 下一实现切片只有一个主目标：建立跨 target 的 heterogeneous leaf broker。它必须保留规范 child commit 顺序和逻辑预算，把多个 continuation 的 cost rows 合成少量大 batch，并用 generation token 丢弃短路后的迟到结果。达到 18 条证明且相对 CPU wall 至少 `1.25x` 前，`transposed` 保持 opt-in。
