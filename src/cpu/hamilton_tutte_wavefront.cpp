@@ -1383,8 +1383,7 @@ HtWavefrontResult
 ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target,
                            const HtWavefrontOptions& options,
                            const detail::KOptSnapshotBinding* snapshot_binding,
-                           const detail::HtGraphValidationBinding* graph_validation_binding,
-                           const HtPreparedCdCandidates* prepared_candidates) {
+                           const detail::HtGraphValidationBinding* graph_validation_binding) {
   HtWavefrontResult result;
   HtRecursiveProof& proof = result.proof;
   std::optional<detail::KOptSnapshotBinding> owned_snapshot_binding;
@@ -1415,68 +1414,45 @@ ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target
   }
 
   std::optional<detail::HtGraphValidationBinding> owned_graph_validation_binding;
-  HtCdBatchResult owned_candidates;
-  const HtCdBatchResult* candidates = nullptr;
+  HtCdBatchResult candidates;
   const SteadyClock::time_point candidate_begin = SteadyClock::now();
-  if (prepared_candidates != nullptr) {
-    const HtShallowOptions& root_options = options.search_options.root_options;
-    if (prepared_candidates->graph_identity != &graph ||
-        prepared_candidates->target_edge != proof.target_edge ||
-        prepared_candidates->max_neighborhood != root_options.max_neighborhood ||
-        prepared_candidates->max_cd_candidates != root_options.max_cd_candidates ||
-        prepared_candidates->max_candidate_degree != root_options.max_candidate_degree ||
-        prepared_candidates->cd_mode != root_options.cd_mode ||
-        !prepared_candidates->batch.cpu_verified ||
-        (prepared_candidates->batch.backend != "cpu" &&
-         prepared_candidates->batch.backend != "cuda")) {
-      proof.reason = "跨目标 HT c,d 候选绑定与 wavefront 选项不一致";
+  try {
+    if (graph_validation_binding == nullptr) {
+      owned_graph_validation_binding.emplace(graph);
+      graph_validation_binding = &*owned_graph_validation_binding;
+    }
+    candidates = detail::EvaluateHtCdCandidatesBoundToValidatedGraph(
+        graph, proof.target_edge, options.search_options.root_options, *graph_validation_binding);
+  } catch (const std::exception& error) {
+    if (options.search_options.root_options.candidate_backend == PathCompatibilityBackend::kAuto) {
+      try {
+        HtShallowOptions cpu_options = options.search_options.root_options;
+        cpu_options.candidate_backend = PathCompatibilityBackend::kCpu;
+        if (graph_validation_binding == nullptr) {
+          owned_graph_validation_binding.emplace(graph);
+          graph_validation_binding = &*owned_graph_validation_binding;
+        }
+        candidates = detail::EvaluateHtCdCandidatesBoundToValidatedGraph(
+            graph, proof.target_edge, cpu_options, *graph_validation_binding);
+      } catch (const std::exception& cpu_error) {
+        result.candidate_ms += ElapsedMilliseconds(candidate_begin);
+        proof.reason = cpu_error.what();
+        return result;
+      }
+    } else if (options.search_options.root_options.candidate_backend ==
+               PathCompatibilityBackend::kCuda) {
+      result.candidate_ms += ElapsedMilliseconds(candidate_begin);
+      result.status = HtSearchStatus::kUnresolved;
+      proof.reason = std::string("CUDA HT wavefront c,d 筛选失败: ") + error.what();
+      return result;
+    } else {
+      result.candidate_ms += ElapsedMilliseconds(candidate_begin);
+      proof.reason = error.what();
       return result;
     }
-    candidates = &prepared_candidates->batch;
-  } else {
-    try {
-      if (graph_validation_binding == nullptr) {
-        owned_graph_validation_binding.emplace(graph);
-        graph_validation_binding = &*owned_graph_validation_binding;
-      }
-      owned_candidates = detail::EvaluateHtCdCandidatesBoundToValidatedGraph(
-          graph, proof.target_edge, options.search_options.root_options, *graph_validation_binding);
-    } catch (const std::exception& error) {
-      if (options.search_options.root_options.candidate_backend ==
-          PathCompatibilityBackend::kAuto) {
-        try {
-          HtShallowOptions cpu_options = options.search_options.root_options;
-          cpu_options.candidate_backend = PathCompatibilityBackend::kCpu;
-          if (graph_validation_binding == nullptr) {
-            owned_graph_validation_binding.emplace(graph);
-            graph_validation_binding = &*owned_graph_validation_binding;
-          }
-          owned_candidates = detail::EvaluateHtCdCandidatesBoundToValidatedGraph(
-              graph, proof.target_edge, cpu_options, *graph_validation_binding);
-        } catch (const std::exception& cpu_error) {
-          result.candidate_ms += ElapsedMilliseconds(candidate_begin);
-          proof.reason = cpu_error.what();
-          return result;
-        }
-      } else if (options.search_options.root_options.candidate_backend ==
-                 PathCompatibilityBackend::kCuda) {
-        result.candidate_ms += ElapsedMilliseconds(candidate_begin);
-        result.status = HtSearchStatus::kUnresolved;
-        proof.reason = std::string("CUDA HT wavefront c,d 筛选失败: ") + error.what();
-        return result;
-      } else {
-        result.candidate_ms += ElapsedMilliseconds(candidate_begin);
-        proof.reason = error.what();
-        return result;
-      }
-    }
-    candidates = &owned_candidates;
-    result.candidate_ms += ElapsedMilliseconds(candidate_begin);
   }
-  if (candidates == nullptr) {
-    throw std::logic_error("HT wavefront 缺少 c,d 候选结果");
-  }
-  if (candidates->candidates.empty()) {
+  result.candidate_ms += ElapsedMilliseconds(candidate_begin);
+  if (candidates.candidates.empty()) {
     result.status = HtSearchStatus::kUnresolved;
     proof.reason = "HT wavefront 没有可用 c,d 根 move";
     return result;
@@ -1512,7 +1488,7 @@ ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target
                            .end_reply_invalid = false,
                            .end_reply_reason = {}};
   try {
-    for (const HtCdCandidate& candidate : candidates->candidates) {
+    for (const HtCdCandidate& candidate : candidates.candidates) {
       ++proof.cd_candidates_tested;
       std::vector<WaveState> states;
       WaveState root;
@@ -1637,7 +1613,7 @@ ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target
 
 HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeEdge raw_target,
                                          const HtWavefrontOptions& options) {
-  return ProveEdgeByWavefrontHtImpl(graph, raw_target, options, nullptr, nullptr, nullptr);
+  return ProveEdgeByWavefrontHtImpl(graph, raw_target, options, nullptr, nullptr);
 }
 
 HtWavefrontResult detail::ProveEdgeByWavefrontHtBoundToSnapshot(
@@ -1648,19 +1624,7 @@ HtWavefrontResult detail::ProveEdgeByWavefrontHtBoundToSnapshot(
     throw std::invalid_argument("HT wavefront snapshot binding 与图对象不一致");
   }
   return ProveEdgeByWavefrontHtImpl(graph, target_edge, options, &snapshot_binding,
-                                    &graph_validation_binding, nullptr);
-}
-
-HtWavefrontResult detail::ProveEdgeByWavefrontHtWithPreparedCdCandidates(
-    const GraphSnapshot& graph, const NodeEdge target_edge, const HtWavefrontOptions& options,
-    const KOptSnapshotBinding& snapshot_binding,
-    const HtGraphValidationBinding& graph_validation_binding,
-    const HtPreparedCdCandidates& prepared_candidates) {
-  if (!snapshot_binding.Matches(graph) || !graph_validation_binding.Matches(graph)) {
-    throw std::invalid_argument("HT wavefront snapshot binding 与图对象不一致");
-  }
-  return ProveEdgeByWavefrontHtImpl(graph, target_edge, options, &snapshot_binding,
-                                    &graph_validation_binding, &prepared_candidates);
+                                    &graph_validation_binding);
 }
 
 } // namespace cudaee

@@ -17,12 +17,6 @@ std::vector<std::uint8_t> ScreenHtCdCandidatesCuda(const GraphSnapshot&, NodeEdg
   throw std::runtime_error("当前二进制未编译 CUDA HT c,d 后端");
 }
 
-std::vector<std::uint8_t>
-ScreenHtCdCandidatesForTargetsCuda(const GraphSnapshot&, const std::vector<HtCdTargetScreenTask>&,
-                                   HtCdMode, int*) {
-  throw std::runtime_error("当前二进制未编译 CUDA 跨目标 HT c,d 后端");
-}
-
 bool HtWavefrontCudaAvailable(std::string* const reason) {
   if (reason != nullptr) {
     *reason = "当前二进制未编译 CUDA HT wavefront 后端";

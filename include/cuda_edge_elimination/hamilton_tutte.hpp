@@ -50,7 +50,6 @@ struct HtCdBatchResult {
   std::string backend;
   int selected_device{-1};
   bool cpu_verified{false};
-  std::uint64_t screen_tasks{};
 };
 
 struct HtHamiltonReplyBatchResult {
@@ -97,26 +96,6 @@ struct HtShallowOptions {
   HtCdMode cd_mode{HtCdMode::kActiveIncompatible};
   PathCompatibilityBackend candidate_backend{PathCompatibilityBackend::kCpu};
   KOptSearchOptions leaf_options{};
-};
-
-// 只读 scan 可提前为多个目标生成根候选。绑定字段防止把另一目标或另一候选范围的
-// 结果误送进 wavefront；候选仍必须经过 CPU flags 全量认证。
-struct HtPreparedCdCandidates {
-  const GraphSnapshot* graph_identity{};
-  NodeEdge target_edge;
-  std::uint32_t max_neighborhood{};
-  std::uint32_t max_cd_candidates{};
-  std::uint32_t max_candidate_degree{};
-  HtCdMode cd_mode{HtCdMode::kActiveIncompatible};
-  HtCdBatchResult batch;
-};
-
-struct HtCdTargetBatchResult {
-  std::vector<HtPreparedCdCandidates> targets;
-  std::string backend{"none"};
-  int selected_device{-1};
-  bool cpu_verified{false};
-  std::uint64_t screen_tasks{};
 };
 
 struct HtReplyProof {
@@ -461,20 +440,10 @@ ProveEdgeByWavefrontHtBoundToSnapshot(const GraphSnapshot& graph, NodeEdge targe
                                       const KOptSnapshotBinding& snapshot_binding,
                                       const HtGraphValidationBinding& graph_validation_binding);
 
-[[nodiscard]] HtWavefrontResult ProveEdgeByWavefrontHtWithPreparedCdCandidates(
-    const GraphSnapshot& graph, NodeEdge target_edge, const HtWavefrontOptions& options,
-    const KOptSnapshotBinding& snapshot_binding,
-    const HtGraphValidationBinding& graph_validation_binding,
-    const HtPreparedCdCandidates& prepared_candidates);
-
 [[nodiscard]] HtCdBatchResult
 EvaluateHtCdCandidatesBoundToValidatedGraph(const GraphSnapshot& graph, NodeEdge target_edge,
                                             const HtShallowOptions& options,
                                             const HtGraphValidationBinding& binding);
-
-[[nodiscard]] HtCdTargetBatchResult EvaluateHtCdCandidatesForTargetsBoundToValidatedGraph(
-    const GraphSnapshot& graph, const std::vector<NodeEdge>& target_edges,
-    const HtShallowOptions& options, const HtGraphValidationBinding& binding);
 
 [[nodiscard]] HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesBoundToValidatedGraph(
     const GraphSnapshot& graph, NodeEdge target_edge, const std::vector<std::int32_t>& centers,
@@ -515,11 +484,6 @@ struct HtEndReplyDeviceBatch {
   std::vector<NodeEdge> replies;
 };
 
-struct HtCdTargetScreenTask {
-  NodeEdge target_edge;
-  HtCdScreenTask candidate;
-};
-
 struct HtWavefrontDeviceResult {
   std::vector<std::uint8_t> status;
   std::uint32_t launched_blocks{};
@@ -531,11 +495,6 @@ struct HtWavefrontDeviceResult {
 ScreenHtCdCandidatesCuda(const GraphSnapshot& graph, NodeEdge target_edge,
                          const std::vector<HtCdScreenTask>& tasks, HtCdMode mode,
                          int* selected_device);
-
-[[nodiscard]] std::vector<std::uint8_t>
-ScreenHtCdCandidatesForTargetsCuda(const GraphSnapshot& graph,
-                                   const std::vector<HtCdTargetScreenTask>& tasks, HtCdMode mode,
-                                   int* selected_device);
 
 [[nodiscard]] bool HtHamiltonReplyCudaAvailable(std::string* reason);
 [[nodiscard]] HtHamiltonReplyDeviceBatch

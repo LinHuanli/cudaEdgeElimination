@@ -70,8 +70,6 @@ struct HtScanOptions {
   // 全图搜索必须显式有界；0 非法。
   std::uint64_t max_targets{64U};
   HtTargetOrder target_order{HtTargetOrder::kWeightDescending};
-  // 同一不可变切片先合批根 c,d 候选；只改变候选调度，不改变逐目标 wavefront 顺序。
-  bool fuse_target_candidates{true};
 };
 
 struct HtScanAttempt {
@@ -206,14 +204,7 @@ struct HtScanResult {
   std::uint64_t hamilton_reply_unique_centers{};
   std::uint64_t hamilton_reply_neighbor_pairs_tested{};
   std::uint64_t hamilton_replies_generated{};
-  std::uint64_t target_candidate_batches{};
-  std::uint64_t target_candidate_targets{};
-  std::uint64_t target_candidate_screen_tasks{};
-  std::string target_candidate_backend{"none"};
-  int target_candidate_selected_device{-1};
-  bool target_candidate_cpu_verified{false};
   double target_selection_ms{};
-  double target_candidate_batch_ms{};
   double candidate_ms{};
   double work_graph_ms{};
   double root_child_normalize_ms{};

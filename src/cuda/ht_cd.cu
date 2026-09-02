@@ -136,7 +136,7 @@ __device__ std::uint64_t ExactDistanceDevice(const std::int32_t first, const std
   return rounded;
 }
 
-__global__ void ScreenHtCdKernel(const HtCdTargetScreenTask* const tasks,
+__global__ void ScreenHtCdKernel(const NodeEdge target, const HtCdScreenTask* const tasks,
                                  const std::size_t task_count, const std::int64_t* const x,
                                  const std::int64_t* const y, const std::uint8_t distance_type,
                                  const std::uint8_t mode, std::uint8_t* const flags) {
@@ -144,9 +144,7 @@ __global__ void ScreenHtCdKernel(const HtCdTargetScreenTask* const tasks,
   if (index >= task_count) {
     return;
   }
-  const HtCdTargetScreenTask record = tasks[index];
-  const NodeEdge target = record.target_edge;
-  const HtCdScreenTask task = record.candidate;
+  const HtCdScreenTask task = tasks[index];
   const std::uint64_t original = ExactDistanceDevice(target.u, target.v, x, y, distance_type) +
                                  ExactDistanceDevice(task.c, task.d, x, y, distance_type);
   const std::uint64_t orientation0 = ExactDistanceDevice(target.u, task.d, x, y, distance_type) +
@@ -370,28 +368,14 @@ std::vector<std::uint8_t> ScreenHtCdCandidatesCuda(const GraphSnapshot& graph,
                                                    const std::vector<HtCdScreenTask>& tasks,
                                                    const HtCdMode mode,
                                                    int* const selected_device) {
-  std::vector<HtCdTargetScreenTask> flattened;
-  flattened.reserve(tasks.size());
-  for (const HtCdScreenTask task : tasks) {
-    flattened.push_back({target_edge, task});
-  }
-  return ScreenHtCdCandidatesForTargetsCuda(graph, flattened, mode, selected_device);
-}
-
-std::vector<std::uint8_t>
-ScreenHtCdCandidatesForTargetsCuda(const GraphSnapshot& graph,
-                                   const std::vector<HtCdTargetScreenTask>& tasks,
-                                   const HtCdMode mode, int* const selected_device) {
-  if (mode != HtCdMode::kActiveIncompatible && mode != HtCdMode::kMissingOrIncompatible) {
+  if (target_edge.u < 0 || target_edge.v >= graph.dimension || target_edge.u >= target_edge.v ||
+      (mode != HtCdMode::kActiveIncompatible && mode != HtCdMode::kMissingOrIncompatible)) {
     throw std::invalid_argument("CUDA HT c,d 输入非法");
   }
-  for (const HtCdTargetScreenTask& record : tasks) {
-    const NodeEdge target = record.target_edge;
-    const HtCdScreenTask task = record.candidate;
-    if (target.u < 0 || target.v >= graph.dimension || target.u >= target.v || task.c < 0 ||
-        task.d >= graph.dimension || task.c >= task.d || task.c == target.u || task.c == target.v ||
-        task.d == target.u || task.d == target.v || task.active > 1 ||
-        (task.active != 0) != graph.HasActiveEdge(task.c, task.d)) {
+  for (const HtCdScreenTask& task : tasks) {
+    if (task.c < 0 || task.d >= graph.dimension || task.c >= task.d || task.c == target_edge.u ||
+        task.c == target_edge.v || task.d == target_edge.u || task.d == target_edge.v ||
+        task.active > 1 || (task.active != 0) != graph.HasActiveEdge(task.c, task.d)) {
       throw std::invalid_argument("CUDA HT c,d task 非法或活动位不一致");
     }
   }
@@ -419,7 +403,7 @@ ScreenHtCdCandidatesForTargetsCuda(const GraphSnapshot& graph,
     host_x[index] = graph.points[index].integer_x;
     host_y[index] = graph.points[index].integer_y;
   }
-  DeviceBuffer<HtCdTargetScreenTask> device_tasks(tasks.size());
+  DeviceBuffer<HtCdScreenTask> device_tasks(tasks.size());
   DeviceBuffer<std::int64_t> device_x(host_x.size());
   DeviceBuffer<std::int64_t> device_y(host_y.size());
   DeviceBuffer<std::uint8_t> device_flags(tasks.size());
@@ -428,7 +412,7 @@ ScreenHtCdCandidatesForTargetsCuda(const GraphSnapshot& graph,
   device_y.CopyFromHost(host_y.data());
 
   ScreenHtCdKernel<<<static_cast<unsigned int>(blocks), static_cast<unsigned int>(kThreads)>>>(
-      device_tasks.get(), tasks.size(), device_x.get(), device_y.get(),
+      target_edge, device_tasks.get(), tasks.size(), device_x.get(), device_y.get(),
       static_cast<std::uint8_t>(graph.distance_type), static_cast<std::uint8_t>(mode),
       device_flags.get());
   CheckCuda(cudaGetLastError(), "ScreenHtCdKernel launch");

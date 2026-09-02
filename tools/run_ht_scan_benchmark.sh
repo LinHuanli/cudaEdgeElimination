@@ -105,18 +105,12 @@ if [[ ! "${target_offset}" =~ ^[0-9]+$ ]]; then
   echo "错误：CUDAEE_HT_TARGET_OFFSET 必须是非负整数。" >&2
   exit 2
 fi
-fuse_target_candidates="${CUDAEE_FUSE_TARGET_CANDIDATES:-1}"
-if [[ ! "${fuse_target_candidates}" =~ ^[01]$ ]]; then
-  echo "错误：CUDAEE_FUSE_TARGET_CANDIDATES 必须是 0 或 1。" >&2
-  exit 2
-fi
 
 # 这是 M5 pilot 的固定有界协议；所有值都会写入 manifest。
 ht_arguments=(
   --max-targets "${max_targets}"
   --target-offset "${target_offset}"
   --target-order weight-desc
-  --fuse-target-candidates "${fuse_target_candidates}"
   --cd-mode missing-or-incompatible
   --max-neighborhood 25
   --max-cd-candidates 5
@@ -236,30 +230,6 @@ cpu_candidate_ms="$(read_field "${run_dir}/cpu.report" candidate_ms)"
 cpu_fused_candidate_ms="$(read_field "${run_dir}/cpu-fused.report" candidate_ms)"
 cuda_candidate_ms="$(read_field "${run_dir}/cuda.report" candidate_ms)"
 hybrid_candidate_ms="$(read_field "${run_dir}/hybrid.report" candidate_ms)"
-fused_candidate_ms="$(read_field "${run_dir}/fused.report" candidate_ms)"
-cpu_target_candidate_batches="$(read_field "${run_dir}/cpu.report" target_candidate_batches)"
-cpu_fused_target_candidate_batches="$(read_field "${run_dir}/cpu-fused.report" target_candidate_batches)"
-cuda_target_candidate_batches="$(read_field "${run_dir}/cuda.report" target_candidate_batches)"
-hybrid_target_candidate_batches="$(read_field "${run_dir}/hybrid.report" target_candidate_batches)"
-fused_target_candidate_batches="$(read_field "${run_dir}/fused.report" target_candidate_batches)"
-cpu_target_candidate_targets="$(read_field "${run_dir}/cpu.report" target_candidate_targets)"
-cuda_target_candidate_targets="$(read_field "${run_dir}/cuda.report" target_candidate_targets)"
-cpu_target_candidate_tasks="$(read_field "${run_dir}/cpu.report" target_candidate_screen_tasks)"
-cuda_target_candidate_tasks="$(read_field "${run_dir}/cuda.report" target_candidate_screen_tasks)"
-cpu_target_candidate_batch_ms="$(read_field "${run_dir}/cpu.report" target_candidate_batch_ms)"
-cpu_fused_target_candidate_batch_ms="$(read_field "${run_dir}/cpu-fused.report" target_candidate_batch_ms)"
-cuda_target_candidate_batch_ms="$(read_field "${run_dir}/cuda.report" target_candidate_batch_ms)"
-hybrid_target_candidate_batch_ms="$(read_field "${run_dir}/hybrid.report" target_candidate_batch_ms)"
-fused_target_candidate_batch_ms="$(read_field "${run_dir}/fused.report" target_candidate_batch_ms)"
-if [[ "${cpu_target_candidate_batches}" != "${cpu_fused_target_candidate_batches}" ||
-      "${cpu_target_candidate_batches}" != "${cuda_target_candidate_batches}" ||
-      "${cpu_target_candidate_batches}" != "${hybrid_target_candidate_batches}" ||
-      "${cpu_target_candidate_batches}" != "${fused_target_candidate_batches}" ||
-      "${cpu_target_candidate_targets}" != "${cuda_target_candidate_targets}" ||
-      "${cpu_target_candidate_tasks}" != "${cuda_target_candidate_tasks}" ]]; then
-  echo "五路跨目标 c,d 候选批次计数不一致" >&2
-  exit 1
-fi
 cpu_work_graph_ms="$(read_field "${run_dir}/cpu.report" work_graph_ms)"
 cpu_fused_work_graph_ms="$(read_field "${run_dir}/cpu-fused.report" work_graph_ms)"
 cuda_work_graph_ms="$(read_field "${run_dir}/cuda.report" work_graph_ms)"
@@ -854,7 +824,6 @@ manifest="${run_dir}/run-manifest-v1"
   echo "target_offset ${target_offset}"
   echo "max_targets ${max_targets}"
   echo "target_order weight-desc"
-  echo "fuse_target_candidates ${fuse_target_candidates}"
   echo "benchmark_modes cpu,cpu-fused,cuda-all,hybrid-leaf-cuda,fused-leaf-buckets"
   echo "cd_mode missing-or-incompatible"
   echo "max_neighborhood 25"
@@ -887,7 +856,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V17"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V16"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -898,19 +867,10 @@ summary="${run_dir}/summary.txt"
   echo "leaf_calls ${leaf_calls}"
   echo "cuda_leaf_cost_cells ${leaf_cells}"
   echo "cuda_peak_leaf_device_cache_bytes ${peak_cache}"
-  echo "target_candidate_batches ${cpu_target_candidate_batches}"
-  echo "target_candidate_targets ${cpu_target_candidate_targets}"
-  echo "target_candidate_screen_tasks ${cpu_target_candidate_tasks}"
-  echo "cpu_target_candidate_batch_ms ${cpu_target_candidate_batch_ms}"
-  echo "cpu_fused_target_candidate_batch_ms ${cpu_fused_target_candidate_batch_ms}"
-  echo "cuda_target_candidate_batch_ms ${cuda_target_candidate_batch_ms}"
-  echo "hybrid_target_candidate_batch_ms ${hybrid_target_candidate_batch_ms}"
-  echo "fused_target_candidate_batch_ms ${fused_target_candidate_batch_ms}"
   echo "cpu_candidate_ms ${cpu_candidate_ms}"
   echo "cpu_fused_candidate_ms ${cpu_fused_candidate_ms}"
   echo "cuda_candidate_ms ${cuda_candidate_ms}"
   echo "hybrid_candidate_ms ${hybrid_candidate_ms}"
-  echo "fused_candidate_ms ${fused_candidate_ms}"
   echo "cpu_work_graph_ms ${cpu_work_graph_ms}"
   echo "cpu_fused_work_graph_ms ${cpu_fused_work_graph_ms}"
   echo "cuda_work_graph_ms ${cuda_work_graph_ms}"

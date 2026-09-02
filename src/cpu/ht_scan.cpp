@@ -5,8 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <new>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -17,7 +15,6 @@ namespace cudaee {
 namespace {
 
 constexpr std::uint64_t kMaxHtScanTargets = 1000000U;
-constexpr std::size_t kMaxFusedCandidateTargets = 4096U;
 
 double ElapsedMilliseconds(const std::chrono::steady_clock::time_point begin) {
   return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin)
@@ -98,79 +95,14 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
   std::vector<HtRecursiveProof> proven;
   proven.reserve(static_cast<std::size_t>(attempt_count));
 
-  std::vector<NodeEdge> target_edges;
-  target_edges.reserve(static_cast<std::size_t>(attempt_count));
-  for (std::uint64_t relative = 0U; relative < attempt_count; ++relative) {
-    const std::uint64_t target_index = options.target_offset + relative;
-    const Edge& edge =
-        graph->edges[static_cast<std::size_t>(targets[static_cast<std::size_t>(target_index)])];
-    target_edges.push_back({edge.u, edge.v});
-  }
-
-  std::optional<HtCdTargetBatchResult> prepared_candidates;
-  if (options.fuse_target_candidates && target_edges.size() > 1U &&
-      target_edges.size() <= kMaxFusedCandidateTargets) {
-    const auto candidate_batch_start = std::chrono::steady_clock::now();
-    ++scan.target_candidate_batches;
-    scan.target_candidate_targets = target_edges.size();
-    try {
-      prepared_candidates = detail::EvaluateHtCdCandidatesForTargetsBoundToValidatedGraph(
-          *graph, target_edges, options.wavefront_options.search_options.root_options,
-          graph_validation_binding);
-    } catch (const std::bad_alloc&) {
-      prepared_candidates.reset();
-    } catch (const std::length_error&) {
-      prepared_candidates.reset();
-    } catch (const std::exception&) {
-      if (options.wavefront_options.search_options.root_options.candidate_backend ==
-          PathCompatibilityBackend::kAuto) {
-        HtShallowOptions cpu_options = options.wavefront_options.search_options.root_options;
-        cpu_options.candidate_backend = PathCompatibilityBackend::kCpu;
-        prepared_candidates = detail::EvaluateHtCdCandidatesForTargetsBoundToValidatedGraph(
-            *graph, target_edges, cpu_options, graph_validation_binding);
-      } else if (options.wavefront_options.search_options.root_options.candidate_backend !=
-                 PathCompatibilityBackend::kCuda) {
-        throw;
-      }
-      // 显式 CUDA 批次失败时保留原有逐目标 unresolved 语义，由下方旧路径逐项处理。
-    }
-    scan.target_candidate_batch_ms = ElapsedMilliseconds(candidate_batch_start);
-    if (prepared_candidates.has_value()) {
-      if (prepared_candidates->targets.size() != target_edges.size() ||
-          !prepared_candidates->cpu_verified) {
-        throw std::logic_error("跨目标 HT c,d 批次返回数量或 CPU 认证状态错误");
-      }
-      scan.target_candidate_screen_tasks = prepared_candidates->screen_tasks;
-      scan.target_candidate_backend = prepared_candidates->backend;
-      scan.target_candidate_selected_device = prepared_candidates->selected_device;
-      scan.target_candidate_cpu_verified = prepared_candidates->cpu_verified;
-    } else {
-      scan.target_candidate_backend = "failed-sequential";
-    }
-    if (graph->ContentHash() != snapshot_hash) {
-      throw std::logic_error("跨目标 HT c,d 候选批次修改了不可变快照");
-    }
-  }
-
   for (std::uint64_t relative = 0U; relative < attempt_count; ++relative) {
     const std::uint64_t target_index = options.target_offset + relative;
     const std::int32_t edge_id = targets[static_cast<std::size_t>(target_index)];
     const Edge& edge = graph->edges[static_cast<std::size_t>(edge_id)];
     const auto search_start = std::chrono::steady_clock::now();
-    HtWavefrontResult wavefront;
-    if (prepared_candidates.has_value()) {
-      wavefront = detail::ProveEdgeByWavefrontHtWithPreparedCdCandidates(
-          *graph, {edge.u, edge.v}, options.wavefront_options, snapshot_binding,
-          graph_validation_binding,
-          prepared_candidates->targets[static_cast<std::size_t>(relative)]);
-    } else {
-      wavefront = detail::ProveEdgeByWavefrontHtBoundToSnapshot(
-          *graph, {edge.u, edge.v}, options.wavefront_options, snapshot_binding,
-          graph_validation_binding);
-    }
-    // scan-wide 前置工作归入首个目标，使 attempts 的 candidate/search 总和继续等于 scan 总量。
-    const double shared_candidate_ms = relative == 0U ? scan.target_candidate_batch_ms : 0.0;
-    wavefront.candidate_ms += shared_candidate_ms;
+    HtWavefrontResult wavefront = detail::ProveEdgeByWavefrontHtBoundToSnapshot(
+        *graph, {edge.u, edge.v}, options.wavefront_options, snapshot_binding,
+        graph_validation_binding);
 
     HtScanAttempt attempt;
     attempt.edge_id = edge_id;
@@ -257,7 +189,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.propagation_ms = wavefront.propagation_ms;
     attempt.proof_extract_ms = wavefront.proof_extract_ms;
     attempt.proof_verify_ms = wavefront.proof_verify_ms;
-    attempt.search_ms = ElapsedMilliseconds(search_start) + shared_candidate_ms;
+    attempt.search_ms = ElapsedMilliseconds(search_start);
     attempt.reason = wavefront.proof.reason;
     scan.search_ms += attempt.search_ms;
     scan.states_expanded += attempt.states_expanded;
