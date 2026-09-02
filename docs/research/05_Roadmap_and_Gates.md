@@ -117,6 +117,8 @@ leaf cost 零复制分发已完成：内部生命周期受限 view 直接引用�
 
 cursor prepare 路径边成本缓存已完成：删除位置改为固定 5 元数组，同一 cursor 的 selectable 路径边只计算一次精确整数成本；严格改善候选仍由通用重连器重新取距并独立验证。三实例 prepare 加速 `1.967×/1.503×/1.618×`，pcb3038/d15112 CPU-fused search 加速 `1.127×/1.030×`；rl5915 leaf 改善但端到端处于噪声范围。sanitizer 与 54 项跨提交精确比较全部通过。下一切片画像同一 frontier round 跨 k 的距离表构造与节点重叠。
 
+CPU cost 输出 workspace 已完成：画像否定跨 k 距离表共享（382 rounds 的多 k 重叠为 0），并定位到 owning vector 对 51,309,996 cells 的重复预清零。内部显式 CPU cursor 以单一可增长 storage 的逻辑 span 全量覆写，公开 API、CUDA 认证路径和候选 verifier 不变；Debug 哨兵证明无未写 cell。三实例 cost evaluate 加速 `1.407×/1.263×/1.306×`，CPU-fused search 加速 `1.148×/1.134×/1.032×`；sanitizer 与 54 项跨提交精确比较全部通过。下一切片计量端口互异 task 并优化 row scorer 的重复边检查。
+
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义

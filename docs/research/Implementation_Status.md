@@ -28,7 +28,7 @@
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
-| M5 中大型调优 | 进行中（JV 三轮 + HT host fast paths） | point/path/reply/leaf/scan-binding fast paths；d15112 CPU-fused search `0.294 s` |
+| M5 中大型调优 | 进行中（JV 三轮 + HT host fast paths） | point/path/reply/leaf/scan-binding fast paths；d15112 CPU-fused search `0.284 s` |
 
 ## 当前基准结果
 
@@ -89,6 +89,8 @@ M5 HT CPU batch 距离表绑定 `0d506ab`：同步 cost batch 在 512 节点和�
 M5 HT leaf cost 零复制分发绑定 `45098d3`：每个 cursor 以生命周期受限的只读 span 消费融合矩阵连续 slice，不再构造和复制临时 `KOptCostBatchResult`。三实例 scatter 加速 `70.871×/30.817×/28.441×`；pcb3038 search/wall 降至 `820.532/861.406 ms`，rl5915 search 降至 `145.188 ms`。d15112 的 1.800 ms scatter 节省被 cost/host 波动覆盖，search 单次回退 1.39%，不作为端到端收益。CPU/CUDA 全套、memcheck 和 54 项跨提交精确比较全部通过。
 
 M5 HT cursor prepare 路径边成本缓存绑定 `611c701`：删除位置改为固定 5 元数组，`TourContext` 按巡回位置一次缓存 selectable 路径边精确成本；严格改善候选仍由通用重连器重新计算。三实例 prepare 加速 `1.967×/1.503×/1.618×`；pcb3038 search/wall 降至 `728.263/763.032 ms`，d15112 search/wall 降至 `293.553/612.480 ms`。rl5915 leaf 改善 4.69% 而 search 回退 0.86%，不作为整体收益。CPU/CUDA 全套、memcheck 和 54 项跨提交精确比较全部通过。
+
+M5 HT CPU cost 输出 workspace 绑定 `900f5d9`：临时画像否定同轮跨 k 距离表共享，并定位到 owning vector 的重复预清零；内部 CPU cursor 改以单一可增长 storage 的逻辑 span 全量覆写，公开 API 与 CUDA 完整认证不变。三实例 cost evaluate 加速 `1.407×/1.263×/1.306×`，CPU-fused search 加速 `1.148×/1.134×/1.032×`；pcb3038 search/wall 降至 `634.582/674.254 ms`，d15112 search 为 `284.330 ms`。Debug 全覆盖哨兵、CPU/CUDA 全套、memcheck 和 54 项跨提交精确比较全部通过。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
