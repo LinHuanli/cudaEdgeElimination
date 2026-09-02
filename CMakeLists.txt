@@ -7,6 +7,7 @@ option(CUDAEE_ENABLE_SANITIZERS "启用 AddressSanitizer/UndefinedBehaviorSaniti
 option(CUDAEE_ENABLE_OPENMP "启用 CPU 精确成本矩阵并行" ON)
 option(CUDAEE_BUILD_TESTS "编译测试" ON)
 option(CUDAEE_BUILD_BENCHMARKS "编译研究基准" OFF)
+option(CUDAEE_BUILD_AUTHOR_TOOLS "编译论文作者的 KH-ElimTSP 对照工具" ON)
 set(CUDAEE_CUDA_ARCHITECTURES "89" CACHE STRING "CUDA 实码架构列表")
 
 set(CMAKE_CXX_STANDARD 20)
@@ -17,7 +18,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(ZLIB QUIET)
 find_package(Threads REQUIRED)
 if(CUDAEE_ENABLE_OPENMP)
-  find_package(OpenMP QUIET COMPONENTS CXX)
+  find_package(OpenMP QUIET COMPONENTS C CXX)
 endif()
 
 set(CUDAEE_SOURCES
@@ -113,6 +114,23 @@ endif()
 add_executable(cudaee src/cli/main.cpp)
 target_link_libraries(cudaee PRIVATE cudaee_core)
 target_compile_options(cudaee PRIVATE -Wall -Wextra -Wconversion -Wshadow -Wformat=2)
+
+set(CUDAEE_KH_ELIM_DIR "${CMAKE_SOURCE_DIR}/third_party/ElimTSP/KH-elim")
+if(CUDAEE_BUILD_AUTHOR_TOOLS AND EXISTS "${CUDAEE_KH_ELIM_DIR}/kh-elim.c")
+  # 保持作者算法为隔离的对照可执行文件；GPU 代码不直接取得其删除授权。
+  add_executable(cudaee_kh_elim "${CUDAEE_KH_ELIM_DIR}/kh-elim.c")
+  target_include_directories(cudaee_kh_elim PRIVATE "${CUDAEE_KH_ELIM_DIR}")
+  target_link_libraries(cudaee_kh_elim PRIVATE m)
+  # 作者代码的 Release 行为不定义 NDEBUG；保持其 Makefile 语义，避免改变断言路径。
+  target_compile_options(cudaee_kh_elim PRIVATE -UNDEBUG -Wno-unused-result)
+
+  if(OpenMP_C_FOUND)
+    add_executable(cudaee_kh_elim_omp "${CUDAEE_KH_ELIM_DIR}/kh-elim_omp.c")
+    target_include_directories(cudaee_kh_elim_omp PRIVATE "${CUDAEE_KH_ELIM_DIR}")
+    target_link_libraries(cudaee_kh_elim_omp PRIVATE OpenMP::OpenMP_C m)
+    target_compile_options(cudaee_kh_elim_omp PRIVATE -UNDEBUG -Wno-unused-result)
+  endif()
+endif()
 
 include(GNUInstallDirs)
 install(TARGETS cudaee RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

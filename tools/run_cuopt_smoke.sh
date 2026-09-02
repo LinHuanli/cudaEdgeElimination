@@ -28,4 +28,14 @@ rg -q '^objective 1$' artifacts/cuopt-smoke/tiny.lp-solution
 rg -q '^numerically_accepted 1$' artifacts/cuopt-smoke/tiny.lp-solution
 rg -q '^exact_model_bound_numerator 16777216$' artifacts/cuopt-smoke/tiny.lp-solution
 rg -q '^exact_model_bound_denominator 16777216$' artifacts/cuopt-smoke/tiny.lp-solution
+CUDA_VISIBLE_DEVICES="${physical_gpu}" build/cuda-release/cudaee lp-sequence \
+  --first artifacts/cuopt-smoke/tiny.lp-epoch \
+  --second artifacts/cuopt-smoke/tiny.lp-epoch \
+  --first-output artifacts/cuopt-smoke/tiny.sequence-first.lp-solution \
+  --second-output artifacts/cuopt-smoke/tiny.sequence-second.lp-solution \
+  --cuopt-library "${CUDAEE_CUOPT_LIBRARY}"
+rg -q '^warm_start_attempted 1$' artifacts/cuopt-smoke/tiny.sequence-second.lp-solution
+rg -q '^warm_start_applied 1$' artifacts/cuopt-smoke/tiny.sequence-second.lp-solution
+rg -q '^warm_start_column_coverage 1$' artifacts/cuopt-smoke/tiny.sequence-second.lp-solution
+rg -q '^warm_start_row_coverage 1$' artifacts/cuopt-smoke/tiny.sequence-second.lp-solution
 echo "cuOpt C API smoke test passed on physical GPU ${physical_gpu}"

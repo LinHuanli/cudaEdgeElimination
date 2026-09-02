@@ -24,6 +24,18 @@ enum class HtCdMode : std::uint8_t {
   kMissingOrIncompatible,
 };
 
+enum class HtNeighborhoodMode : std::uint8_t {
+  kMidpoint,
+  // KH -q：仅取目标两端的活动邻点并集，并按 a-c-b 路径长度排序。
+  kQuickEndpoint,
+};
+
+enum class HtCdOrder : std::uint8_t {
+  kReplyProduct,
+  // 保留候选点排名产生的 j/k 顺序，用于复现 KH 的 max_cd_count 语义。
+  kInput,
+};
+
 struct HtNeighborPair {
   std::int32_t center{-1};
   std::int32_t first{-1};
@@ -108,6 +120,10 @@ struct HtShallowOptions {
   HtCdMode cd_mode{HtCdMode::kActiveIncompatible};
   PathCompatibilityBackend candidate_backend{PathCompatibilityBackend::kCpu};
   KOptSearchOptions leaf_options{};
+  HtNeighborhoodMode neighborhood_mode{HtNeighborhoodMode::kMidpoint};
+  HtCdOrder cd_order{HtCdOrder::kReplyProduct};
+  // 0 表示不限制；非零时在兼容性过滤前计数，匹配 KH max_cd_count。
+  std::uint32_t max_cd_pair_trials{};
 };
 
 struct HtReplyProof {

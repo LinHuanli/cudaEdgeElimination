@@ -10,6 +10,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace cudaee {
@@ -100,6 +102,28 @@ bool CheckedAdd(const __int128 lhs, const __int128 rhs, __int128* result) {
 
 bool CheckedMultiply(const __int128 lhs, const __int128 rhs, __int128* result) {
   return !__builtin_mul_overflow(lhs, rhs, result);
+}
+
+std::uint64_t ComputeStableIdentityHashValue(const std::vector<std::uint64_t>& column_ids,
+                                             const std::vector<std::uint64_t>& row_ids) {
+  std::vector<std::uint64_t> canonical_columns = column_ids;
+  std::vector<std::uint64_t> canonical_rows = row_ids;
+  std::sort(canonical_columns.begin(), canonical_columns.end());
+  std::sort(canonical_rows.begin(), canonical_rows.end());
+  std::uint64_t hash = 14695981039346656037ULL;
+  constexpr std::uint64_t kColumnDomain = 0x434f4c554d4e4944ULL;
+  constexpr std::uint64_t kRowDomain = 0x524f574944454e54ULL;
+  HashValue(&hash, kColumnDomain);
+  HashValue(&hash, static_cast<std::uint64_t>(canonical_columns.size()));
+  for (const std::uint64_t value : canonical_columns) {
+    HashValue(&hash, value);
+  }
+  HashValue(&hash, kRowDomain);
+  HashValue(&hash, static_cast<std::uint64_t>(canonical_rows.size()));
+  for (const std::uint64_t value : canonical_rows) {
+    HashValue(&hash, value);
+  }
+  return hash;
 }
 
 } // namespace
@@ -317,6 +341,13 @@ void WriteLpSolution(const std::filesystem::path& path, const LpEpoch& epoch,
   output << "max_primal_violation " << solution.max_primal_violation << '\n';
   output << "max_reduced_cost_residual " << solution.max_reduced_cost_residual << '\n';
   output << "numerically_accepted " << (solution.numerically_accepted ? 1 : 0) << '\n';
+  output << "stable_identity_hash " << std::hex << std::setfill('0') << std::setw(16)
+         << solution.stable_identity_hash << std::dec << '\n';
+  output << "warm_start_attempted " << (solution.warm_start_attempted ? 1 : 0) << '\n';
+  output << "warm_start_applied " << (solution.warm_start_applied ? 1 : 0) << '\n';
+  output << "warm_start_column_coverage " << solution.warm_start_column_coverage << '\n';
+  output << "warm_start_row_coverage " << solution.warm_start_row_coverage << '\n';
+  output << "warm_start_reason " << solution.warm_start_reason << '\n';
   output << "exact_model_bound_certified " << (solution.exact_model_bound.certified ? 1 : 0)
          << '\n';
   output << "exact_model_bound_numerator " << solution.exact_model_bound.numerator << '\n';
@@ -326,6 +357,178 @@ void WriteLpSolution(const std::filesystem::path& path, const LpEpoch& epoch,
   WriteVector(output, "dual", solution.dual);
   WriteVector(output, "reduced_costs", solution.reduced_costs);
   output << "END\n";
+}
+
+LpStableIdentity ComputeLpStableIdentity(const LpEpoch& epoch) {
+  epoch.Validate();
+  LpStableIdentity identity;
+  identity.column_ids.resize(static_cast<std::size_t>(epoch.columns));
+  std::unordered_set<std::uint64_t> unique_columns;
+  unique_columns.reserve(static_cast<std::size_t>(epoch.columns));
+  for (std::int32_t column = 0; column < epoch.columns; ++column) {
+    std::int32_t u = epoch.edge_u[static_cast<std::size_t>(column)];
+    std::int32_t v = epoch.edge_v[static_cast<std::size_t>(column)];
+    if (u < 0 || v < 0 || u == v) {
+      identity.reason = "列缺少合法的 Concorde 边端点，禁止按位置 warm start";
+      return identity;
+    }
+    if (u > v) {
+      std::swap(u, v);
+    }
+    // 端点加一后打包，保留 0 作为非法身份哨兵。
+    const std::uint64_t stable_id =
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(u) + 1U) << 32U) |
+        (static_cast<std::uint32_t>(v) + 1U);
+    if (!unique_columns.insert(stable_id).second) {
+      identity.reason = "列—边映射包含重复稳定身份";
+      return identity;
+    }
+    identity.column_ids[static_cast<std::size_t>(column)] = stable_id;
+  }
+
+  identity.row_ids.resize(static_cast<std::size_t>(epoch.rows));
+  std::unordered_set<std::uint64_t> unique_rows;
+  unique_rows.reserve(static_cast<std::size_t>(epoch.rows));
+  for (std::int32_t row = 0; row < epoch.rows; ++row) {
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> entries;
+    const std::int32_t begin = epoch.row_offsets[static_cast<std::size_t>(row)];
+    const std::int32_t end = epoch.row_offsets[static_cast<std::size_t>(row) + 1U];
+    entries.reserve(static_cast<std::size_t>(end - begin));
+    for (std::int32_t offset = begin; offset < end; ++offset) {
+      const std::int32_t column = epoch.column_indices[static_cast<std::size_t>(offset)];
+      entries.emplace_back(
+          identity.column_ids[static_cast<std::size_t>(column)],
+          std::bit_cast<std::uint64_t>(epoch.values[static_cast<std::size_t>(offset)]));
+    }
+    std::sort(entries.begin(), entries.end());
+    std::uint64_t row_hash = 14695981039346656037ULL;
+    HashValue(&row_hash, epoch.senses[static_cast<std::size_t>(row)]);
+    HashDouble(&row_hash, epoch.rhs[static_cast<std::size_t>(row)]);
+    const std::uint64_t entry_count = static_cast<std::uint64_t>(entries.size());
+    HashValue(&row_hash, entry_count);
+    for (const auto [column_id, coefficient_bits] : entries) {
+      HashValue(&row_hash, column_id);
+      HashValue(&row_hash, coefficient_bits);
+    }
+    if (!unique_rows.insert(row_hash).second) {
+      identity.reason = "模型包含稳定身份相同的重复行，dual 映射不唯一";
+      return identity;
+    }
+    identity.row_ids[static_cast<std::size_t>(row)] = row_hash;
+  }
+
+  // 总身份哈希对行列重排不敏感；映射向量本身仍保持当前 epoch 的位置顺序。
+  identity.identity_hash = ComputeStableIdentityHashValue(identity.column_ids, identity.row_ids);
+  identity.complete = true;
+  identity.reason = "stable edge/row identity complete";
+  return identity;
+}
+
+LpWarmStart BuildLpWarmStart(const LpEpoch& epoch, const LpSolution& solution) {
+  epoch.Validate();
+  if (!solution.numerically_accepted ||
+      solution.primal.size() != static_cast<std::size_t>(epoch.columns) ||
+      solution.dual.size() != static_cast<std::size_t>(epoch.rows) ||
+      std::any_of(solution.primal.begin(), solution.primal.end(),
+                  [](const double value) { return !std::isfinite(value); }) ||
+      std::any_of(solution.dual.begin(), solution.dual.end(),
+                  [](const double value) { return !std::isfinite(value); })) {
+    throw std::invalid_argument("只有数值门禁通过且维度完整的 LP 解可建立 warm start");
+  }
+  LpWarmStart warm;
+  warm.source_model_hash = epoch.ComputeHash();
+  warm.identity = ComputeLpStableIdentity(epoch);
+  if (!warm.identity.complete) {
+    throw std::invalid_argument("LP stable identity 不完整: " + warm.identity.reason);
+  }
+  warm.primal = solution.primal;
+  warm.dual = solution.dual;
+  return warm;
+}
+
+LpWarmStartProjection ProjectLpWarmStart(const LpWarmStart& source, const LpEpoch& target,
+                                         const double minimum_coverage) {
+  target.Validate();
+  if (!std::isfinite(minimum_coverage) || minimum_coverage < 0.0 || minimum_coverage > 1.0) {
+    throw std::invalid_argument("LP warm-start minimum coverage 必须位于 [0,1]");
+  }
+  LpWarmStartProjection projection;
+  if (!source.identity.complete || source.identity.column_ids.size() != source.primal.size() ||
+      source.identity.row_ids.size() != source.dual.size()) {
+    projection.reason = "源 warm start 的稳定身份或向量维度不完整";
+    return projection;
+  }
+  if (source.identity.identity_hash !=
+      ComputeStableIdentityHashValue(source.identity.column_ids, source.identity.row_ids)) {
+    projection.reason = "源 warm start 的稳定身份哈希不匹配";
+    return projection;
+  }
+  const LpStableIdentity target_identity = ComputeLpStableIdentity(target);
+  if (!target_identity.complete) {
+    projection.reason = "目标 LP stable identity 不完整: " + target_identity.reason;
+    return projection;
+  }
+
+  std::unordered_map<std::uint64_t, double> source_primal;
+  std::unordered_map<std::uint64_t, double> source_dual;
+  source_primal.reserve(source.primal.size());
+  source_dual.reserve(source.dual.size());
+  for (std::size_t index = 0U; index < source.primal.size(); ++index) {
+    if (!std::isfinite(source.primal[index])) {
+      projection.reason = "源 primal 包含 NaN/Inf";
+      return projection;
+    }
+    if (source.identity.column_ids[index] == 0U ||
+        !source_primal.emplace(source.identity.column_ids[index], source.primal[index]).second) {
+      projection.reason = "源 warm start 包含零值或重复列身份";
+      return projection;
+    }
+  }
+  for (std::size_t index = 0U; index < source.dual.size(); ++index) {
+    if (!std::isfinite(source.dual[index])) {
+      projection.reason = "源 dual 包含 NaN/Inf";
+      return projection;
+    }
+    if (source.identity.row_ids[index] == 0U ||
+        !source_dual.emplace(source.identity.row_ids[index], source.dual[index]).second) {
+      projection.reason = "源 warm start 包含零值或重复行身份";
+      return projection;
+    }
+  }
+
+  projection.primal.resize(static_cast<std::size_t>(target.columns));
+  std::size_t matched_columns = 0U;
+  for (std::int32_t column = 0; column < target.columns; ++column) {
+    const std::size_t index = static_cast<std::size_t>(column);
+    double value = std::clamp(0.0, target.lower_bounds[index], target.upper_bounds[index]);
+    const auto source_value = source_primal.find(target_identity.column_ids[index]);
+    if (source_value != source_primal.end()) {
+      value =
+          std::clamp(source_value->second, target.lower_bounds[index], target.upper_bounds[index]);
+      ++matched_columns;
+    }
+    projection.primal[index] = value;
+  }
+  projection.dual.assign(static_cast<std::size_t>(target.rows), 0.0);
+  std::size_t matched_rows = 0U;
+  for (std::int32_t row = 0; row < target.rows; ++row) {
+    const std::size_t index = static_cast<std::size_t>(row);
+    const auto source_value = source_dual.find(target_identity.row_ids[index]);
+    if (source_value != source_dual.end()) {
+      projection.dual[index] = source_value->second;
+      ++matched_rows;
+    }
+  }
+  projection.column_coverage = target.columns == 0 ? 1.0
+                                                   : static_cast<double>(matched_columns) /
+                                                         static_cast<double>(target.columns);
+  projection.row_coverage =
+      target.rows == 0 ? 1.0 : static_cast<double>(matched_rows) / static_cast<double>(target.rows);
+  projection.accepted =
+      projection.column_coverage >= minimum_coverage && projection.row_coverage >= minimum_coverage;
+  projection.reason = projection.accepted ? "stable identity coverage accepted"
+                                          : "stable identity coverage below threshold";
+  return projection;
 }
 
 ExactBound BuildExactModelBound(const LpEpoch& epoch, const std::vector<double>& dual,

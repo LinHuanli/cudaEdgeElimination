@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -47,10 +48,42 @@ struct LpSolution {
   double max_primal_violation{};
   double max_reduced_cost_residual{};
   bool numerically_accepted{false};
+  bool warm_start_attempted{false};
+  bool warm_start_applied{false};
+  double warm_start_column_coverage{};
+  double warm_start_row_coverage{};
+  std::string warm_start_reason;
+  std::uint64_t stable_identity_hash{};
   std::vector<double> primal;
   std::vector<double> dual;
   std::vector<double> reduced_costs;
   ExactBound exact_model_bound;
+};
+
+// 由 Concorde 的列—边映射和规范化行内容导出的跨 epoch 稳定身份。
+// complete=false 时必须禁用 warm start，不能退化为按位置猜测映射。
+struct LpStableIdentity {
+  std::vector<std::uint64_t> column_ids;
+  std::vector<std::uint64_t> row_ids;
+  std::uint64_t identity_hash{};
+  bool complete{false};
+  std::string reason;
+};
+
+struct LpWarmStart {
+  std::uint64_t source_model_hash{};
+  LpStableIdentity identity;
+  std::vector<double> primal;
+  std::vector<double> dual;
+};
+
+struct LpWarmStartProjection {
+  std::vector<double> primal;
+  std::vector<double> dual;
+  double column_coverage{};
+  double row_coverage{};
+  bool accepted{false};
+  std::string reason;
 };
 
 [[nodiscard]] LpEpoch ReadLpEpoch(const std::filesystem::path& path);
@@ -61,5 +94,28 @@ void WriteLpSolution(const std::filesystem::path& path, const LpEpoch& epoch,
 [[nodiscard]] LpSolution SolveWithCuOpt(const LpEpoch& epoch, const std::string& library_path);
 [[nodiscard]] ExactBound BuildExactModelBound(const LpEpoch& epoch, const std::vector<double>& dual,
                                               std::uint32_t fractional_bits = 24);
+[[nodiscard]] LpStableIdentity ComputeLpStableIdentity(const LpEpoch& epoch);
+[[nodiscard]] LpWarmStart BuildLpWarmStart(const LpEpoch& epoch, const LpSolution& solution);
+[[nodiscard]] LpWarmStartProjection
+ProjectLpWarmStart(const LpWarmStart& source, const LpEpoch& target, double minimum_coverage = 0.8);
+
+// 会话复用已加载的 cuOpt C API，并在稳定身份覆盖率达标时投影 PDLP primal/dual。
+class CuOptSession {
+public:
+  explicit CuOptSession(std::string library_path = {});
+  ~CuOptSession();
+  CuOptSession(CuOptSession&&) noexcept;
+  CuOptSession& operator=(CuOptSession&&) noexcept;
+  CuOptSession(const CuOptSession&) = delete;
+  CuOptSession& operator=(const CuOptSession&) = delete;
+
+  [[nodiscard]] LpSolution Solve(const LpEpoch& epoch, bool enable_warm_start = true,
+                                 double minimum_coverage = 0.8);
+  void ClearWarmStart();
+
+private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
 
 } // namespace cudaee

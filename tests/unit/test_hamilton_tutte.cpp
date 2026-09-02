@@ -294,6 +294,63 @@ void TestHamiltonReplyBatch() {
 #endif
 }
 
+void TestQuickEndpointCandidateOrder() {
+  const std::vector<cudaee::Point> points = {
+      {0.0, 0.0, 0, 0},   {100.0, 0.0, 100, 0}, {10.0, 3.0, 10, 3}, {20.0, -2.0, 20, -2},
+      {35.0, 4.0, 35, 4}, {55.0, -5.0, 55, -5}, {75.0, 2.0, 75, 2}, {90.0, -4.0, 90, -4}};
+  std::vector<std::pair<std::int32_t, std::int32_t>> edges = {{0, 1}};
+  for (std::int32_t node = 2; node < 8; ++node) {
+    edges.emplace_back(0, node);
+    edges.emplace_back(1, node);
+  }
+  const cudaee::GraphSnapshot graph = MakeGraph(points, edges);
+  cudaee::HtShallowOptions options;
+  options.max_neighborhood = 6U;
+  options.max_cd_candidates = 0U;
+  options.max_candidate_degree = 0U;
+  options.cd_mode = cudaee::HtCdMode::kMissingOrIncompatible;
+  options.candidate_backend = cudaee::PathCompatibilityBackend::kCpu;
+  options.neighborhood_mode = cudaee::HtNeighborhoodMode::kQuickEndpoint;
+  options.cd_order = cudaee::HtCdOrder::kInput;
+  options.max_cd_pair_trials = 4U;
+
+  std::vector<std::int32_t> ranked = {2, 3, 4, 5, 6, 7};
+  std::sort(ranked.begin(), ranked.end(), [&](const std::int32_t lhs, const std::int32_t rhs) {
+    return std::pair{graph.Distance(0, lhs) + graph.Distance(lhs, 1), lhs} <
+           std::pair{graph.Distance(0, rhs) + graph.Distance(rhs, 1), rhs};
+  });
+  std::vector<cudaee::NodeEdge> expected;
+  for (std::size_t second = 1U; second < ranked.size() && expected.size() < 4U; ++second) {
+    for (std::size_t first = 0U; first < second && expected.size() < 4U; ++first) {
+      expected.push_back(CanonicalEdge(ranked[first], ranked[second]));
+    }
+  }
+
+  const cudaee::HtCdBatchResult result = cudaee::EvaluateHtCdCandidates(graph, {0, 1}, options);
+  Check(result.candidates.size() == expected.size(), "quick endpoint pair trial count");
+  for (std::size_t index = 0U; index < expected.size(); ++index) {
+    Check(result.candidates[index].c == expected[index].u &&
+              result.candidates[index].d == expected[index].v,
+          "quick endpoint preserves KH j/k pair order");
+  }
+  cudaee::HtShallowOptions invalid = options;
+  invalid.neighborhood_mode = static_cast<cudaee::HtNeighborhoodMode>(255U);
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::EvaluateHtCdCandidates(graph, {0, 1}, invalid);
+        static_cast<void>(ignored);
+      },
+      "unknown HT neighborhood mode fails closed");
+  invalid = options;
+  invalid.cd_order = static_cast<cudaee::HtCdOrder>(255U);
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::EvaluateHtCdCandidates(graph, {0, 1}, invalid);
+        static_cast<void>(ignored);
+      },
+      "unknown HT c,d order fails closed");
+}
+
 void TestEndReplyBatch() {
   std::vector<cudaee::Point> points;
   for (std::int32_t node = 0; node < 9; ++node) {
@@ -2287,6 +2344,7 @@ int main() {
   try {
     TestHamiltonRepliesAgainstReferenceFormula();
     TestHamiltonReplyBatch();
+    TestQuickEndpointCandidateOrder();
     TestEndReplyBatch();
     TestCdCandidatesCpuCuda();
     TestDfsWavefrontRandomDifferential();

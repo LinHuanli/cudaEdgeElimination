@@ -95,8 +95,9 @@ bool IsIntegralCoordinate(const double value, std::int64_t* converted) {
 
 } // namespace
 
-GraphSnapshot GraphSnapshot::Load(const std::filesystem::path& tsp_path,
-                                  const std::filesystem::path& edge_path) {
+namespace {
+
+GraphSnapshot LoadTspCoordinates(const std::filesystem::path& tsp_path) {
   GraphSnapshot graph;
   const std::string tsp_text = ReadText(tsp_path);
   std::istringstream tsp(tsp_text);
@@ -180,6 +181,15 @@ GraphSnapshot GraphSnapshot::Load(const std::filesystem::path& tsp_path,
     graph.integer_distance_safe = dx * dx + dy * dy <= std::numeric_limits<std::uint64_t>::max();
   }
 
+  return graph;
+}
+
+} // namespace
+
+GraphSnapshot GraphSnapshot::Load(const std::filesystem::path& tsp_path,
+                                  const std::filesystem::path& edge_path) {
+  GraphSnapshot graph = LoadTspCoordinates(tsp_path);
+
   const std::string edge_text = ReadText(edge_path);
   std::istringstream edge_input(edge_text);
   std::int32_t edge_dimension = 0;
@@ -223,6 +233,24 @@ GraphSnapshot GraphSnapshot::Load(const std::filesystem::path& tsp_path,
   std::sort(graph.edges.begin(), graph.edges.end(), [](const Edge& lhs, const Edge& rhs) {
     return std::tie(lhs.u, lhs.v) < std::tie(rhs.u, rhs.v);
   });
+  graph.RebuildCsr();
+  return graph;
+}
+
+GraphSnapshot GraphSnapshot::LoadComplete(const std::filesystem::path& tsp_path) {
+  GraphSnapshot graph = LoadTspCoordinates(tsp_path);
+  const std::int64_t dimension = graph.dimension;
+  const std::int64_t edge_count = dimension * (dimension - 1) / 2;
+  if (edge_count > std::numeric_limits<std::int32_t>::max()) {
+    throw std::runtime_error("完全图边数超出首期 32 位边索引范围");
+  }
+
+  graph.edges.reserve(static_cast<std::size_t>(edge_count));
+  for (std::int32_t u = 0; u < graph.dimension; ++u) {
+    for (std::int32_t v = u + 1; v < graph.dimension; ++v) {
+      graph.edges.push_back(Edge{u, v, graph.Distance(u, v), true});
+    }
+  }
   graph.RebuildCsr();
   return graph;
 }

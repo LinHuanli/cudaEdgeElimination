@@ -32,6 +32,7 @@ void PrintHelp() {
   std::cout
       << "cudaee：可验证 TSP GPU 边消元研究工具\n\n"
       << "命令：\n"
+      << "  complete-graph --tsp FILE --output FILE\n"
       << "  gpu-eliminate --tsp FILE --edges FILE --output FILE --proof FILE\n"
       << "                [--backend auto|cpu|cuda] [--max-rounds N] [--manifest FILE]\n"
       << "  verify        --tsp FILE --edges FILE --proof FILE\n"
@@ -39,6 +40,8 @@ void PrintHelp() {
       << "  ht-commit     --tsp FILE --edges FILE --output FILE --proof FILE\n"
       << "                --ht-proof FILE [--ht-proof FILE ...] [--manifest FILE]\n"
       << "  lp-solve      --input FILE --output FILE [--cuopt-library FILE]\n"
+      << "  lp-sequence   --first FILE --second FILE --first-output FILE --second-output FILE\n"
+      << "                [--cuopt-library FILE]\n"
       << "  lp-example    --output FILE\n"
       << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
       << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
@@ -66,7 +69,9 @@ void PrintHelp() {
       << "                [--target-devices D[,D...]]（允许多个 worker 共享单 GPU）\n"
       << "                [--protected-tour FILE --expected-cost COST] [HT wavefront options]\n"
       << "  local-eliminate --tsp FILE --edges FILE --output FILE --proof FILE --report FILE\n"
-      << "                --max-targets N [--max-ht-epochs N] [--max-jv-rounds N]\n"
+      << "                (--max-targets N | --complete-sweep 1 --target-batch-size N)\n"
+      << "                [--profile kh-jq] [--max-ht-epochs N] [--max-jv-rounds N]\n"
+      << "                [--require-initial-edges N] [--max-final-edges N]\n"
       << "                [--target-order weight-desc|canonical] [--backend auto|cpu|cuda]\n"
       << "                [--target-workers N] [--target-devices D[,D...]]\n"
       << "                [--protected-tour FILE --expected-cost COST] [HT wavefront options]\n"
@@ -200,6 +205,22 @@ cudaee::HtCdMode ParseHtCdMode(const std::string& value) {
   throw std::invalid_argument("--cd-mode 必须是 active-incompatible 或 missing-or-incompatible");
 }
 
+cudaee::HtNeighborhoodMode ParseHtNeighborhoodMode(const std::string& value) {
+  if (value == "midpoint")
+    return cudaee::HtNeighborhoodMode::kMidpoint;
+  if (value == "quick-endpoint")
+    return cudaee::HtNeighborhoodMode::kQuickEndpoint;
+  throw std::invalid_argument("--neighborhood 必须是 midpoint 或 quick-endpoint");
+}
+
+cudaee::HtCdOrder ParseHtCdOrder(const std::string& value) {
+  if (value == "reply-product")
+    return cudaee::HtCdOrder::kReplyProduct;
+  if (value == "input")
+    return cudaee::HtCdOrder::kInput;
+  throw std::invalid_argument("--cd-order 必须是 reply-product 或 input");
+}
+
 cudaee::HtScheduler ParseHtScheduler(const std::string& value) {
   if (value == "wavefront") {
     return cudaee::HtScheduler::kWavefront;
@@ -272,6 +293,16 @@ void PrintEliminationSummary(const cudaee::GraphSnapshot& graph,
   std::cout << "status=OK backend=" << result.backend << " committed=" << committed
             << " active_edges=" << graph.ActiveEdgeCount()
             << " final_hash=" << cudaee::HexHash(result.final_hash) << '\n';
+}
+
+void CompleteGraphCommand(const Arguments& arguments) {
+  const std::filesystem::path output_path = CheckedOutputPath(Required(arguments, "output"));
+  const cudaee::GraphSnapshot graph =
+      cudaee::GraphSnapshot::LoadComplete(Required(arguments, "tsp"));
+  graph.WriteActiveEdges(output_path);
+  std::cout << "status=OK dimension=" << graph.dimension
+            << " active_edges=" << graph.ActiveEdgeCount()
+            << " graph_hash=" << cudaee::HexHash(graph.ContentHash()) << '\n';
 }
 
 cudaee::EliminationResult RunEliminationCommand(const Arguments& arguments) {
@@ -367,6 +398,24 @@ cudaee::LpSolution LpSolveCommand(const Arguments& arguments) {
   return solution;
 }
 
+void LpSequenceCommand(const Arguments& arguments) {
+  const cudaee::LpEpoch first = cudaee::ReadLpEpoch(Required(arguments, "first"));
+  const cudaee::LpEpoch second = cudaee::ReadLpEpoch(Required(arguments, "second"));
+  cudaee::CuOptSession session(Optional(arguments, "cuopt-library"));
+  const cudaee::LpSolution first_solution = session.Solve(first);
+  const cudaee::LpSolution second_solution = session.Solve(second);
+  cudaee::WriteLpSolution(CheckedOutputPath(Required(arguments, "first-output")), first,
+                          first_solution);
+  cudaee::WriteLpSolution(CheckedOutputPath(Required(arguments, "second-output")), second,
+                          second_solution);
+  std::cout << "first_status=" << first_solution.status
+            << " second_status=" << second_solution.status
+            << " warm_attempted=" << (second_solution.warm_start_attempted ? 1 : 0)
+            << " warm_applied=" << (second_solution.warm_start_applied ? 1 : 0)
+            << " column_coverage=" << second_solution.warm_start_column_coverage
+            << " row_coverage=" << second_solution.warm_start_row_coverage << '\n';
+}
+
 void LpExampleCommand(const Arguments& arguments) {
   cudaee::LpEpoch epoch;
   epoch.rows = 1;
@@ -382,8 +431,8 @@ void LpExampleCommand(const Arguments& arguments) {
   epoch.lower_bounds = {0.0, 0.0};
   epoch.upper_bounds = {1.0, 1.0};
   epoch.variable_types = {'C', 'C'};
-  epoch.edge_u = {-1, -1};
-  epoch.edge_v = {-1, -1};
+  epoch.edge_u = {0, 0};
+  epoch.edge_v = {1, 2};
   cudaee::WriteLpEpoch(CheckedOutputPath(Required(arguments, "output")), epoch);
   std::cout << "status=OK objective=min(x+2y) constraint=x+y>=1 expected_objective=1\n";
 }
@@ -451,6 +500,10 @@ cudaee::HtRecursiveOptions ParseHtRecursiveOptions(const Arguments& arguments) {
   root.max_reply_combinations =
       OptionalInteger<std::uint64_t>(arguments, "max-root-replies", root.max_reply_combinations);
   root.cd_mode = ParseHtCdMode(Optional(arguments, "cd-mode", "active-incompatible"));
+  root.neighborhood_mode = ParseHtNeighborhoodMode(Optional(arguments, "neighborhood", "midpoint"));
+  root.cd_order = ParseHtCdOrder(Optional(arguments, "cd-order", "reply-product"));
+  root.max_cd_pair_trials =
+      OptionalInteger<std::uint32_t>(arguments, "max-cd-pair-trials", root.max_cd_pair_trials);
   const std::string candidate_backend = Optional(arguments, "backend", "auto");
   root.candidate_backend = ParsePathCompatibilityBackend(candidate_backend);
   root.leaf_options.max_k =
@@ -490,6 +543,50 @@ cudaee::HtRecursiveOptions ParseHtRecursiveOptions(const Arguments& arguments) {
       OptionalInteger<std::uint32_t>(arguments, "max-end-candidates", options.max_end_candidates);
   options.enable_point_moves = ParseBooleanOption(arguments, "enable-point", true);
   options.enable_end_moves = ParseBooleanOption(arguments, "enable-end", true);
+
+  const std::string profile = Optional(arguments, "profile");
+  if (!profile.empty()) {
+    if (profile != "kh-jq") {
+      throw std::invalid_argument("--profile 当前仅支持 kh-jq");
+    }
+    const std::vector<std::string_view> locked = {"max-neighborhood",
+                                                  "max-cd-candidates",
+                                                  "max-candidate-degree",
+                                                  "max-root-replies",
+                                                  "cd-mode",
+                                                  "neighborhood",
+                                                  "cd-order",
+                                                  "max-cd-pair-trials",
+                                                  "max-k",
+                                                  "max-deletion-sets",
+                                                  "exact-blocks",
+                                                  "max-depth",
+                                                  "max-point-candidates",
+                                                  "max-end-candidates",
+                                                  "enable-point",
+                                                  "enable-end"};
+    for (const std::string_view name : locked) {
+      if (arguments.contains(std::string(name))) {
+        throw std::invalid_argument("--profile kh-jq 不接受覆盖算法参数 --" + std::string(name));
+      }
+    }
+    root.max_neighborhood = 10U;
+    root.max_cd_candidates = 10U;
+    root.max_candidate_degree = 0U;
+    root.max_reply_combinations = 0U;
+    root.cd_mode = cudaee::HtCdMode::kActiveIncompatible;
+    root.leaf_options.max_k = 5U;
+    root.leaf_options.max_deletion_sets = 0U;
+    root.leaf_options.exact_fallback_max_blocks = 0U;
+    root.neighborhood_mode = cudaee::HtNeighborhoodMode::kQuickEndpoint;
+    root.cd_order = cudaee::HtCdOrder::kInput;
+    root.max_cd_pair_trials = 10U;
+    options.max_depth = 0U;
+    options.max_point_candidates = 0U;
+    options.max_end_candidates = 0U;
+    options.enable_point_moves = false;
+    options.enable_end_moves = false;
+  }
   return options;
 }
 
@@ -1249,12 +1346,13 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
 void WriteLocalEliminationReport(const std::filesystem::path& path,
                                  const cudaee::LocalEliminationResult& local,
                                  const cudaee::LocalEliminationOptions& options,
-                                 const cudaee::ProtectedTourCheck* const protected_tour) {
+                                 const cudaee::ProtectedTourCheck* const protected_tour,
+                                 const Arguments& arguments) {
   std::ofstream output(path);
   if (!output) {
     throw std::runtime_error("无法创建 Local Elimination 报告: " + path.string());
   }
-  output << "CUDAEE_LOCAL_ELIMINATION_REPORT_V3\n";
+  output << "CUDAEE_LOCAL_ELIMINATION_REPORT_V4\n";
   output << "initial_hash " << cudaee::HexHash(local.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(local.elimination.final_hash) << '\n';
   output << "termination " << cudaee::ToString(local.termination) << '\n';
@@ -1263,6 +1361,9 @@ void WriteLocalEliminationReport(const std::filesystem::path& path,
   output << "max_jv_rounds " << options.max_jv_rounds << '\n';
   output << "max_ht_epochs " << options.max_ht_epochs << '\n';
   output << "max_targets_per_ht_epoch " << options.ht_scan_options.max_targets << '\n';
+  output << "complete_sweep " << (ParseBooleanOption(arguments, "complete-sweep", false) ? 1 : 0)
+         << '\n';
+  output << "profile " << Optional(arguments, "profile", "none") << '\n';
   output << "target_order " << HtTargetOrderName(options.ht_scan_options.target_order) << '\n';
   output << "scheduler " << HtSchedulerName(options.ht_scan_options.wavefront_options.scheduler)
          << '\n';
@@ -1457,6 +1558,12 @@ void LocalEliminationCommand(const Arguments& arguments) {
   const std::filesystem::path report_path = CheckedOutputPath(Required(arguments, "report"));
   cudaee::GraphSnapshot graph =
       cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
+  const std::size_t initial_edges = graph.ActiveEdgeCount();
+  if (arguments.contains("require-initial-edges") &&
+      RequiredInteger<std::uint64_t>(arguments, "require-initial-edges") != initial_edges) {
+    throw std::runtime_error("Local Elimination 初始边数未通过门禁: actual=" +
+                             std::to_string(initial_edges));
+  }
 
   if (arguments.contains("target-offset")) {
     throw std::invalid_argument("local-eliminate 在每次提交后自动重排，不接受 --target-offset");
@@ -1465,11 +1572,32 @@ void LocalEliminationCommand(const Arguments& arguments) {
   options.jv_backend = ParseBackend(Optional(arguments, "backend", "auto"));
   options.max_jv_rounds =
       OptionalInteger<std::uint32_t>(arguments, "max-jv-rounds", options.max_jv_rounds);
+  const bool complete_sweep = ParseBooleanOption(arguments, "complete-sweep", false);
+  if (complete_sweep && arguments.contains("max-ht-epochs")) {
+    throw std::invalid_argument("--complete-sweep 1 不接受会截断扫描的 --max-ht-epochs");
+  }
   options.max_ht_epochs =
-      OptionalInteger<std::uint32_t>(arguments, "max-ht-epochs", options.max_ht_epochs);
+      complete_sweep
+          ? 1000000U
+          : OptionalInteger<std::uint32_t>(arguments, "max-ht-epochs", options.max_ht_epochs);
   options.ht_scan_options.wavefront_options =
       ParseHtWavefrontOptions(arguments, ParseHtRecursiveOptions(arguments));
-  options.ht_scan_options.max_targets = RequiredInteger<std::uint64_t>(arguments, "max-targets");
+  if (complete_sweep) {
+    if (arguments.contains("max-targets")) {
+      throw std::invalid_argument(
+          "--complete-sweep 1 使用 --target-batch-size，不接受语义含混的 --max-targets");
+    }
+    options.ht_scan_options.max_targets =
+        OptionalInteger<std::uint64_t>(arguments, "target-batch-size", 256U);
+  } else {
+    if (arguments.contains("target-batch-size")) {
+      throw std::invalid_argument("--target-batch-size 仅用于 --complete-sweep 1");
+    }
+    options.ht_scan_options.max_targets = RequiredInteger<std::uint64_t>(arguments, "max-targets");
+  }
+  if (options.ht_scan_options.max_targets == 0U) {
+    throw std::invalid_argument("HT target batch 必须大于 0");
+  }
   options.ht_scan_options.target_order =
       ParseHtTargetOrder(Optional(arguments, "target-order", "weight-desc"));
   options.ht_scan_options.target_workers = OptionalInteger<std::uint32_t>(
@@ -1507,6 +1635,10 @@ void LocalEliminationCommand(const Arguments& arguments) {
   }
 
   const cudaee::LocalEliminationResult local = cudaee::RunLocalElimination(&graph, options);
+  if (complete_sweep && local.termination != cudaee::LocalEliminationTermination::kConverged) {
+    throw std::runtime_error("完整扫描未收敛，拒绝写出部分结果: termination=" +
+                             cudaee::ToString(local.termination));
+  }
   if (!protected_tour_nodes.empty()) {
     const cudaee::ProtectedTourCheck final_check =
         cudaee::CheckProtectedTour(graph, protected_tour_nodes);
@@ -1516,9 +1648,28 @@ void LocalEliminationCommand(const Arguments& arguments) {
     }
   }
 
+  if (arguments.contains("max-final-edges") &&
+      graph.ActiveEdgeCount() > RequiredInteger<std::uint64_t>(arguments, "max-final-edges")) {
+    throw std::runtime_error("Local Elimination 删边强度未通过门禁: active_edges=" +
+                             std::to_string(graph.ActiveEdgeCount()));
+  }
+
+  if (complete_sweep) {
+    // 从原始不可变快照独立重放整条证书链，避免只验证已突变的工作图。
+    cudaee::GraphSnapshot replay_graph =
+        cudaee::GraphSnapshot::Load(Required(arguments, "tsp"), Required(arguments, "edges"));
+    const cudaee::EliminationResult replayed =
+        cudaee::ReplayProof(&replay_graph, local.elimination);
+    if (replayed.final_hash != local.elimination.final_hash ||
+        replay_graph.ContentHash() != graph.ContentHash() ||
+        replay_graph.ActiveEdgeCount() != graph.ActiveEdgeCount()) {
+      throw std::runtime_error("完整扫描的独立 proof 重放与工作图不一致；拒绝写出结果");
+    }
+  }
+
   graph.WriteActiveEdges(output_path);
   cudaee::WriteProof(proof_path, local.elimination);
-  WriteLocalEliminationReport(report_path, local, options, protected_tour_report);
+  WriteLocalEliminationReport(report_path, local, options, protected_tour_report, arguments);
   if (arguments.contains("trace-output")) {
     cudaee::WriteHtShortCircuitTraceBundle(CheckedOutputPath(Required(arguments, "trace-output")),
                                            local.short_circuit_traces);
@@ -1541,6 +1692,8 @@ void LocalEliminationCommand(const Arguments& arguments) {
               << " elapsed_ms=" << std::fixed << std::setprecision(3) << stage.elapsed_ms << '\n';
   }
   std::cout << "local_status=OK termination=" << cudaee::ToString(local.termination)
+            << " complete_sweep=" << (complete_sweep ? 1 : 0)
+            << " profile=" << Optional(arguments, "profile", "none")
             << " stages=" << local.stages.size() << " committed=" << local.elimination.proof.size()
             << " protected_tour_checked=" << (protected_tour_report != nullptr ? 1 : 0)
             << " scheduler=" << HtSchedulerName(options.ht_scan_options.wavefront_options.scheduler)
@@ -1629,7 +1782,9 @@ int main(const int argc, char** argv) {
     }
     const std::string command = argv[1];
     const Arguments arguments = ParseArguments(argc, argv, 2);
-    if (command == "gpu-eliminate") {
+    if (command == "complete-graph") {
+      CompleteGraphCommand(arguments);
+    } else if (command == "gpu-eliminate") {
       RunEliminationCommand(arguments);
     } else if (command == "verify") {
       VerifyCommand(arguments);
@@ -1639,6 +1794,8 @@ int main(const int argc, char** argv) {
       HtCommitCommand(arguments);
     } else if (command == "lp-solve") {
       LpSolveCommand(arguments);
+    } else if (command == "lp-sequence") {
+      LpSequenceCommand(arguments);
     } else if (command == "lp-example") {
       LpExampleCommand(arguments);
     } else if (command == "path-table") {

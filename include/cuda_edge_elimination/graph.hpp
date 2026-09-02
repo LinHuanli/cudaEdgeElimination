@@ -14,6 +14,8 @@ class GraphSnapshot {
 public:
   static GraphSnapshot Load(const std::filesystem::path& tsp_path,
                             const std::filesystem::path& edge_path);
+  // 从 TSPLIB 坐标直接构造规范排序的完全图，供端到端删边实验使用。
+  static GraphSnapshot LoadComplete(const std::filesystem::path& tsp_path);
 
   void RebuildCsr();
   void WriteActiveEdges(const std::filesystem::path& path) const;

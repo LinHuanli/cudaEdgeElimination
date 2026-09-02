@@ -19,6 +19,40 @@ add_test(
     --expected-cost 395)
 set_tests_properties(integration.protected_tour PROPERTIES LABELS "integration;correctness")
 
+set(COMPLETE_GRAPH_EDGES "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.complete.cli.edg")
+add_test(
+  NAME integration.complete_graph
+  COMMAND cudaee complete-graph
+    --tsp "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+    --output "${COMPLETE_GRAPH_EDGES}")
+set_tests_properties(integration.complete_graph PROPERTIES
+  PASS_REGULAR_EXPRESSION "status=OK dimension=8 active_edges=28"
+  LABELS "integration;graph")
+
+add_test(
+  NAME integration.complete_graph_tour
+  COMMAND cudaee tour-check
+    --tsp "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+    --edges "${COMPLETE_GRAPH_EDGES}"
+    --tour "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tour"
+    --expected-cost 395)
+set_tests_properties(integration.complete_graph_tour PROPERTIES
+  DEPENDS integration.complete_graph
+  LABELS "integration;correctness;graph")
+
+if(TARGET cudaee_kh_elim)
+  add_test(
+    NAME integration.author_kh_jq_pr299
+    COMMAND cudaee_kh_elim
+      -Jq
+      -o "${CMAKE_CURRENT_BINARY_DIR}/tmp/pr299.kh-jq.edg"
+      -T "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.tsp"
+      "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.edg")
+  set_tests_properties(integration.author_kh_jq_pr299 PROPERTIES
+    PASS_REGULAR_EXPRESSION "Remaining: 872"
+    LABELS "integration;author-reference;strength")
+endif()
+
 add_executable(cudaee_hamilton_tutte_unit unit/test_hamilton_tutte.cpp)
 target_link_libraries(cudaee_hamilton_tutte_unit PRIVATE cudaee_core)
 target_compile_definitions(cudaee_hamilton_tutte_unit PRIVATE
@@ -356,7 +390,7 @@ add_test(
     --max-end-candidates 5)
 set_tests_properties(integration.local_elimination PROPERTIES
   PASS_REGULAR_EXPRESSION
-    "local_status=OK termination=ht-epoch-limit stages=3 committed=8 protected_tour_checked=1"
+    "local_status=OK termination=ht-epoch-limit complete_sweep=0 profile=none stages=3 committed=8 protected_tour_checked=1"
   LABELS "integration;hamilton-tutte;local-elimination")
 
 add_test(
@@ -379,6 +413,42 @@ add_test(
 set_tests_properties(integration.local_elimination_tour PROPERTIES
   DEPENDS integration.local_elimination
   LABELS "integration;correctness;local-elimination")
+
+set(LOCAL_COMPLETE_EDGES "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.local-complete.edg")
+set(LOCAL_COMPLETE_PROOF "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.local-complete.proof")
+set(LOCAL_COMPLETE_REPORT "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.local-complete.report")
+add_test(
+  NAME integration.local_complete_sweep
+  COMMAND cudaee local-eliminate
+    --tsp "${HT_RECURSIVE_TSP}"
+    --edges "${HT_RECURSIVE_EDGES}"
+    --output "${LOCAL_COMPLETE_EDGES}"
+    --proof "${LOCAL_COMPLETE_PROOF}"
+    --report "${LOCAL_COMPLETE_REPORT}"
+    --complete-sweep 1
+    --target-batch-size 8
+    --profile kh-jq
+    --backend cpu
+    --leaf-backend cpu
+    --reply-backend cpu
+    --path-append-backend cpu
+    --propagation-backend cpu
+    --target-workers 1
+    --require-initial-edges 28
+    --max-final-edges 28)
+set_tests_properties(integration.local_complete_sweep PROPERTIES
+  PASS_REGULAR_EXPRESSION "local_status=OK termination=converged complete_sweep=1 profile=kh-jq"
+  LABELS "integration;hamilton-tutte;local-elimination;complete-sweep")
+
+add_test(
+  NAME integration.local_complete_sweep_verify
+  COMMAND cudaee verify
+    --tsp "${HT_RECURSIVE_TSP}"
+    --edges "${HT_RECURSIVE_EDGES}"
+    --proof "${LOCAL_COMPLETE_PROOF}")
+set_tests_properties(integration.local_complete_sweep_verify PROPERTIES
+  DEPENDS integration.local_complete_sweep
+  LABELS "integration;correctness;local-elimination;complete-sweep")
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)

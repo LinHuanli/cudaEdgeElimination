@@ -35,6 +35,26 @@ bool IsKnownCdMode(const HtCdMode mode) {
   return mode == HtCdMode::kActiveIncompatible || mode == HtCdMode::kMissingOrIncompatible;
 }
 
+bool IsKnownNeighborhoodMode(const HtNeighborhoodMode mode) {
+  return mode == HtNeighborhoodMode::kMidpoint || mode == HtNeighborhoodMode::kQuickEndpoint;
+}
+
+bool IsKnownCdOrder(const HtCdOrder order) {
+  return order == HtCdOrder::kReplyProduct || order == HtCdOrder::kInput;
+}
+
+void ValidateCdOptions(const HtShallowOptions& options) {
+  if (!IsKnownCdMode(options.cd_mode)) {
+    throw std::invalid_argument("HT c,d 模式非法");
+  }
+  if (!IsKnownNeighborhoodMode(options.neighborhood_mode)) {
+    throw std::invalid_argument("HT 邻域模式非法");
+  }
+  if (!IsKnownCdOrder(options.cd_order)) {
+    throw std::invalid_argument("HT c,d 排序模式非法");
+  }
+}
+
 bool ValidateHtGraph(const GraphSnapshot& graph, std::string* const reason) {
   if (!graph.integer_coordinates || !graph.integer_distance_safe || graph.dimension < 4 ||
       graph.points.size() != static_cast<std::size_t>(graph.dimension) ||
@@ -169,31 +189,52 @@ std::vector<HtCdScreenTask> BuildCdScreenTasks(const GraphSnapshot& graph, const
                                                const HtShallowOptions& options) {
   struct RankedNode {
     std::int32_t node{};
-    __int128 midpoint_score{};
+    __int128 score{};
   };
   std::vector<RankedNode> neighborhood;
   neighborhood.reserve(static_cast<std::size_t>(graph.dimension - 2));
-  for (std::int32_t node = 0; node < graph.dimension; ++node) {
-    if (node == target.u || node == target.v ||
-        (options.max_candidate_degree != 0 &&
-         static_cast<std::uint32_t>(graph.Degree(node)) > options.max_candidate_degree)) {
-      continue;
+  const auto eligible = [&](const std::int32_t node) {
+    return node != target.u && node != target.v &&
+           (options.max_candidate_degree == 0 ||
+            static_cast<std::uint32_t>(graph.Degree(node)) <= options.max_candidate_degree);
+  };
+  if (options.neighborhood_mode == HtNeighborhoodMode::kQuickEndpoint) {
+    std::vector<bool> seen(static_cast<std::size_t>(graph.dimension), false);
+    for (const std::int32_t endpoint : {target.u, target.v}) {
+      const std::int32_t begin = graph.row_offsets[static_cast<std::size_t>(endpoint)];
+      const std::int32_t end = graph.row_offsets[static_cast<std::size_t>(endpoint) + 1U];
+      for (std::int32_t offset = begin; offset < end; ++offset) {
+        const std::int32_t node = graph.neighbors[static_cast<std::size_t>(offset)];
+        if (!eligible(node) || seen[static_cast<std::size_t>(node)]) {
+          continue;
+        }
+        seen[static_cast<std::size_t>(node)] = true;
+        const __int128 score =
+            static_cast<__int128>(graph.Distance(target.u, node)) + graph.Distance(node, target.v);
+        neighborhood.push_back({node, score});
+      }
     }
-    // 用二倍中点坐标排序，避免引入浮点数或除法。
-    const __int128 dx =
-        static_cast<__int128>(2) * graph.points[static_cast<std::size_t>(node)].integer_x -
-        graph.points[static_cast<std::size_t>(target.u)].integer_x -
-        graph.points[static_cast<std::size_t>(target.v)].integer_x;
-    const __int128 dy =
-        static_cast<__int128>(2) * graph.points[static_cast<std::size_t>(node)].integer_y -
-        graph.points[static_cast<std::size_t>(target.u)].integer_y -
-        graph.points[static_cast<std::size_t>(target.v)].integer_y;
-    neighborhood.push_back({node, dx * dx + dy * dy});
+  } else {
+    for (std::int32_t node = 0; node < graph.dimension; ++node) {
+      if (!eligible(node)) {
+        continue;
+      }
+      // 用二倍中点坐标排序，避免引入浮点数或除法。
+      const __int128 dx =
+          static_cast<__int128>(2) * graph.points[static_cast<std::size_t>(node)].integer_x -
+          graph.points[static_cast<std::size_t>(target.u)].integer_x -
+          graph.points[static_cast<std::size_t>(target.v)].integer_x;
+      const __int128 dy =
+          static_cast<__int128>(2) * graph.points[static_cast<std::size_t>(node)].integer_y -
+          graph.points[static_cast<std::size_t>(target.u)].integer_y -
+          graph.points[static_cast<std::size_t>(target.v)].integer_y;
+      neighborhood.push_back({node, dx * dx + dy * dy});
+    }
   }
-  std::sort(
-      neighborhood.begin(), neighborhood.end(), [](const RankedNode& lhs, const RankedNode& rhs) {
-        return std::tie(lhs.midpoint_score, lhs.node) < std::tie(rhs.midpoint_score, rhs.node);
-      });
+  std::sort(neighborhood.begin(), neighborhood.end(),
+            [](const RankedNode& lhs, const RankedNode& rhs) {
+              return std::tie(lhs.score, lhs.node) < std::tie(rhs.score, rhs.node);
+            });
   if (options.max_neighborhood != 0 && neighborhood.size() > options.max_neighborhood) {
     neighborhood.resize(options.max_neighborhood);
   }
@@ -202,9 +243,9 @@ std::vector<HtCdScreenTask> BuildCdScreenTasks(const GraphSnapshot& graph, const
   if (neighborhood.size() > 1) {
     tasks.reserve(neighborhood.size() * (neighborhood.size() - 1U) / 2U);
   }
-  for (std::size_t first_index = 0; first_index < neighborhood.size(); ++first_index) {
-    for (std::size_t second_index = first_index + 1U; second_index < neighborhood.size();
-         ++second_index) {
+  // KH 以 j 为外层、k<j 为内层；pair trial 预算依赖这个确定顺序。
+  for (std::size_t second_index = 1U; second_index < neighborhood.size(); ++second_index) {
+    for (std::size_t first_index = 0U; first_index < second_index; ++first_index) {
       const std::int32_t c =
           std::min(neighborhood[first_index].node, neighborhood[second_index].node);
       const std::int32_t d =
@@ -300,7 +341,11 @@ std::vector<HtCdCandidate> FinalizeCdCandidates(const GraphSnapshot& graph, cons
   };
 
   std::vector<HtCdCandidate> candidates;
-  for (std::size_t index = 0; index < tasks.size(); ++index) {
+  const std::size_t trial_count =
+      options.max_cd_pair_trials == 0U
+          ? tasks.size()
+          : std::min(tasks.size(), static_cast<std::size_t>(options.max_cd_pair_trials));
+  for (std::size_t index = 0; index < trial_count; ++index) {
     if (flags[index] == 0) {
       continue;
     }
@@ -315,11 +360,13 @@ std::vector<HtCdCandidate> FinalizeCdCandidates(const GraphSnapshot& graph, cons
     }
     candidates.push_back({task.c, task.d, reply_product});
   }
-  std::sort(candidates.begin(), candidates.end(),
-            [](const HtCdCandidate& lhs, const HtCdCandidate& rhs) {
-              return std::tie(lhs.reply_product, lhs.c, lhs.d) <
-                     std::tie(rhs.reply_product, rhs.c, rhs.d);
-            });
+  if (options.cd_order == HtCdOrder::kReplyProduct) {
+    std::sort(candidates.begin(), candidates.end(),
+              [](const HtCdCandidate& lhs, const HtCdCandidate& rhs) {
+                return std::tie(lhs.reply_product, lhs.c, lhs.d) <
+                       std::tie(rhs.reply_product, rhs.c, rhs.d);
+              });
+  }
   if (options.max_cd_candidates != 0 && candidates.size() > options.max_cd_candidates) {
     candidates.resize(options.max_cd_candidates);
   }
@@ -649,9 +696,10 @@ std::vector<HtCdCandidate> GenerateHtCdCandidates(const GraphSnapshot& graph,
     throw std::invalid_argument(reason);
   }
   const NodeEdge target = CanonicalEdge(raw_target.u, raw_target.v);
-  if (!ValidateTarget(graph, target, &reason) || !IsKnownCdMode(options.cd_mode)) {
-    throw std::invalid_argument(reason.empty() ? "HT c,d 模式非法" : reason);
+  if (!ValidateTarget(graph, target, &reason)) {
+    throw std::invalid_argument(reason);
   }
+  ValidateCdOptions(options);
   const std::vector<HtCdScreenTask> tasks = BuildCdScreenTasks(graph, target, options);
   return FinalizeCdCandidates(graph, target, options, tasks,
                               ScreenCdTasksCpu(graph, target, tasks, options.cd_mode));
@@ -667,9 +715,10 @@ HtCdBatchResult EvaluateHtCdCandidatesImpl(const GraphSnapshot& graph, const Nod
     throw std::invalid_argument(reason);
   }
   const NodeEdge target = CanonicalEdge(raw_target.u, raw_target.v);
-  if (!ValidateTarget(graph, target, &reason) || !IsKnownCdMode(options.cd_mode)) {
-    throw std::invalid_argument(reason.empty() ? "HT c,d 模式非法" : reason);
+  if (!ValidateTarget(graph, target, &reason)) {
+    throw std::invalid_argument(reason);
   }
+  ValidateCdOptions(options);
   if (options.candidate_backend != PathCompatibilityBackend::kAuto &&
       options.candidate_backend != PathCompatibilityBackend::kCpu &&
       options.candidate_backend != PathCompatibilityBackend::kCuda) {

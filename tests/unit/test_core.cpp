@@ -36,8 +36,8 @@ cudaee::LpEpoch TinyLp() {
   epoch.lower_bounds = {0.0, 0.0};
   epoch.upper_bounds = {1.0, 1.0};
   epoch.variable_types = {'C', 'C'};
-  epoch.edge_u = {-1, -1};
-  epoch.edge_v = {-1, -1};
+  epoch.edge_u = {0, 0};
+  epoch.edge_v = {1, 2};
   return epoch;
 }
 
@@ -81,6 +81,83 @@ void TestLpEpochAndExactBound() {
   Check(loaded.rows == 1, "LP rows round trip");
   Check(loaded.columns == 2, "LP columns round trip");
   Check(loaded.ComputeHash() == loaded.content_hash, "LP hash round trip");
+}
+
+void TestLpStableIdentityAndWarmProjection() {
+  const cudaee::LpEpoch source = TinyLp();
+  const cudaee::LpStableIdentity source_identity = cudaee::ComputeLpStableIdentity(source);
+  Check(source_identity.complete, source_identity.reason);
+
+  cudaee::LpSolution accepted;
+  accepted.numerically_accepted = true;
+  accepted.primal = {0.25, 0.75};
+  accepted.dual = {1.0};
+  const cudaee::LpWarmStart warm = cudaee::BuildLpWarmStart(source, accepted);
+
+  cudaee::LpEpoch reordered = source;
+  reordered.objective = {2.0, 1.0};
+  reordered.edge_u = {0, 0};
+  reordered.edge_v = {2, 1};
+  const cudaee::LpStableIdentity reordered_identity = cudaee::ComputeLpStableIdentity(reordered);
+  Check(reordered_identity.complete, reordered_identity.reason);
+  Check(reordered_identity.identity_hash == source_identity.identity_hash,
+        "LP stable identity hash ignores column order");
+  const cudaee::LpWarmStartProjection reordered_projection =
+      cudaee::ProjectLpWarmStart(warm, reordered);
+  Check(reordered_projection.accepted, reordered_projection.reason);
+  Check(reordered_projection.primal == std::vector<double>({0.75, 0.25}),
+        "LP primal maps by edge identity rather than position");
+  Check(reordered_projection.dual == std::vector<double>({1.0}),
+        "LP dual maps by canonical row identity");
+  Check(reordered_projection.column_coverage == 1.0 && reordered_projection.row_coverage == 1.0,
+        "LP reorder keeps full warm-start coverage");
+
+  cudaee::LpEpoch expanded = reordered;
+  expanded.rows = 2;
+  expanded.columns = 3;
+  expanded.objective = {2.0, 1.0, 3.0};
+  expanded.row_offsets = {0, 2, 3};
+  expanded.column_indices = {0, 1, 2};
+  expanded.values = {1.0, 1.0, 1.0};
+  expanded.senses = {'G', 'G'};
+  expanded.rhs = {1.0, 0.0};
+  expanded.lower_bounds = {0.0, 0.0, 0.0};
+  expanded.upper_bounds = {1.0, 1.0, 1.0};
+  expanded.variable_types = {'C', 'C', 'C'};
+  expanded.edge_u = {0, 0, 1};
+  expanded.edge_v = {2, 1, 2};
+  const cudaee::LpWarmStartProjection strict_projection =
+      cudaee::ProjectLpWarmStart(warm, expanded, 0.8);
+  Check(!strict_projection.accepted, "LP warm start rejects insufficient identity coverage");
+  Check(std::abs(strict_projection.column_coverage - (2.0 / 3.0)) < 1.0e-12 &&
+            strict_projection.row_coverage == 0.5,
+        "LP warm-start coverage is measured on target identities");
+  const cudaee::LpWarmStartProjection permissive_projection =
+      cudaee::ProjectLpWarmStart(warm, expanded, 0.5);
+  Check(permissive_projection.accepted, permissive_projection.reason);
+  Check(permissive_projection.primal[2] == 0.0 && permissive_projection.dual[1] == 0.0,
+        "new LP identities receive bounded zero defaults");
+
+  cudaee::LpWarmStart tampered = warm;
+  tampered.identity.identity_hash ^= 1U;
+  Check(!cudaee::ProjectLpWarmStart(tampered, reordered).accepted,
+        "tampered warm-start identity hash fails closed");
+
+  cudaee::LpEpoch duplicate = source;
+  duplicate.edge_u[1] = duplicate.edge_u[0];
+  duplicate.edge_v[1] = duplicate.edge_v[0];
+  Check(!cudaee::ComputeLpStableIdentity(duplicate).complete,
+        "duplicate edge identities fail closed");
+
+  bool rejected_solution = false;
+  try {
+    cudaee::LpSolution rejected = accepted;
+    rejected.numerically_accepted = false;
+    static_cast<void>(cudaee::BuildLpWarmStart(source, rejected));
+  } catch (const std::invalid_argument&) {
+    rejected_solution = true;
+  }
+  Check(rejected_solution, "numerically rejected solution cannot seed warm start");
 }
 
 void TestGraphCsrAndVerifierSafety() {
@@ -150,6 +227,24 @@ void TestProtectedTour() {
     rejected = true;
   }
   Check(rejected, "tour parser rejects duplicate node");
+}
+
+void TestCompleteGraphLoader() {
+  const std::filesystem::path source = CUDAEE_SOURCE_DIR;
+  const std::filesystem::path tsp = source / "tests/data/recursive-point.tsp";
+  const cudaee::GraphSnapshot complete = cudaee::GraphSnapshot::LoadComplete(tsp);
+  Check(complete.dimension == 8, "complete graph dimension");
+  Check(complete.ActiveEdgeCount() == 28U, "complete graph edge count");
+  for (std::int32_t vertex = 0; vertex < complete.dimension; ++vertex) {
+    Check(complete.Degree(vertex) == 7, "complete graph degree");
+  }
+
+  const std::filesystem::path directory = CUDAEE_TEST_TMP_DIR;
+  std::filesystem::create_directories(directory);
+  const std::filesystem::path edges = directory / "recursive-point.complete.edg";
+  complete.WriteActiveEdges(edges);
+  const cudaee::GraphSnapshot reloaded = cudaee::GraphSnapshot::Load(tsp, edges);
+  Check(reloaded.ContentHash() == complete.ContentHash(), "complete graph write/load hash");
 }
 
 void CheckSameCandidates(const std::vector<cudaee::Candidate>& expected,
@@ -233,8 +328,10 @@ void TestJvCudaResidentCache() {
 int main() {
   TestDistances();
   TestLpEpochAndExactBound();
+  TestLpStableIdentityAndWarmProjection();
   TestGraphCsrAndVerifierSafety();
   TestProtectedTour();
+  TestCompleteGraphLoader();
   TestJvCudaResidentCache();
   std::cout << "unit tests passed\n";
   return 0;

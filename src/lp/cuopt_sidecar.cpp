@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -31,6 +33,15 @@ template <typename Function> Function LoadSymbol(void* library, const char* name
   if (error != nullptr || symbol == nullptr) {
     throw std::runtime_error(std::string("cuOpt C API 缺少符号 ") + name + ": " +
                              (error == nullptr ? "unknown" : error));
+  }
+  return reinterpret_cast<Function>(symbol);
+}
+
+template <typename Function> Function TryLoadSymbol(void* library, const char* name) {
+  dlerror();
+  void* symbol = dlsym(library, name);
+  if (dlerror() != nullptr || symbol == nullptr) {
+    return nullptr;
   }
   return reinterpret_cast<Function>(symbol);
 }
@@ -61,6 +72,10 @@ public:
     get_objective = LoadSymbol<GetFloat>(library_, "cuOptGetObjectiveValue");
     get_dual_objective = LoadSymbol<GetFloat>(library_, "cuOptGetDualObjectiveValue");
     get_solve_time = LoadSymbol<GetFloat>(library_, "cuOptGetSolveTime");
+    // 26.08 已提供这两个入口；保留可选探测，使旧版库仍可安全冷启动。
+    set_initial_primal =
+        TryLoadSymbol<SetInitialSolution>(library_, "cuOptSetInitialPrimalSolution");
+    set_initial_dual = TryLoadSymbol<SetInitialSolution>(library_, "cuOptSetInitialDualSolution");
   }
 
   ~CuOptApi() {
@@ -86,6 +101,7 @@ public:
   using GetInteger = std::int32_t (*)(Handle, std::int32_t*);
   using GetArray = std::int32_t (*)(Handle, double*);
   using GetFloat = std::int32_t (*)(Handle, double*);
+  using SetInitialSolution = std::int32_t (*)(Handle, const double*, std::int32_t);
 
   GetSize get_float_size{};
   GetSize get_int_size{};
@@ -105,6 +121,8 @@ public:
   GetFloat get_objective{};
   GetFloat get_dual_objective{};
   GetFloat get_solve_time{};
+  SetInitialSolution set_initial_primal{};
+  SetInitialSolution set_initial_dual{};
 
 private:
   void* library_{nullptr};
@@ -188,11 +206,33 @@ double ComputeMaxReducedCostResidual(const LpEpoch& epoch, const std::vector<dou
   return maximum;
 }
 
-} // namespace
+void ConfigureSettings(CuOptApi& api, const Handle settings) {
+  CheckStatus(api.set_integer(settings, "method", kCuOptMethodPdlp), "设置 method=PDLP");
+  CheckStatus(api.set_integer(settings, "pdlp_precision", kCuOptDoublePrecision),
+              "设置 pdlp_precision=double");
+  // stable identity 与 dual 映射都以原始模型为准；warm start 下必须关闭 presolve。
+  CheckStatus(api.set_integer(settings, "presolve", kCuOptPresolveOff), "设置 presolve=off");
+  CheckStatus(api.set_integer(settings, "pdlp_solver_mode", kCuOptPdlpMethodical),
+              "设置 pdlp_solver_mode=methodical");
+  CheckStatus(api.set_integer(settings, "random_seed", 0), "设置 random_seed");
+  CheckStatus(api.set_integer(settings, "log_to_console", 0), "关闭 cuOpt 控制台日志");
+  CheckStatus(api.set_float(settings, "absolute_primal_tolerance", 1.0e-8),
+              "设置 primal tolerance");
+  CheckStatus(api.set_float(settings, "absolute_dual_tolerance", 1.0e-8), "设置 dual tolerance");
+  CheckStatus(api.set_float(settings, "relative_primal_tolerance", 0.0),
+              "设置 relative primal tolerance");
+  CheckStatus(api.set_float(settings, "relative_dual_tolerance", 0.0),
+              "设置 relative dual tolerance");
+  CheckStatus(api.set_float(settings, "absolute_gap_tolerance", 1.0e-8),
+              "设置 absolute gap tolerance");
+  CheckStatus(api.set_float(settings, "relative_gap_tolerance", 0.0),
+              "设置 relative gap tolerance");
+}
 
-LpSolution SolveWithCuOpt(const LpEpoch& epoch, const std::string& library_path) {
+LpSolution SolveWithCuOptApi(CuOptApi& api, const LpEpoch& epoch,
+                             const LpWarmStartProjection* warm_projection,
+                             const bool warm_attempted, std::string warm_reason) {
   epoch.Validate();
-  CuOptApi api(library_path);
   if (api.get_float_size() != static_cast<std::int8_t>(sizeof(double)) ||
       api.get_int_size() != static_cast<std::int8_t>(sizeof(std::int32_t))) {
     throw std::runtime_error("cuOpt C ABI 的 float/int 宽度与 sidecar 不匹配");
@@ -202,6 +242,21 @@ LpSolution SolveWithCuOpt(const LpEpoch& epoch, const std::string& library_path)
   std::int32_t minor = 0;
   std::int32_t patch = 0;
   CheckStatus(api.get_version(&major, &minor, &patch), "cuOptGetVersion");
+
+  LpSolution solution;
+  solution.solver = "cuOpt-C-API";
+  solution.solver_version =
+      std::to_string(major) + "." + std::to_string(minor) + "." + std::to_string(patch);
+  solution.warm_start_attempted = warm_attempted;
+  solution.warm_start_reason = std::move(warm_reason);
+  if (warm_projection != nullptr) {
+    solution.warm_start_column_coverage = warm_projection->column_coverage;
+    solution.warm_start_row_coverage = warm_projection->row_coverage;
+  }
+  const LpStableIdentity stable_identity = ComputeLpStableIdentity(epoch);
+  if (stable_identity.complete) {
+    solution.stable_identity_hash = stable_identity.identity_hash;
+  }
 
   Handle problem = nullptr;
   Handle settings = nullptr;
@@ -215,32 +270,32 @@ LpSolution SolveWithCuOpt(const LpEpoch& epoch, const std::string& library_path)
                                    epoch.variable_types.data(), &problem),
                 "cuOptCreateProblem");
     CheckStatus(api.create_settings(&settings), "cuOptCreateSolverSettings");
-    CheckStatus(api.set_integer(settings, "method", kCuOptMethodPdlp), "设置 method=PDLP");
-    CheckStatus(api.set_integer(settings, "pdlp_precision", kCuOptDoublePrecision),
-                "设置 pdlp_precision=double");
-    // 证书必须保持 Concorde 的原始行列顺序；关闭 presolve，避免对偶回映射含糊。
-    CheckStatus(api.set_integer(settings, "presolve", kCuOptPresolveOff), "设置 presolve=off");
-    CheckStatus(api.set_integer(settings, "pdlp_solver_mode", kCuOptPdlpMethodical),
-                "设置 pdlp_solver_mode=methodical");
-    CheckStatus(api.set_integer(settings, "random_seed", 0), "设置 random_seed");
-    CheckStatus(api.set_integer(settings, "log_to_console", 0), "关闭 cuOpt 控制台日志");
-    CheckStatus(api.set_float(settings, "absolute_primal_tolerance", 1.0e-8),
-                "设置 primal tolerance");
-    CheckStatus(api.set_float(settings, "absolute_dual_tolerance", 1.0e-8), "设置 dual tolerance");
-    CheckStatus(api.set_float(settings, "relative_primal_tolerance", 0.0),
-                "设置 relative primal tolerance");
-    CheckStatus(api.set_float(settings, "relative_dual_tolerance", 0.0),
-                "设置 relative dual tolerance");
-    CheckStatus(api.set_float(settings, "absolute_gap_tolerance", 1.0e-8),
-                "设置 absolute gap tolerance");
-    CheckStatus(api.set_float(settings, "relative_gap_tolerance", 0.0),
-                "设置 relative gap tolerance");
-    CheckStatus(api.solve(problem, settings, &solution_handle), "cuOptSolve");
+    ConfigureSettings(api, settings);
 
-    LpSolution solution;
-    solution.solver = "cuOpt-C-API";
-    solution.solver_version =
-        std::to_string(major) + "." + std::to_string(minor) + "." + std::to_string(patch);
+    if (warm_projection != nullptr && warm_projection->accepted) {
+      if (api.set_initial_primal == nullptr || api.set_initial_dual == nullptr) {
+        solution.warm_start_reason = "cuOpt 共享库未提供 primal/dual warm-start API，已安全冷启动";
+      } else {
+        const std::int32_t primal_status =
+            api.set_initial_primal(settings, warm_projection->primal.data(), epoch.columns);
+        const std::int32_t dual_status =
+            api.set_initial_dual(settings, warm_projection->dual.data(), epoch.rows);
+        if (primal_status == kCuOptSuccess && dual_status == kCuOptSuccess) {
+          solution.warm_start_applied = true;
+          solution.warm_start_reason = "stable identity warm start applied";
+        } else {
+          // 若只写入了一半初值，销毁 settings 后重建，避免半热启动状态泄漏。
+          api.destroy_settings(&settings);
+          CheckStatus(api.create_settings(&settings), "重建 cuOptSolverSettings");
+          ConfigureSettings(api, settings);
+          solution.warm_start_reason =
+              "cuOpt warm-start API 拒绝初值（primal=" + std::to_string(primal_status) +
+              ", dual=" + std::to_string(dual_status) + "），已安全冷启动";
+        }
+      }
+    }
+
+    CheckStatus(api.solve(problem, settings, &solution_handle), "cuOptSolve");
     CheckStatus(api.get_termination(solution_handle, &solution.termination_status),
                 "cuOptGetTerminationStatus");
     solution.status = TerminationName(solution.termination_status);
@@ -275,14 +330,68 @@ LpSolution SolveWithCuOpt(const LpEpoch& epoch, const std::string& library_path)
     api.destroy_problem(&problem);
     return solution;
   } catch (...) {
-    if (solution_handle != nullptr)
+    if (solution_handle != nullptr) {
       api.destroy_solution(&solution_handle);
-    if (settings != nullptr)
+    }
+    if (settings != nullptr) {
       api.destroy_settings(&settings);
-    if (problem != nullptr)
+    }
+    if (problem != nullptr) {
       api.destroy_problem(&problem);
+    }
     throw;
   }
+}
+
+} // namespace
+
+class CuOptSession::Impl {
+public:
+  explicit Impl(const std::string& library_path) : api(library_path) {}
+
+  CuOptApi api;
+  std::optional<LpWarmStart> warm_start;
+};
+
+CuOptSession::CuOptSession(std::string library_path)
+    : impl_(std::make_unique<Impl>(library_path)) {}
+
+CuOptSession::~CuOptSession() = default;
+CuOptSession::CuOptSession(CuOptSession&&) noexcept = default;
+CuOptSession& CuOptSession::operator=(CuOptSession&&) noexcept = default;
+
+LpSolution CuOptSession::Solve(const LpEpoch& epoch, const bool enable_warm_start,
+                               const double minimum_coverage) {
+  std::optional<LpWarmStartProjection> projection;
+  bool attempted = false;
+  std::string reason = enable_warm_start ? "no accepted prior solution" : "warm start disabled";
+  if (enable_warm_start && impl_->warm_start.has_value()) {
+    attempted = true;
+    projection = ProjectLpWarmStart(*impl_->warm_start, epoch, minimum_coverage);
+    reason = projection->reason;
+  }
+
+  LpSolution solution =
+      SolveWithCuOptApi(impl_->api, epoch, projection.has_value() ? &*projection : nullptr,
+                        attempted, std::move(reason));
+  if (solution.numerically_accepted) {
+    try {
+      impl_->warm_start = BuildLpWarmStart(epoch, solution);
+    } catch (const std::invalid_argument&) {
+      // 缺失或歧义身份时不能把当前解带到下一 epoch。
+      impl_->warm_start.reset();
+    }
+  } else {
+    impl_->warm_start.reset();
+  }
+  return solution;
+}
+
+void CuOptSession::ClearWarmStart() { impl_->warm_start.reset(); }
+
+LpSolution SolveWithCuOpt(const LpEpoch& epoch, const std::string& library_path) {
+  CuOptSession session(library_path);
+  return session.Solve(epoch, false);
 }
 
 } // namespace cudaee
