@@ -970,6 +970,34 @@ void TestRecursivePointProof() {
   Check(duplicate_device_graph.ContentHash() == graph.ContentHash(),
         "invalid target worker configuration leaves the graph unchanged");
 
+  cudaee::HtScanOptions negative_device_options = scan_options;
+  negative_device_options.target_devices = {-1};
+  cudaee::GraphSnapshot negative_device_graph = graph;
+  CheckThrows(
+      [&] {
+        const auto ignored =
+            cudaee::RunHtScanEpoch(&negative_device_graph, negative_device_options);
+        static_cast<void>(ignored);
+      },
+      "HT scan rejects a negative target worker device");
+  Check(negative_device_graph.ContentHash() == graph.ContentHash(),
+        "negative target worker configuration leaves the graph unchanged");
+
+  cudaee::HtScanOptions excessive_worker_options = scan_options;
+  for (int device = 0; device < 33; ++device) {
+    excessive_worker_options.target_devices.push_back(device);
+  }
+  cudaee::GraphSnapshot excessive_worker_graph = graph;
+  CheckThrows(
+      [&] {
+        const auto ignored =
+            cudaee::RunHtScanEpoch(&excessive_worker_graph, excessive_worker_options);
+        static_cast<void>(ignored);
+      },
+      "HT scan rejects more than 32 target workers");
+  Check(excessive_worker_graph.ContentHash() == graph.ContentHash(),
+        "excessive target worker configuration leaves the graph unchanged");
+
   cudaee::HtScanOptions completed_scan_options = scan_options;
   completed_scan_options.target_offset = weighted_targets.size();
   cudaee::GraphSnapshot completed_scan_graph = graph;
@@ -1492,6 +1520,19 @@ void TestRecursivePointProof() {
     std::string device_count_reason;
     const int visible_devices = cudaee::detail::VisibleCudaDeviceCount(&device_count_reason);
     Check(visible_devices > 0, device_count_reason);
+    cudaee::HtScanOptions out_of_range_device_options = cuda_scan_options;
+    out_of_range_device_options.target_devices = {visible_devices};
+    cudaee::GraphSnapshot out_of_range_device_graph = graph;
+    CheckThrows(
+        [&] {
+          const auto ignored =
+              cudaee::RunHtScanEpoch(&out_of_range_device_graph, out_of_range_device_options);
+          static_cast<void>(ignored);
+        },
+        "HT scan rejects a target worker outside the visible device range");
+    Check(out_of_range_device_graph.ContentHash() == graph.ContentHash(),
+          "out-of-range target worker leaves the graph unchanged");
+
     cudaee::HtScanOptions pinned_device_options = cuda_scan_options;
     pinned_device_options.target_devices = {0};
     cudaee::GraphSnapshot pinned_device_graph = graph;
