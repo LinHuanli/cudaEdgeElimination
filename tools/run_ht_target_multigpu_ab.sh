@@ -58,8 +58,10 @@ fi
 
 max_gpu_util="${CUDAEE_MAX_GPU_UTILIZATION:-10}"
 max_gpu_memory_mib="${CUDAEE_MAX_GPU_MEMORY_USED_MIB:-512}"
-if [[ ! "${max_gpu_util}" =~ ^[0-9]+$ || ! "${max_gpu_memory_mib}" =~ ^[0-9]+$ ]]; then
-  echo "错误：GPU 空闲阈值必须为非负整数。" >&2
+gpu_cooldown_seconds="${CUDAEE_GPU_COOLDOWN_SECONDS:-30}"
+if [[ ! "${max_gpu_util}" =~ ^[0-9]+$ || ! "${max_gpu_memory_mib}" =~ ^[0-9]+$ ||
+      ! "${gpu_cooldown_seconds}" =~ ^[0-9]+$ ]] || (( gpu_cooldown_seconds > 120 )); then
+  echo "错误：GPU 空闲阈值必须为非负整数，冷却等待必须位于 [0,120] 秒。" >&2
   exit 2
 fi
 check_physical_gpu() {
@@ -70,17 +72,30 @@ check_physical_gpu() {
     '{ gsub(/ /, "", $1); if ($1 == target) { gsub(/ /, "", $2); gsub(/ /, "", $3); print $2, $3 } }')"
   if [[ -z "${stats}" ]]; then
     echo "错误：找不到物理 GPU ${device}。" >&2
-    exit 2
+    return 2
   fi
   read -r used util <<<"${stats}"
   if (( used > max_gpu_memory_mib || util > max_gpu_util )); then
     echo "错误：物理 GPU ${device} 当前非空闲（memory=${used} MiB, util=${util}%）。" >&2
-    exit 2
+    return 1
   fi
 }
+wait_for_physical_gpu() {
+  local device="$1"
+  local waited=0
+  while (( waited < gpu_cooldown_seconds )); do
+    if check_physical_gpu "${device}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    ((++waited))
+  done
+  check_physical_gpu "${device}"
+}
 if [[ "${CUDAEE_ALLOW_BUSY_GPU:-0}" != "1" ]]; then
-  check_physical_gpu "${physical_first}"
-  check_physical_gpu "${physical_second}"
+  if ! check_physical_gpu "${physical_first}" || ! check_physical_gpu "${physical_second}"; then
+    exit 2
+  fi
 fi
 gpu_uuid_for_index() {
   local device="$1"
@@ -199,9 +214,11 @@ run_scan() {
   local mode="$1"
   local run="$2"
   if [[ "${CUDAEE_ALLOW_BUSY_GPU:-0}" != "1" ]]; then
-    # 每次独立进程启动前复核，避免 warmup 之后有外部任务进入而污染正式样本。
-    check_physical_gpu "${physical_first}"
-    check_physical_gpu "${physical_second}"
+    # 每次启动前复核；有界等待只吸收上一进程退出后的利用率采样滞后。
+    if ! wait_for_physical_gpu "${physical_first}" ||
+      ! wait_for_physical_gpu "${physical_second}"; then
+      exit 2
+    fi
   fi
   local target_devices="0"
   if [[ "${mode}" == "two" ]]; then
@@ -355,6 +372,9 @@ manifest="${run_dir}/manifest.txt"
   echo "target_offset ${target_offset}"
   echo "max_targets ${max_targets}"
   echo "cpu_cost_threads_per_worker ${cpu_cost_threads}"
+  echo "max_gpu_utilization ${max_gpu_util}"
+  echo "max_gpu_memory_used_mib ${max_gpu_memory_mib}"
+  echo "gpu_cooldown_seconds ${gpu_cooldown_seconds}"
   echo "report_version $(head -n 1 "${run_dir}/one.1.report")"
   echo "tsp_sha256 $(sha256sum "${tsp}" | awk '{ print $1 }')"
   echo "source_edges_sha256 $(sha256sum "${edges}" | awk '{ print $1 }')"
