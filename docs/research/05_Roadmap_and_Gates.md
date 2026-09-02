@@ -109,6 +109,8 @@ scan 跨目标快照绑定复用已完成：`RunHtScanEpoch` 在只读 target �
 
 leaf path 稀疏验证绑定复用已完成：batch 内每个 path 对象只执行一次实际节点规模的规范认证，多个 outside cursor 复用强类型 binding；公开 scalar/dense verifier、成功 proof 重放和所有 HT/V2 授权边界不变。三实例 leaf setup 加速 `2.487×/4.641×/6.814×`，CPU-fused search 加速 `1.051×/1.105×/1.196×`；2,000 组 sparse/dense 差分及 54 项正式跨提交比较全部通过。下一切片审计 CPU exact cost matrix 的数据布局和重复距离读取。
 
+CPU exact cost 固定验证与重连计划已完成：3–5 条删除边用固定数组认证，规范 templates 一次编译为端口对计划，task 内规范边/冲突/整数距离按 pair 复用；CUDA 结果仍逐 cell 由完整 CPU 矩阵认证。三实例 cost evaluate 加速 `1.510×/1.580×/1.431×`，CPU-fused search 加速 `1.274×/1.131×/1.035×`；54 项跨提交精确比较全部通过。下一切片先测量融合 batch 的实际 node-pair 重复率，再决定 batch-local 距离缓存或 cursor prepare 优化。
+
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义

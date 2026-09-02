@@ -53,5 +53,6 @@
 49. [M5 HT wavefront 图验证绑定复用](research/45_M5_HT_Wavefront_Graph_Validation_Binding.md)：一次完整 CSR 验证供 c,d/Hamilton/end batches 共用，并保持公开 API 与独立 verifier 不变。
 50. [M5 HT scan 跨目标快照绑定复用](research/46_M5_HT_Scan_Snapshot_Binding.md)：在同一不可变 target 切片复用 graph/hash bindings，同时保留逐目标内容哈希守卫和全部独立重放。
 51. [M5 HT leaf path 稀疏验证绑定复用](research/47_M5_HT_Leaf_Path_Validation_Binding.md)：每个 batch path 只做一次稀疏规范认证，成功 proof 仍由公开 dense verifier 独立重放。
+52. [M5 HT CPU cost 固定验证与重连计划](research/48_M5_HT_CPU_Cost_Fixed_Plans.md)：消除小集合堆分配与逐 cell template 解码，并保持完整 CPU/CUDA 整数矩阵认证。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

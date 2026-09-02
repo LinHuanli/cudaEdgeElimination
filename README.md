@@ -32,6 +32,7 @@
 - leaf k-opt batch 的一次性 sparse path 认证与对象绑定，以及保留的 scalar/dense proof 重放；
 - path-count matching catalog 与 3/4/5-opt reconnect templates 的线程安全不可变缓存；
 - CPU/CUDA 共用的增量 leaf 精确成本矩阵路径，以及与 CPU scalar 逐字节一致的规范 proof 计数；
+- CPU exact cost 的固定数组 task 验证、缓存端口对计划与 task 内 pair-cost 复用；
 - Hamilton reply 的批内 center 去重、每邻边 quick-filter 缓存与 CPU/CUDA 全数组差分；
 - leaf setup 的 proof/coverage/cursor 画像，以及同一批次只计算一次的不可变快照哈希；
 - 8,192-cell 门槛以上按 task row 静态分片的有界 OpenMP CPU 精确成本矩阵；
