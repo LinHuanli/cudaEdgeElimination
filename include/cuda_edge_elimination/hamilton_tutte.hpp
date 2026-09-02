@@ -432,6 +432,12 @@ private:
   const GraphSnapshot* graph_{};
 };
 
+[[nodiscard]] HtWavefrontResult
+ProveEdgeByWavefrontHtBoundToSnapshot(const GraphSnapshot& graph, NodeEdge target_edge,
+                                      const HtWavefrontOptions& options,
+                                      const KOptSnapshotBinding& snapshot_binding,
+                                      const HtGraphValidationBinding& graph_validation_binding);
+
 [[nodiscard]] HtCdBatchResult
 EvaluateHtCdCandidatesBoundToValidatedGraph(const GraphSnapshot& graph, NodeEdge target_edge,
                                             const HtShallowOptions& options,

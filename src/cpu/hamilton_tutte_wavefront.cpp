@@ -1373,12 +1373,21 @@ std::uint32_t CopySuccessfulState(const std::uint32_t source_index,
 
 } // namespace
 
-HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeEdge raw_target,
-                                         const HtWavefrontOptions& options) {
+namespace {
+
+HtWavefrontResult
+ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target,
+                           const HtWavefrontOptions& options,
+                           const detail::KOptSnapshotBinding* snapshot_binding,
+                           const detail::HtGraphValidationBinding* graph_validation_binding) {
   HtWavefrontResult result;
   HtRecursiveProof& proof = result.proof;
-  const detail::KOptSnapshotBinding leaf_snapshot_binding(graph);
-  proof.snapshot_hash = leaf_snapshot_binding.snapshot_hash();
+  std::optional<detail::KOptSnapshotBinding> owned_snapshot_binding;
+  if (snapshot_binding == nullptr) {
+    owned_snapshot_binding.emplace(graph);
+    snapshot_binding = &*owned_snapshot_binding;
+  }
+  proof.snapshot_hash = snapshot_binding->snapshot_hash();
   proof.target_edge = CanonicalEdge(raw_target.u, raw_target.v);
   proof.cd_mode = options.search_options.root_options.cd_mode;
   if (options.propagation_backend != PathCompatibilityBackend::kAuto &&
@@ -1400,11 +1409,14 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
     return result;
   }
 
-  std::optional<detail::HtGraphValidationBinding> graph_validation_binding;
+  std::optional<detail::HtGraphValidationBinding> owned_graph_validation_binding;
   HtCdBatchResult candidates;
   const SteadyClock::time_point candidate_begin = SteadyClock::now();
   try {
-    graph_validation_binding.emplace(graph);
+    if (graph_validation_binding == nullptr) {
+      owned_graph_validation_binding.emplace(graph);
+      graph_validation_binding = &*owned_graph_validation_binding;
+    }
     candidates = detail::EvaluateHtCdCandidatesBoundToValidatedGraph(
         graph, proof.target_edge, options.search_options.root_options, *graph_validation_binding);
   } catch (const std::exception& error) {
@@ -1412,8 +1424,9 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
       try {
         HtShallowOptions cpu_options = options.search_options.root_options;
         cpu_options.candidate_backend = PathCompatibilityBackend::kCpu;
-        if (!graph_validation_binding.has_value()) {
-          graph_validation_binding.emplace(graph);
+        if (graph_validation_binding == nullptr) {
+          owned_graph_validation_binding.emplace(graph);
+          graph_validation_binding = &*owned_graph_validation_binding;
         }
         candidates = detail::EvaluateHtCdCandidatesBoundToValidatedGraph(
             graph, proof.target_edge, cpu_options, *graph_validation_binding);
@@ -1457,8 +1470,8 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
                            .leaf_frontier_batch_states = options.leaf_frontier_batch_states,
                            .fuse_leaf_buckets = options.fuse_leaf_buckets,
                            .point_candidate_order = {},
-                           .leaf_snapshot_binding = &leaf_snapshot_binding,
-                           .graph_validation_binding = &*graph_validation_binding,
+                           .leaf_snapshot_binding = snapshot_binding,
+                           .graph_validation_binding = graph_validation_binding,
                            .result = &result,
                            .budget_exhausted = false,
                            .path_append_failed = false,
@@ -1590,6 +1603,24 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
   proof.reason = context.budget_exhausted ? "HT wavefront 资源预算耗尽"
                                           : "HT wavefront 的全部根 moves 均未解决";
   return result;
+}
+
+} // namespace
+
+HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeEdge raw_target,
+                                         const HtWavefrontOptions& options) {
+  return ProveEdgeByWavefrontHtImpl(graph, raw_target, options, nullptr, nullptr);
+}
+
+HtWavefrontResult detail::ProveEdgeByWavefrontHtBoundToSnapshot(
+    const GraphSnapshot& graph, const NodeEdge target_edge, const HtWavefrontOptions& options,
+    const KOptSnapshotBinding& snapshot_binding,
+    const HtGraphValidationBinding& graph_validation_binding) {
+  if (!snapshot_binding.Matches(graph) || !graph_validation_binding.Matches(graph)) {
+    throw std::invalid_argument("HT wavefront snapshot binding 与图对象不一致");
+  }
+  return ProveEdgeByWavefrontHtImpl(graph, target_edge, options, &snapshot_binding,
+                                    &graph_validation_binding);
 }
 
 } // namespace cudaee

@@ -75,7 +75,10 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
   }
 
   const auto total_start = std::chrono::steady_clock::now();
-  const std::uint64_t snapshot_hash = graph->ContentHash();
+  // 整个 target 切片在 commit 前只读；两个强类型 binding 只跨该同步 scan 复用。
+  const detail::KOptSnapshotBinding snapshot_binding(*graph);
+  const detail::HtGraphValidationBinding graph_validation_binding(*graph);
+  const std::uint64_t snapshot_hash = snapshot_binding.snapshot_hash();
   const auto selection_start = std::chrono::steady_clock::now();
   const std::vector<std::int32_t> targets = SelectHtTargetEdgeIds(*graph, options.target_order);
   if (options.target_offset > targets.size()) {
@@ -97,8 +100,9 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     const std::int32_t edge_id = targets[static_cast<std::size_t>(target_index)];
     const Edge& edge = graph->edges[static_cast<std::size_t>(edge_id)];
     const auto search_start = std::chrono::steady_clock::now();
-    HtWavefrontResult wavefront =
-        ProveEdgeByWavefrontHt(*graph, {edge.u, edge.v}, options.wavefront_options);
+    HtWavefrontResult wavefront = detail::ProveEdgeByWavefrontHtBoundToSnapshot(
+        *graph, {edge.u, edge.v}, options.wavefront_options, snapshot_binding,
+        graph_validation_binding);
 
     HtScanAttempt attempt;
     attempt.edge_id = edge_id;

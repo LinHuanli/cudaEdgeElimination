@@ -532,13 +532,33 @@ void TestNonemptyAndProof() {
         "recursive arena starts with c,d root");
   Check(cudaee::VerifyHtRecursiveProof(graph, recursive.proof, &reason), reason);
 
-  const cudaee::HtWavefrontResult wavefront = cudaee::ProveEdgeByWavefrontHt(
-      graph, {0, 5},
-      {.search_options = recursive_options,
-       .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
-       .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
-       .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu});
+  const cudaee::HtWavefrontOptions wavefront_options = {
+      .search_options = recursive_options,
+      .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
+      .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+      .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu};
+  const cudaee::HtWavefrontResult wavefront =
+      cudaee::ProveEdgeByWavefrontHt(graph, {0, 5}, wavefront_options);
+  const cudaee::detail::KOptSnapshotBinding snapshot_binding(graph);
+  const cudaee::detail::HtGraphValidationBinding graph_validation_binding(graph);
+  const cudaee::HtWavefrontResult bound_wavefront =
+      cudaee::detail::ProveEdgeByWavefrontHtBoundToSnapshot(
+          graph, {0, 5}, wavefront_options, snapshot_binding, graph_validation_binding);
   Check(wavefront.status == cudaee::HtSearchStatus::kProven, wavefront.proof.reason);
+  Check(bound_wavefront.status == wavefront.status &&
+            cudaee::SerializeHtRecursiveProof(bound_wavefront.proof) ==
+                cudaee::SerializeHtRecursiveProof(wavefront.proof) &&
+            bound_wavefront.moves_generated == wavefront.moves_generated &&
+            bound_wavefront.hamilton_replies_generated == wavefront.hamilton_replies_generated,
+        "scan-bound wavefront preserves proof bytes and canonical work");
+  const cudaee::GraphSnapshot graph_copy = graph;
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::detail::ProveEdgeByWavefrontHtBoundToSnapshot(
+            graph_copy, {0, 5}, wavefront_options, snapshot_binding, graph_validation_binding);
+        static_cast<void>(ignored);
+      },
+      "scan-bound wavefront rejects an equal graph copy");
   Check(wavefront.propagation_backend == "cpu" && wavefront.cpu_verified,
         "CPU wavefront propagation is recorded");
   Check(cudaee::VerifyHtRecursiveProof(graph, wavefront.proof, &reason), reason);
