@@ -560,6 +560,8 @@ bool HtProveCommand(const Arguments& arguments) {
   std::uint64_t leaf_cpu_completeness_rows = 0;
   std::uint64_t leaf_cpu_completeness_templates = 0;
   std::uint64_t leaf_cpu_certified_cost_cells = 0;
+  std::uint64_t leaf_cpu_cost_rows_scored = 0;
+  std::uint64_t leaf_cpu_cost_rows_reused = 0;
   std::uint64_t leaf_cpu_parallel_cost_batches = 0;
   std::uint64_t leaf_cpu_parallel_cost_cells = 0;
   std::uint32_t peak_leaf_cpu_cost_threads = 1U;
@@ -671,6 +673,8 @@ bool HtProveCommand(const Arguments& arguments) {
     leaf_cpu_completeness_rows = result.leaf_cpu_completeness_rows;
     leaf_cpu_completeness_templates = result.leaf_cpu_completeness_templates;
     leaf_cpu_certified_cost_cells = result.leaf_cpu_certified_cost_cells;
+    leaf_cpu_cost_rows_scored = result.leaf_cpu_cost_rows_scored;
+    leaf_cpu_cost_rows_reused = result.leaf_cpu_cost_rows_reused;
     leaf_cpu_parallel_cost_batches = result.leaf_cpu_parallel_cost_batches;
     leaf_cpu_parallel_cost_cells = result.leaf_cpu_parallel_cost_cells;
     peak_leaf_cpu_cost_threads = result.peak_leaf_cpu_cost_threads;
@@ -778,6 +782,8 @@ bool HtProveCommand(const Arguments& arguments) {
               << " leaf_cpu_completeness_rows=" << leaf_cpu_completeness_rows
               << " leaf_cpu_completeness_templates=" << leaf_cpu_completeness_templates
               << " leaf_cpu_certified_cost_cells=" << leaf_cpu_certified_cost_cells
+              << " leaf_cpu_cost_rows_scored=" << leaf_cpu_cost_rows_scored
+              << " leaf_cpu_cost_rows_reused=" << leaf_cpu_cost_rows_reused
               << " leaf_cpu_parallel_cost_batches=" << leaf_cpu_parallel_cost_batches
               << " leaf_cpu_parallel_cost_cells=" << leaf_cpu_parallel_cost_cells
               << " peak_leaf_cpu_cost_threads=" << peak_leaf_cpu_cost_threads
@@ -854,7 +860,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V12\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V13\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
@@ -876,6 +882,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "leaf_bucket_count " << scan.leaf_bucket_count << '\n';
   output << "peak_leaf_frontier_batch " << scan.peak_leaf_frontier_batch << '\n';
   output << "leaf_cost_batches " << scan.leaf_cost_batches << '\n';
+  output << "leaf_cost_tasks " << scan.leaf_cost_tasks << '\n';
   output << "leaf_cost_cells " << scan.leaf_cost_cells << '\n';
   output << "leaf_cursor_searches_started " << scan.leaf_cursor_searches_started << '\n';
   output << "leaf_cuda_cost_batches " << scan.leaf_cuda_cost_batches << '\n';
@@ -886,6 +893,8 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "leaf_cpu_completeness_rows " << scan.leaf_cpu_completeness_rows << '\n';
   output << "leaf_cpu_completeness_templates " << scan.leaf_cpu_completeness_templates << '\n';
   output << "leaf_cpu_certified_cost_cells " << scan.leaf_cpu_certified_cost_cells << '\n';
+  output << "leaf_cpu_cost_rows_scored " << scan.leaf_cpu_cost_rows_scored << '\n';
+  output << "leaf_cpu_cost_rows_reused " << scan.leaf_cpu_cost_rows_reused << '\n';
   output << "leaf_cpu_parallel_cost_batches " << scan.leaf_cpu_parallel_cost_batches << '\n';
   output << "leaf_cpu_parallel_cost_cells " << scan.leaf_cpu_parallel_cost_cells << '\n';
   output << "peak_leaf_cpu_cost_threads " << scan.peak_leaf_cpu_cost_threads << '\n';
@@ -950,10 +959,11 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "attempt_fields index edge_id u v status states replies leaf_calls moves "
             "peak_frontier propagation_backend device blocks cooperative propagation_verified "
             "leaf_backend leaf_device leaf_verified leaf_frontier_batches leaf_frontier_states "
-            "leaf_buckets peak_leaf_frontier_batch leaf_cost_batches leaf_cells "
+            "leaf_buckets peak_leaf_frontier_batch leaf_cost_batches leaf_cost_tasks leaf_cells "
             "leaf_cursor_searches leaf_cuda_batches "
             "leaf_cpu_long_tail_cells leaf_cost_rows leaf_candidate_rechecks "
             "leaf_completeness_rows leaf_completeness_templates leaf_cpu_certified_cells "
+            "leaf_cpu_cost_rows_scored leaf_cpu_cost_rows_reused "
             "leaf_cpu_parallel_batches leaf_cpu_parallel_cells peak_leaf_cpu_threads "
             "peak_leaf_cache_bytes path_append_tasks root_child_normalizations "
             "point_candidate_scans point_candidate_nodes_checked point_candidate_nodes_ranked "
@@ -987,12 +997,14 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << attempt.leaf_cost_selected_device << ' ' << (attempt.leaf_cpu_verified ? 1 : 0) << ' '
            << attempt.leaf_frontier_batches << ' ' << attempt.leaf_frontier_states << ' '
            << attempt.leaf_bucket_count << ' ' << attempt.peak_leaf_frontier_batch << ' '
-           << attempt.leaf_cost_batches << ' ' << attempt.leaf_cost_cells << ' '
-           << attempt.leaf_cursor_searches_started << ' ' << attempt.leaf_cuda_cost_batches << ' '
-           << attempt.leaf_cpu_long_tail_cells << ' ' << attempt.leaf_cost_rows_consumed << ' '
-           << attempt.leaf_candidate_templates_rechecked << ' '
-           << attempt.leaf_cpu_completeness_rows << ' ' << attempt.leaf_cpu_completeness_templates
-           << ' ' << attempt.leaf_cpu_certified_cost_cells << ' '
+           << attempt.leaf_cost_batches << ' ' << attempt.leaf_cost_tasks << ' '
+           << attempt.leaf_cost_cells << ' ' << attempt.leaf_cursor_searches_started << ' '
+           << attempt.leaf_cuda_cost_batches << ' ' << attempt.leaf_cpu_long_tail_cells << ' '
+           << attempt.leaf_cost_rows_consumed << ' ' << attempt.leaf_candidate_templates_rechecked
+           << ' ' << attempt.leaf_cpu_completeness_rows << ' '
+           << attempt.leaf_cpu_completeness_templates << ' '
+           << attempt.leaf_cpu_certified_cost_cells << ' ' << attempt.leaf_cpu_cost_rows_scored
+           << ' ' << attempt.leaf_cpu_cost_rows_reused << ' '
            << attempt.leaf_cpu_parallel_cost_batches << ' ' << attempt.leaf_cpu_parallel_cost_cells
            << ' ' << attempt.peak_leaf_cpu_cost_threads << ' '
            << attempt.peak_leaf_device_cache_bytes << ' ' << attempt.path_append_tasks << ' '

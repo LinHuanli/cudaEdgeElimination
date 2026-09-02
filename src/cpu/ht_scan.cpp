@@ -126,6 +126,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.leaf_bucket_count = wavefront.leaf_bucket_count;
     attempt.peak_leaf_frontier_batch = wavefront.peak_leaf_frontier_batch;
     attempt.leaf_cost_batches = wavefront.leaf_cost_batches;
+    attempt.leaf_cost_tasks = wavefront.leaf_cost_tasks;
     attempt.leaf_cost_cells = wavefront.leaf_cost_cells;
     attempt.leaf_cursor_searches_started = wavefront.leaf_cursor_searches_started;
     attempt.leaf_cuda_cost_batches = wavefront.leaf_cuda_cost_batches;
@@ -135,6 +136,8 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     attempt.leaf_cpu_completeness_rows = wavefront.leaf_cpu_completeness_rows;
     attempt.leaf_cpu_completeness_templates = wavefront.leaf_cpu_completeness_templates;
     attempt.leaf_cpu_certified_cost_cells = wavefront.leaf_cpu_certified_cost_cells;
+    attempt.leaf_cpu_cost_rows_scored = wavefront.leaf_cpu_cost_rows_scored;
+    attempt.leaf_cpu_cost_rows_reused = wavefront.leaf_cpu_cost_rows_reused;
     attempt.leaf_cpu_parallel_cost_batches = wavefront.leaf_cpu_parallel_cost_batches;
     attempt.leaf_cpu_parallel_cost_cells = wavefront.leaf_cpu_parallel_cost_cells;
     attempt.peak_leaf_cpu_cost_threads = wavefront.peak_leaf_cpu_cost_threads;
@@ -199,6 +202,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.peak_leaf_frontier_batch =
         std::max(scan.peak_leaf_frontier_batch, attempt.peak_leaf_frontier_batch);
     scan.leaf_cost_batches += attempt.leaf_cost_batches;
+    scan.leaf_cost_tasks += attempt.leaf_cost_tasks;
     scan.leaf_cost_cells += attempt.leaf_cost_cells;
     scan.leaf_cursor_searches_started += attempt.leaf_cursor_searches_started;
     scan.leaf_cuda_cost_batches += attempt.leaf_cuda_cost_batches;
@@ -208,6 +212,8 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     scan.leaf_cpu_completeness_rows += attempt.leaf_cpu_completeness_rows;
     scan.leaf_cpu_completeness_templates += attempt.leaf_cpu_completeness_templates;
     scan.leaf_cpu_certified_cost_cells += attempt.leaf_cpu_certified_cost_cells;
+    scan.leaf_cpu_cost_rows_scored += attempt.leaf_cpu_cost_rows_scored;
+    scan.leaf_cpu_cost_rows_reused += attempt.leaf_cpu_cost_rows_reused;
     scan.leaf_cpu_parallel_cost_batches += attempt.leaf_cpu_parallel_cost_batches;
     scan.leaf_cpu_parallel_cost_cells += attempt.leaf_cpu_parallel_cost_cells;
     scan.peak_leaf_cpu_cost_threads =

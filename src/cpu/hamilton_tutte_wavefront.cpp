@@ -1039,6 +1039,10 @@ void RecordLeafBatch(WaveBuildContext* const context, const PathSystemKOptBatchR
                 "CPU completeness templates");
   AddLeafMetric(&result.leaf_cpu_certified_cost_cells, batch.cpu_certified_cost_cells,
                 "CPU certified cost cells");
+  AddLeafMetric(&result.leaf_cpu_cost_rows_scored, batch.cpu_cost_rows_scored,
+                "CPU cost rows scored");
+  AddLeafMetric(&result.leaf_cpu_cost_rows_reused, batch.cpu_cost_rows_reused,
+                "CPU cost rows reused");
   AddLeafMetric(&result.leaf_cpu_parallel_cost_batches, batch.cpu_parallel_cost_batches,
                 "CPU parallel cost batches");
   AddLeafMetric(&result.leaf_cpu_parallel_cost_cells, batch.cpu_parallel_cost_cells,

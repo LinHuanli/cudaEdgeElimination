@@ -246,6 +246,8 @@ struct HtWavefrontResult {
   std::uint64_t leaf_cpu_completeness_rows{};
   std::uint64_t leaf_cpu_completeness_templates{};
   std::uint64_t leaf_cpu_certified_cost_cells{};
+  std::uint64_t leaf_cpu_cost_rows_scored{};
+  std::uint64_t leaf_cpu_cost_rows_reused{};
   std::uint64_t leaf_cpu_parallel_cost_batches{};
   std::uint64_t leaf_cpu_parallel_cost_cells{};
   std::uint32_t peak_leaf_cpu_cost_threads{1U};

@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -560,8 +561,7 @@ std::vector<ExactTourBlock> BuildExactTourBlocks(const TourContext& context,
 KOptCostTask BuildKOptCostTask(const TourContext& context,
                                const std::span<const std::size_t> deleted_positions) {
   KOptCostTask task;
-  if (deleted_positions.size() < 3U ||
-      deleted_positions.size() > task.port_nodes.size() / 2U) {
+  if (deleted_positions.size() < 3U || deleted_positions.size() > task.port_nodes.size() / 2U) {
     throw std::runtime_error("无法构造 k-opt cost task: 删除位置数量非法");
   }
   __int128 deleted_cost = 0;
@@ -1041,10 +1041,12 @@ private:
   std::array<PairCost, kKOptCostPortCapacity * kKOptCostPortCapacity> pair_costs_{};
 };
 
-void EvaluateKOptTemplateCostsCpuInto(
-    const GraphSnapshot& graph, const std::uint32_t k, const std::vector<KOptCostTask>& tasks,
-    const std::vector<KOptCpuReconnectPlan>& reconnect_plans, std::uint32_t* const threads_used,
-    std::uint32_t* const distance_cache_nodes, const std::span<std::int64_t> costs) {
+void EvaluateKOptTemplateCostsCpuInto(const GraphSnapshot& graph, const std::uint32_t k,
+                                      const std::vector<KOptCostTask>& tasks,
+                                      const std::vector<KOptCpuReconnectPlan>& reconnect_plans,
+                                      std::uint32_t* const threads_used,
+                                      std::uint32_t* const distance_cache_nodes,
+                                      const std::span<std::int64_t> costs) {
   const std::size_t template_count = reconnect_plans.size();
   const std::size_t cell_count = tasks.size() * template_count;
   if (costs.size() != cell_count) {
@@ -1098,8 +1100,7 @@ std::vector<std::int64_t> EvaluateKOptTemplateCostsCpu(
 }
 
 void RecordKOptCpuParallelism(PathSystemKOptBatchResult* const result,
-                              const KOptCostBatchResult& costs,
-                              const std::size_t cost_cell_count) {
+                              const KOptCostBatchResult& costs, const std::size_t cost_cell_count) {
   result->peak_cpu_cost_threads = std::max(result->peak_cpu_cost_threads, costs.cpu_threads_used);
   if (costs.cpu_threads_used <= 1U) {
     return;
@@ -1275,9 +1276,8 @@ struct KOptCostEvaluationPlan {
   std::size_t cell_count{};
 };
 
-KOptCostEvaluationPlan PrepareKOptCostEvaluation(
-    const GraphSnapshot& graph, const std::uint32_t k,
-    const std::vector<KOptCostTask>& tasks) {
+KOptCostEvaluationPlan PrepareKOptCostEvaluation(const GraphSnapshot& graph, const std::uint32_t k,
+                                                 const std::vector<KOptCostTask>& tasks) {
   if (k < 3U || k > 5U) {
     throw std::invalid_argument("k-opt cost 的 k 必须位于 [3,5]");
   }
@@ -1320,24 +1320,104 @@ private:
   std::size_t capacity_{};
 };
 
+struct KOptCostTaskKey {
+  std::array<std::int32_t, kKOptCostPortCapacity> port_nodes{};
+  std::int64_t deleted_cost{};
+
+  friend bool operator==(const KOptCostTaskKey&, const KOptCostTaskKey&) = default;
+};
+
+struct KOptCostTaskKeyHash {
+  [[nodiscard]] std::size_t operator()(const KOptCostTaskKey& key) const {
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const std::int32_t node : key.port_nodes) {
+      HashUint32(&hash, static_cast<std::uint32_t>(node));
+    }
+    HashUint64(&hash, static_cast<std::uint64_t>(key.deleted_cost));
+    return static_cast<std::size_t>(hash);
+  }
+};
+
+KOptCostTaskKey MakeKOptCostTaskKey(const KOptCostTask& task) {
+  return {task.port_nodes, task.deleted_cost};
+}
+
+struct KOptCostTaskDeduplication {
+  std::vector<KOptCostTask> unique_tasks;
+  std::vector<std::size_t> row_to_unique;
+
+  [[nodiscard]] bool active() const { return !row_to_unique.empty(); }
+};
+
+KOptCostTaskDeduplication DeduplicateKOptCostTasks(const std::vector<KOptCostTask>& tasks,
+                                                   const std::size_t logical_cell_count) {
+  KOptCostTaskDeduplication result;
+  if (tasks.size() < 2U || logical_cell_count < kKOptCpuParallelMinCells) {
+    return result;
+  }
+  result.unique_tasks.reserve(tasks.size());
+  result.row_to_unique.reserve(tasks.size());
+  std::unordered_map<KOptCostTaskKey, std::size_t, KOptCostTaskKeyHash> unique_indices;
+  unique_indices.reserve(tasks.size());
+  for (const KOptCostTask& task : tasks) {
+    const KOptCostTaskKey key = MakeKOptCostTaskKey(task);
+    const auto [iterator, inserted] = unique_indices.emplace(key, result.unique_tasks.size());
+    if (inserted) {
+      result.unique_tasks.push_back(task);
+    }
+    result.row_to_unique.push_back(iterator->second);
+  }
+  // 至少减少 25% rows 才承担哈希和间接索引开销；否则直接覆盖原逻辑矩阵。
+  if (result.unique_tasks.size() * 4U > tasks.size() * 3U) {
+    result.unique_tasks.clear();
+    result.row_to_unique.clear();
+  }
+  return result;
+}
+
 KOptCostBatchResult EvaluateKOptTemplateCostsCpuWithWorkspace(
     const GraphSnapshot& graph, const std::uint32_t k, const std::vector<KOptCostTask>& tasks,
-    KOptCpuCostWorkspace* const workspace, std::span<const std::int64_t>* const cost_values) {
-  if (workspace == nullptr || cost_values == nullptr) {
+    KOptCpuCostWorkspace* const workspace, std::span<const std::int64_t>* const cost_values,
+    std::vector<std::size_t>* const row_to_unique) {
+  if (workspace == nullptr || cost_values == nullptr || row_to_unique == nullptr) {
     throw std::invalid_argument("CPU k-opt cost workspace 或输出 view 为空");
   }
+  *cost_values = {};
+  row_to_unique->clear();
   const KOptCostEvaluationPlan plan = PrepareKOptCostEvaluation(graph, k, tasks);
   KOptCostBatchResult result;
   result.k = k;
   result.template_count = static_cast<std::uint32_t>(plan.table.templates.size());
   const SteadyClock::time_point cpu_begin = SteadyClock::now();
-  const std::span<std::int64_t> output = workspace->Prepare(plan.cell_count);
+  KOptCostTaskDeduplication deduplication = DeduplicateKOptCostTasks(tasks, plan.cell_count);
+  const std::size_t evaluated_cell_count =
+      (deduplication.active() ? deduplication.unique_tasks.size() : tasks.size()) *
+      plan.table.templates.size();
+  const std::span<std::int64_t> output = workspace->Prepare(evaluated_cell_count);
 #ifndef NDEBUG
-  // Debug 门禁确保无初始化 workspace 的每个逻辑 cell 都在返回前被 scorer 覆盖。
+  // Debug 门禁确保无初始化 workspace 的每个待计算 cell 都在返回前被 scorer 覆盖。
   std::fill(output.begin(), output.end(), std::int64_t{-1});
 #endif
-  EvaluateKOptTemplateCostsCpuInto(graph, k, tasks, plan.cpu_plans, &result.cpu_threads_used,
-                                   &result.cpu_distance_cache_nodes, output);
+  if (deduplication.active()) {
+#ifndef NDEBUG
+    for (std::size_t row = 0U; row < tasks.size(); ++row) {
+      if (MakeKOptCostTaskKey(tasks[row]) !=
+          MakeKOptCostTaskKey(deduplication.unique_tasks[deduplication.row_to_unique[row]])) {
+        throw std::logic_error("CPU k-opt cost task 去重映射损坏");
+      }
+    }
+#endif
+    EvaluateKOptTemplateCostsCpuInto(graph, k, deduplication.unique_tasks, plan.cpu_plans,
+                                     &result.cpu_threads_used, &result.cpu_distance_cache_nodes,
+                                     output);
+    result.cpu_cost_rows_scored = deduplication.unique_tasks.size();
+    result.cpu_cost_rows_reused = tasks.size() - deduplication.unique_tasks.size();
+    *row_to_unique = std::move(deduplication.row_to_unique);
+  } else {
+    EvaluateKOptTemplateCostsCpuInto(graph, k, tasks, plan.cpu_plans, &result.cpu_threads_used,
+                                     &result.cpu_distance_cache_nodes, output);
+    result.cpu_cost_rows_scored = tasks.size();
+  }
 #ifndef NDEBUG
   if (std::find(output.begin(), output.end(), std::int64_t{-1}) != output.end()) {
     throw std::logic_error("CPU k-opt cost workspace 存在未覆盖 cell");
@@ -1371,6 +1451,7 @@ KOptCostBatchResult EvaluateKOptTemplateCosts(const GraphSnapshot& graph, const 
   KOptCostBatchResult result;
   result.k = k;
   result.template_count = static_cast<std::uint32_t>(table.templates.size());
+  result.cpu_cost_rows_scored = tasks.size();
   if (use_cuda) {
     std::string reason;
     if (!detail::KOptCostCudaAvailable(&reason)) {
@@ -2006,6 +2087,7 @@ struct KOptCostBlockView {
   std::uint32_t k{};
   std::uint32_t template_count{};
   std::span<const std::int64_t> added_costs;
+  std::span<const std::size_t> row_indices;
   std::string_view backend;
   bool cpu_verified{false};
 };
@@ -2091,8 +2173,19 @@ public:
     }
     const KOptCursorBlock& block = *pending_;
     const KOptReconnectTable& reconnect_table = CachedKOptReconnectTable(block.k);
-    if (costs.k != block.k || costs.template_count != reconnect_table.templates.size() ||
-        costs.added_costs.size() != block.works.size() * reconnect_table.templates.size()) {
+    const std::size_t template_count = reconnect_table.templates.size();
+    const bool mapped_rows = !costs.row_indices.empty();
+    const bool invalid_shape =
+        costs.k != block.k || costs.template_count != template_count || template_count == 0U ||
+        costs.added_costs.size() % template_count != 0U ||
+        (!mapped_rows && costs.added_costs.size() != block.works.size() * template_count) ||
+        (mapped_rows && costs.row_indices.size() != block.works.size());
+    const std::size_t available_rows =
+        template_count == 0U ? 0U : costs.added_costs.size() / template_count;
+    if (invalid_shape ||
+        (mapped_rows &&
+         std::any_of(costs.row_indices.begin(), costs.row_indices.end(),
+                     [available_rows](const std::size_t row) { return row >= available_rows; }))) {
       result_.status = KOptSearchStatus::kUnresolved;
       result_.reason = "k-opt cost cursor 矩阵规模错误";
       pending_.reset();
@@ -2109,9 +2202,10 @@ public:
         return stats;
       }
       ++stats.cost_rows;
-      const std::size_t row_offset = work_index * reconnect_table.templates.size();
+      const std::size_t cost_row = mapped_rows ? costs.row_indices[work_index] : work_index;
+      const std::size_t row_offset = cost_row * template_count;
       const std::span<const std::int64_t> row =
-          costs.added_costs.subspan(row_offset, reconnect_table.templates.size());
+          costs.added_costs.subspan(row_offset, template_count);
       const std::span<const std::size_t> deleted_positions(
           block.works[work_index].deleted_positions.data(), block.k);
       ReconnectAttempt attempt = TryReconnectFromCostRow(
@@ -2570,12 +2664,13 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
             SelectKOptCostBackend(options, requested_cells);
         KOptCostBatchResult costs;
         std::span<const std::int64_t> cost_values;
+        std::vector<std::size_t> row_to_unique;
         {
           ScopedPhaseTimer timer(&result.cost_evaluate_ms);
           try {
             if (selected_cost_backend == PathCompatibilityBackend::kCpu) {
               costs = EvaluateKOptTemplateCostsCpuWithWorkspace(
-                  graph, k, cost_tasks, &cpu_cost_workspace, &cost_values);
+                  graph, k, cost_tasks, &cpu_cost_workspace, &cost_values, &row_to_unique);
             } else {
               costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, selected_cost_backend);
               cost_values = costs.added_costs;
@@ -2593,27 +2688,43 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
               continue;
             }
             costs = EvaluateKOptTemplateCostsCpuWithWorkspace(
-                graph, k, cost_tasks, &cpu_cost_workspace, &cost_values);
+                graph, k, cost_tasks, &cpu_cost_workspace, &cost_values, &row_to_unique);
           }
         }
-        if (!AddWithoutOverflow(&result.cost_cells, cost_values.size())) {
+        if (!AddWithoutOverflow(&result.cost_cells, requested_cells)) {
           throw std::overflow_error("path-system k-opt batch cost cell 统计溢出");
         }
         if (!costs.cpu_verified) {
           throw std::logic_error("path-system k-opt cost 矩阵未通过 CPU 完整认证");
         }
-        if (!AddWithoutOverflow(&result.cpu_certified_cost_cells, cost_values.size())) {
+        if (costs.cpu_cost_rows_scored > cost_tasks.size() ||
+            costs.cpu_cost_rows_reused != cost_tasks.size() - costs.cpu_cost_rows_scored) {
+          throw std::logic_error("path-system k-opt CPU cost row 统计错误");
+        }
+        if (!AddWithoutOverflow(&result.cpu_cost_rows_scored, costs.cpu_cost_rows_scored) ||
+            !AddWithoutOverflow(&result.cpu_cost_rows_reused, costs.cpu_cost_rows_reused)) {
+          throw std::overflow_error("path-system k-opt CPU cost row 统计溢出");
+        }
+        if (!AddWithoutOverflow(&result.cpu_certified_cost_cells, requested_cells)) {
           throw std::overflow_error("path-system k-opt CPU 认证 cell 统计溢出");
         }
         result.cost_cpu_certify_ms += costs.cpu_certify_ms;
-        RecordKOptCpuParallelism(&result, costs, cost_values.size());
+        RecordKOptCpuParallelism(&result, costs, requested_cells);
         RecordKOptBatchBackend(&result, costs.backend, costs.selected_device);
         RecordKOptCudaCache(&result, costs);
         if (cpu_long_tail) {
-          RecordKOptCpuLongTail(&result, cost_tasks.size(), cost_values.size());
+          RecordKOptCpuLongTail(&result, cost_tasks.size(), requested_cells);
         }
-        if (costs.template_count == 0U ||
-            cost_values.size() != cost_tasks.size() * costs.template_count) {
+        const bool mapped_rows = !row_to_unique.empty();
+        const std::size_t available_rows =
+            costs.template_count == 0U ? 0U : cost_values.size() / costs.template_count;
+        if (costs.template_count == 0U || cost_values.size() % costs.template_count != 0U ||
+            (!mapped_rows && cost_values.size() != requested_cells) ||
+            (mapped_rows && (row_to_unique.size() != cost_tasks.size() ||
+                             std::any_of(row_to_unique.begin(), row_to_unique.end(),
+                                         [available_rows](const std::size_t row) {
+                                           return row >= available_rows;
+                                         })))) {
           throw std::logic_error("path-system k-opt batch cost 矩阵规模错误");
         }
         for (const CursorSlice& slice : slices_by_k[bucket]) {
@@ -2624,7 +2735,13 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
             ScopedPhaseTimer timer(&result.cost_scatter_ms);
             cursor_costs.k = k;
             cursor_costs.template_count = costs.template_count;
-            cursor_costs.added_costs = cost_values.subspan(cell_begin, cell_count);
+            if (mapped_rows) {
+              cursor_costs.added_costs = cost_values;
+              cursor_costs.row_indices = std::span<const std::size_t>(row_to_unique)
+                                             .subspan(slice.row_begin, slice.row_count);
+            } else {
+              cursor_costs.added_costs = cost_values.subspan(cell_begin, cell_count);
+            }
             cursor_costs.backend = costs.backend;
             cursor_costs.cpu_verified = costs.cpu_verified;
           }

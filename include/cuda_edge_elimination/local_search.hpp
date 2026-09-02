@@ -73,6 +73,8 @@ struct KOptCostBatchResult {
   bool cpu_verified{false};
   std::uint32_t cpu_threads_used{1U};
   std::uint32_t cpu_distance_cache_nodes{};
+  std::uint64_t cpu_cost_rows_scored{};
+  std::uint64_t cpu_cost_rows_reused{};
   double cpu_certify_ms{};
 };
 
@@ -165,6 +167,8 @@ struct PathSystemKOptBatchResult {
   std::uint64_t cpu_completeness_rows{};
   std::uint64_t cpu_completeness_templates{};
   std::uint64_t cpu_certified_cost_cells{};
+  std::uint64_t cpu_cost_rows_scored{};
+  std::uint64_t cpu_cost_rows_reused{};
   std::uint64_t cpu_parallel_cost_batches{};
   std::uint64_t cpu_parallel_cost_cells{};
   std::uint32_t peak_cpu_cost_threads{1U};

@@ -94,6 +94,7 @@ struct HtScanAttempt {
   std::uint64_t leaf_bucket_count{};
   std::uint64_t peak_leaf_frontier_batch{};
   std::uint64_t leaf_cost_batches{};
+  std::uint64_t leaf_cost_tasks{};
   std::uint64_t leaf_cost_cells{};
   std::uint64_t leaf_cursor_searches_started{};
   std::uint64_t leaf_cuda_cost_batches{};
@@ -103,6 +104,8 @@ struct HtScanAttempt {
   std::uint64_t leaf_cpu_completeness_rows{};
   std::uint64_t leaf_cpu_completeness_templates{};
   std::uint64_t leaf_cpu_certified_cost_cells{};
+  std::uint64_t leaf_cpu_cost_rows_scored{};
+  std::uint64_t leaf_cpu_cost_rows_reused{};
   std::uint64_t leaf_cpu_parallel_cost_batches{};
   std::uint64_t leaf_cpu_parallel_cost_cells{};
   std::uint32_t peak_leaf_cpu_cost_threads{1U};
@@ -175,6 +178,7 @@ struct HtScanResult {
   std::uint64_t leaf_bucket_count{};
   std::uint64_t peak_leaf_frontier_batch{};
   std::uint64_t leaf_cost_batches{};
+  std::uint64_t leaf_cost_tasks{};
   std::uint64_t leaf_cost_cells{};
   std::uint64_t leaf_cursor_searches_started{};
   std::uint64_t leaf_cuda_cost_batches{};
@@ -184,6 +188,8 @@ struct HtScanResult {
   std::uint64_t leaf_cpu_completeness_rows{};
   std::uint64_t leaf_cpu_completeness_templates{};
   std::uint64_t leaf_cpu_certified_cost_cells{};
+  std::uint64_t leaf_cpu_cost_rows_scored{};
+  std::uint64_t leaf_cpu_cost_rows_reused{};
   std::uint64_t leaf_cpu_parallel_cost_batches{};
   std::uint64_t leaf_cpu_parallel_cost_cells{};
   std::uint32_t peak_leaf_cpu_cost_threads{1U};

@@ -728,6 +728,8 @@ void TestRecursivePointProof() {
             wavefront.leaf_cost_batches > 0U && wavefront.leaf_cost_tasks > 0U &&
             wavefront.leaf_cost_cells > 0U && wavefront.leaf_cursor_searches_started > 0U &&
             wavefront.leaf_cpu_certified_cost_cells == wavefront.leaf_cost_cells &&
+            wavefront.leaf_cpu_cost_rows_scored + wavefront.leaf_cpu_cost_rows_reused ==
+                wavefront.leaf_cost_tasks &&
             wavefront.leaf_cpu_parallel_cost_batches <= wavefront.leaf_cost_batches &&
             wavefront.leaf_cpu_parallel_cost_cells <= wavefront.leaf_cost_cells &&
             wavefront.peak_leaf_cpu_cost_threads >= 1U &&
@@ -847,7 +849,10 @@ void TestRecursivePointProof() {
             scan.leaf_frontier_states == timed_attempt.leaf_frontier_states &&
             scan.leaf_bucket_count == timed_attempt.leaf_bucket_count &&
             scan.peak_leaf_frontier_batch == timed_attempt.peak_leaf_frontier_batch &&
+            scan.leaf_cost_tasks == timed_attempt.leaf_cost_tasks &&
             scan.leaf_cursor_searches_started == timed_attempt.leaf_cursor_searches_started &&
+            scan.leaf_cpu_cost_rows_scored == timed_attempt.leaf_cpu_cost_rows_scored &&
+            scan.leaf_cpu_cost_rows_reused == timed_attempt.leaf_cpu_cost_rows_reused &&
             scan.leaf_cpu_parallel_cost_batches == timed_attempt.leaf_cpu_parallel_cost_batches &&
             scan.leaf_cpu_parallel_cost_cells == timed_attempt.leaf_cpu_parallel_cost_cells &&
             scan.peak_leaf_cpu_cost_threads == timed_attempt.peak_leaf_cpu_cost_threads &&
@@ -1151,6 +1156,8 @@ void TestRecursivePointProof() {
               cuda_wavefront.leaf_cursor_consume_ms > 0.0 &&
               cuda_wavefront.leaf_cost_rows_consumed > 0U &&
               cuda_wavefront.leaf_cpu_certified_cost_cells == cuda_wavefront.leaf_cost_cells &&
+              cuda_wavefront.leaf_cpu_cost_rows_scored == cuda_wavefront.leaf_cost_tasks &&
+              cuda_wavefront.leaf_cpu_cost_rows_reused == 0U &&
               cuda_wavefront.leaf_cpu_completeness_rows == 0U &&
               cuda_wavefront.leaf_cpu_completeness_templates == 0U &&
               cuda_wavefront.leaf_candidate_recheck_ms >= 0.0 &&

@@ -193,7 +193,8 @@ void TestKOptCostMatrixCpuCuda() {
     const cudaee::KOptCostBatchResult cpu =
         cudaee::EvaluateKOptTemplateCosts(graph, k, tasks, cudaee::PathCompatibilityBackend::kCpu);
     Check(cpu.backend == "cpu" && cpu.cpu_verified && cpu.cpu_threads_used == 1U &&
-              cpu.cpu_distance_cache_nodes == 0U && cpu.cpu_certify_ms >= 0.0,
+              cpu.cpu_distance_cache_nodes == 0U && cpu.cpu_cost_rows_scored == tasks.size() &&
+              cpu.cpu_cost_rows_reused == 0U && cpu.cpu_certify_ms >= 0.0,
           "CPU k-opt cost backend");
     Check(cpu.template_count == kExpectedTemplateCounts[static_cast<std::size_t>(k - 3U)],
           "k-opt cost template count");
@@ -215,7 +216,8 @@ void TestKOptCostMatrixCpuCuda() {
     if (cuda_available) {
       const cudaee::KOptCostBatchResult gpu = cudaee::EvaluateKOptTemplateCosts(
           graph, k, tasks, cudaee::PathCompatibilityBackend::kCuda);
-      Check(gpu.backend == "cuda" && gpu.cpu_verified && gpu.cpu_certify_ms >= 0.0,
+      Check(gpu.backend == "cuda" && gpu.cpu_verified && gpu.cpu_cost_rows_scored == tasks.size() &&
+                gpu.cpu_cost_rows_reused == 0U && gpu.cpu_certify_ms >= 0.0,
             "CUDA k-opt cost backend");
       Check(gpu.selected_device >= 0, "CUDA k-opt cost selected device");
       Check(gpu.added_costs == cpu.added_costs, "CPU/CUDA k-opt cost matrices are exact");
@@ -754,6 +756,38 @@ void TestPathSystemLeafCostBatch() {
         "CPU leaf bucket uses the exact matrix while keeping scalar proof bytes");
 }
 
+void TestCpuLeafCostTaskDeduplication() {
+  const cudaee::GraphSnapshot graph = MakeGraph(
+      {{0.0, 0.0, 0, 0}, {2.0, 1.0, 2, 1}, {0.0, 1.0, 0, 1}, {1.0, 2.0, 1, 2}, {1.0, 0.0, 1, 0}});
+  const cudaee::NormalizedPathSystem paths =
+      cudaee::NormalizePathSystem({{0, 1, 2, 3, 4}}, graph.dimension);
+  Check(paths.valid, paths.reason);
+  constexpr std::size_t kRepeatedPathCount = 2048U;
+  const cudaee::KOptSearchOptions options = {
+      .max_k = 3,
+      .max_deletion_sets = 1,
+      .cost_backend = cudaee::PathCompatibilityBackend::kCpu,
+      .cost_batch_size = 8,
+  };
+  const cudaee::PathSystemKOptProof scalar =
+      cudaee::ProvePathSystemByKOpt(graph, paths, cudaee::NodeEdge{0, 1}, options);
+  const cudaee::PathSystemKOptBatchResult batch = cudaee::ProvePathSystemsByKOpt(
+      graph, std::vector<cudaee::NormalizedPathSystem>(kRepeatedPathCount, paths),
+      cudaee::NodeEdge{0, 1}, options);
+  Check(batch.cpu_verified && batch.cost_backend == "cpu" && batch.cost_batches == 1U &&
+            batch.cost_tasks == kRepeatedPathCount && batch.cost_cells == 8192U &&
+            batch.cpu_certified_cost_cells == batch.cost_cells &&
+            batch.cpu_cost_rows_scored == 1U &&
+            batch.cpu_cost_rows_reused == kRepeatedPathCount - 1U &&
+            batch.cost_rows_consumed == kRepeatedPathCount &&
+            batch.proofs.size() == kRepeatedPathCount,
+        "CPU leaf exact task key reuses duplicate rows above the activation threshold");
+  const std::string expected = cudaee::SerializePathSystemKOptProof(scalar);
+  Check(cudaee::SerializePathSystemKOptProof(batch.proofs.front()) == expected &&
+            cudaee::SerializePathSystemKOptProof(batch.proofs.back()) == expected,
+        "deduplicated row mapping preserves the first and last canonical proofs");
+}
+
 void TestLeafCpuLongTailThreshold() {
   const cudaee::GraphSnapshot graph = MakeGraph(
       {{0.0, 0.0, 0, 0}, {1.0, 0.0, 1, 0}, {2.0, 0.0, 2, 0}, {3.0, 0.0, 3, 0}, {4.0, 0.0, 4, 0}});
@@ -989,6 +1023,7 @@ int main() {
     TestImprovingWitnessAndProof();
     TestNoImprovementAndBudget();
     TestPathSystemLeafCostBatch();
+    TestCpuLeafCostTaskDeduplication();
     TestLeafCpuLongTailThreshold();
     TestLeafCursorDifferential();
     TestExactFallbackAgainstBruteForce();

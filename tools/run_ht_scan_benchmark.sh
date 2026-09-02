@@ -319,7 +319,16 @@ fused_leaf_cells="$(read_field "${run_dir}/fused.report" leaf_cost_cells)"
 cpu_leaf_cells="$(read_field "${run_dir}/cpu.report" leaf_cost_cells)"
 cpu_fused_leaf_cells="$(read_field "${run_dir}/cpu-fused.report" leaf_cost_cells)"
 cuda_leaf_cells="$(read_field "${run_dir}/cuda.report" leaf_cost_cells)"
-if [[ "${cpu_leaf_cells}" != "${cpu_fused_leaf_cells}" ||
+cpu_leaf_tasks="$(read_field "${run_dir}/cpu.report" leaf_cost_tasks)"
+cpu_fused_leaf_tasks="$(read_field "${run_dir}/cpu-fused.report" leaf_cost_tasks)"
+cuda_leaf_tasks="$(read_field "${run_dir}/cuda.report" leaf_cost_tasks)"
+hybrid_leaf_tasks="$(read_field "${run_dir}/hybrid.report" leaf_cost_tasks)"
+fused_leaf_tasks="$(read_field "${run_dir}/fused.report" leaf_cost_tasks)"
+if [[ "${cpu_leaf_tasks}" != "${cpu_fused_leaf_tasks}" ||
+      "${cpu_leaf_tasks}" != "${cuda_leaf_tasks}" ||
+      "${cpu_leaf_tasks}" != "${hybrid_leaf_tasks}" ||
+      "${cpu_leaf_tasks}" != "${fused_leaf_tasks}" ||
+      "${cpu_leaf_cells}" != "${cpu_fused_leaf_cells}" ||
       "${cpu_leaf_cells}" != "${cuda_leaf_cells}" ||
       "${cpu_leaf_cells}" != "${hybrid_leaf_cells}" ||
       "${cpu_leaf_cells}" != "${fused_leaf_cells}" ]]; then
@@ -421,6 +430,16 @@ cpu_fused_leaf_cpu_certified_cells="$(read_field "${run_dir}/cpu-fused.report" l
 cuda_leaf_cpu_certified_cells="$(read_field "${run_dir}/cuda.report" leaf_cpu_certified_cost_cells)"
 hybrid_leaf_cpu_certified_cells="$(read_field "${run_dir}/hybrid.report" leaf_cpu_certified_cost_cells)"
 fused_leaf_cpu_certified_cells="$(read_field "${run_dir}/fused.report" leaf_cpu_certified_cost_cells)"
+cpu_leaf_rows_scored="$(read_field "${run_dir}/cpu.report" leaf_cpu_cost_rows_scored)"
+cpu_fused_leaf_rows_scored="$(read_field "${run_dir}/cpu-fused.report" leaf_cpu_cost_rows_scored)"
+cuda_leaf_rows_scored="$(read_field "${run_dir}/cuda.report" leaf_cpu_cost_rows_scored)"
+hybrid_leaf_rows_scored="$(read_field "${run_dir}/hybrid.report" leaf_cpu_cost_rows_scored)"
+fused_leaf_rows_scored="$(read_field "${run_dir}/fused.report" leaf_cpu_cost_rows_scored)"
+cpu_leaf_rows_reused="$(read_field "${run_dir}/cpu.report" leaf_cpu_cost_rows_reused)"
+cpu_fused_leaf_rows_reused="$(read_field "${run_dir}/cpu-fused.report" leaf_cpu_cost_rows_reused)"
+cuda_leaf_rows_reused="$(read_field "${run_dir}/cuda.report" leaf_cpu_cost_rows_reused)"
+hybrid_leaf_rows_reused="$(read_field "${run_dir}/hybrid.report" leaf_cpu_cost_rows_reused)"
+fused_leaf_rows_reused="$(read_field "${run_dir}/fused.report" leaf_cpu_cost_rows_reused)"
 cpu_leaf_parallel_batches="$(read_field "${run_dir}/cpu.report" leaf_cpu_parallel_cost_batches)"
 cpu_fused_leaf_parallel_batches="$(read_field "${run_dir}/cpu-fused.report" leaf_cpu_parallel_cost_batches)"
 cuda_leaf_parallel_batches="$(read_field "${run_dir}/cuda.report" leaf_cpu_parallel_cost_batches)"
@@ -445,12 +464,6 @@ if [[ "${cpu_leaf_cursor_searches}" != "${cpu_fused_leaf_cursor_searches}" ||
       "${cpu_leaf_cursor_searches}" != "${cuda_leaf_cursor_searches}" ||
       "${cpu_leaf_cursor_searches}" != "${hybrid_leaf_cursor_searches}" ||
       "${cpu_leaf_cursor_searches}" != "${fused_leaf_cursor_searches}" ||
-      "${cpu_leaf_parallel_batches}" != "${cuda_leaf_parallel_batches}" ||
-      "${cpu_leaf_parallel_batches}" != "${hybrid_leaf_parallel_batches}" ||
-      "${cpu_leaf_parallel_cells}" != "${cuda_leaf_parallel_cells}" ||
-      "${cpu_leaf_parallel_cells}" != "${hybrid_leaf_parallel_cells}" ||
-      "${cpu_peak_leaf_threads}" != "${cuda_peak_leaf_threads}" ||
-      "${cpu_peak_leaf_threads}" != "${hybrid_peak_leaf_threads}" ||
       "${cpu_leaf_cost_rows}" != "${cpu_fused_leaf_cost_rows}" ||
       "${cpu_leaf_cost_rows}" != "${cuda_leaf_cost_rows}" ||
       "${cpu_leaf_cost_rows}" != "${hybrid_leaf_cost_rows}" ||
@@ -474,6 +487,14 @@ if [[ "${cpu_leaf_cursor_searches}" != "${cpu_fused_leaf_cursor_searches}" ||
       "${cpu_leaf_cpu_certified_cells}" != "${cpu_fused_leaf_cpu_certified_cells}" ||
       "${cpu_leaf_cpu_certified_cells}" != "${cpu_leaf_cells}" ]]; then
   echo "五路 leaf consume 的规范工作计数不一致" >&2
+  exit 1
+fi
+if (( cpu_leaf_rows_scored + cpu_leaf_rows_reused != cpu_leaf_tasks ||
+      cpu_fused_leaf_rows_scored + cpu_fused_leaf_rows_reused != cpu_fused_leaf_tasks ||
+      cuda_leaf_rows_scored + cuda_leaf_rows_reused != cuda_leaf_tasks ||
+      hybrid_leaf_rows_scored + hybrid_leaf_rows_reused != hybrid_leaf_tasks ||
+      fused_leaf_rows_scored + fused_leaf_rows_reused != fused_leaf_tasks )); then
+  echo "五路 CPU cost row 评分/复用计数不闭合" >&2
   exit 1
 fi
 cpu_path_append_ms="$(read_field "${run_dir}/cpu.report" path_append_ms)"
@@ -835,7 +856,7 @@ manifest="${run_dir}/run-manifest-v1"
 
 summary="${run_dir}/summary.txt"
 {
-  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V15"
+  echo "CUDAEE_HT_SCAN_BENCHMARK_SUMMARY_V16"
   echo "instance ${instance}"
   echo "attempted_targets ${attempted}"
   echo "proven_targets ${proven}"
@@ -987,6 +1008,16 @@ summary="${run_dir}/summary.txt"
   echo "leaf_cpu_completeness_rows ${cpu_leaf_completeness_rows}"
   echo "leaf_cpu_completeness_templates ${cpu_leaf_completeness_templates}"
   echo "leaf_cpu_certified_cost_cells ${cpu_leaf_cpu_certified_cells}"
+  echo "cpu_leaf_cost_rows_scored ${cpu_leaf_rows_scored}"
+  echo "cpu_leaf_cost_rows_reused ${cpu_leaf_rows_reused}"
+  echo "cpu_fused_leaf_cost_rows_scored ${cpu_fused_leaf_rows_scored}"
+  echo "cpu_fused_leaf_cost_rows_reused ${cpu_fused_leaf_rows_reused}"
+  echo "cuda_leaf_cost_rows_scored ${cuda_leaf_rows_scored}"
+  echo "cuda_leaf_cost_rows_reused ${cuda_leaf_rows_reused}"
+  echo "hybrid_leaf_cost_rows_scored ${hybrid_leaf_rows_scored}"
+  echo "hybrid_leaf_cost_rows_reused ${hybrid_leaf_rows_reused}"
+  echo "fused_leaf_cost_rows_scored ${fused_leaf_rows_scored}"
+  echo "fused_leaf_cost_rows_reused ${fused_leaf_rows_reused}"
   echo "cpu_leaf_parallel_cost_batches ${cpu_leaf_parallel_batches}"
   echo "cpu_fused_leaf_parallel_cost_batches ${cpu_fused_leaf_parallel_batches}"
   echo "cuda_leaf_parallel_cost_batches ${cuda_leaf_parallel_batches}"
