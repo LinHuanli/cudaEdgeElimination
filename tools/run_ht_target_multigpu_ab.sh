@@ -23,9 +23,11 @@ fi
 max_targets="${CUDAEE_HT_MAX_TARGETS:-8}"
 target_offset="${CUDAEE_HT_TARGET_OFFSET:-0}"
 cpu_cost_threads="${CUDAEE_CPU_COST_THREADS:-4}"
+cuda_preset="${CUDAEE_CUDA_PRESET:-cuda-release}"
 if [[ ! "${max_targets}" =~ ^[1-9][0-9]*$ || ! "${target_offset}" =~ ^[0-9]+$ ||
-      ! "${cpu_cost_threads}" =~ ^[1-8]$ ]]; then
-  echo "错误：MAX_TARGETS/CPU_COST_THREADS 必须为正整数，offset 必须为非负整数。" >&2
+      ! "${cpu_cost_threads}" =~ ^[1-8]$ ||
+      ! "${cuda_preset}" =~ ^cuda(-sm[0-9]+)?-release$ ]]; then
+  echo "错误：MAX_TARGETS/CPU_COST_THREADS 必须为正整数，offset/preset 必须合法。" >&2
   exit 2
 fi
 export OMP_NUM_THREADS="${cpu_cost_threads}"
@@ -121,11 +123,11 @@ if (( available_kib < 8 * 1024 * 1024 )); then
 fi
 
 cmake --preset cpu-release
-cmake --preset cuda-release
+cmake --preset "${cuda_preset}"
 cmake --build --preset cpu-release --target cudaee --parallel
-cmake --build --preset cuda-release --target cudaee --parallel
+cmake --build --preset "${cuda_preset}" --target cudaee --parallel
 cpu_binary="${repo_root}/build/cpu-release/cudaee"
-cuda_binary="${repo_root}/build/cuda-release/cudaee"
+cuda_binary="${repo_root}/build/${cuda_preset}/cudaee"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_id="${instance}-ht-target-multigpu-ab-${timestamp}-$$"
@@ -385,6 +387,7 @@ manifest="${run_dir}/manifest.txt"
   echo "target_offset ${target_offset}"
   echo "max_targets ${max_targets}"
   echo "cpu_cost_threads_per_worker ${cpu_cost_threads}"
+  echo "cuda_preset ${cuda_preset}"
   echo "max_gpu_utilization ${max_gpu_util}"
   echo "max_gpu_memory_used_mib ${max_gpu_memory_mib}"
   echo "gpu_cooldown_seconds ${gpu_cooldown_seconds}"
