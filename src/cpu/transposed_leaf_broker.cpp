@@ -2,6 +2,7 @@
 
 #include "cuda_edge_elimination/cuda_device_affinity.hpp"
 
+#include <algorithm>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +18,15 @@
 #include <vector>
 
 namespace cudaee::detail {
+
+namespace {
+
+// 全活跃 worker 栅栏会让已到达的 target 等待无关的主机控制流。这里只
+// 等待两个同步请求；执行 GPU 批次期间新到请求会自然聚合成下一批，
+// 既保留跨目标合并，又避免全局栅栏和长尾的单请求启动。
+constexpr std::size_t kDispatchRequestThreshold = 2U;
+
+} // namespace
 
 class TransposedLeafBroker::Impl {
 public:
@@ -193,8 +203,9 @@ private:
       {
         std::unique_lock<std::mutex> lock(mutex_);
         condition_.wait(lock, [&] {
+          const std::size_t ready_threshold = std::min(active_workers_, kDispatchRequestThreshold);
           return stopping_ || fatal_failure_ != nullptr ||
-                 (!pending_.empty() && pending_.size() >= active_workers_);
+                 (!pending_.empty() && pending_.size() >= ready_threshold);
         });
         if (stopping_ || fatal_failure_ != nullptr) {
           return;
