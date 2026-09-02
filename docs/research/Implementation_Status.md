@@ -28,7 +28,7 @@
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
-| M5 中大型调优 | 进行中（JV 三轮 + HT host fast paths） | point/path/reply/leaf fast paths；d15112 CPU-fused search `0.817 s` |
+| M5 中大型调优 | 进行中（JV 三轮 + HT host fast paths） | point/path/reply/leaf fast paths；d15112 CPU-fused search `0.657 s` |
 
 ## 当前基准结果
 
@@ -73,6 +73,8 @@ M5 HT point-candidate 静态次序缓存绑定 `ea85ffa`：每个 target 只计�
 M5 HT leaf proof 批内快照绑定复用绑定 `0530ff4`：同一同步 k-opt batch 内生成和复核使用一次入口 graph hash；公开 `VerifyPathSystemKOptProof`、HT 最终 verifier、scan 即时复核和 epoch 重放仍独立计算。三实例 leaf proof verify 加速 `8.882×/17.591×/27.449×`，CPU-fused search 加速 `1.037×/1.355×/1.618×`。三实例五路规范工作、边、proof 和 tour 全部不变。下一步复用同一 wavefront 的 snapshot binding。
 
 M5 HT wavefront leaf 快照绑定复用绑定 `00c0156`：强类型 binding 只能由实际 graph 对象构造，并在同一只读 wavefront 的 leaf batches 间复用；对象错配拒绝，公开 API 和全部独立 verifier 仍自行哈希。rl5915/d15112 的 proof init 加速 `44.302×/99.936×`，CPU-fused search 加速 `1.063×/1.028×`；pcb3038 端到端无可测收益。三实例五路规范工作、边、proof 和 tour 全部不变。新画像把下一热点锁定为 d15112 的 `180.448 ms` path child normalize。
+
+M5 HT path-append child 增量规范化绑定 `236022c`：已认证 parent 建立 node-location 索引，point/end child 直接合并至多两个规范链；通用 sparse parent 检查、独立 dense proof 重放和 CUDA 全数组认证均保留。992-task 差分逐项比较完整失败原因和规范 paths；三实例 child normalize 加速 `8.511×/9.752×/8.179×`，CPU-fused search 加速 `1.038×/1.220×/1.244×`。三实例五路规范工作、边、proof 和 tour 全部不变；下一热点是跨 reply batches 的重复 graph validation。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 

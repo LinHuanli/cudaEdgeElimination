@@ -101,6 +101,8 @@ leaf proof 批内快照绑定复用已完成：生成器内部逐成功 proof �
 
 wavefront leaf 快照绑定复用已完成：只能从实际 graph 对象构造的内部强类型 binding 在一次只读 wavefront 内供全部 leaf batches 使用，对象错配立即拒绝；公开生成器和所有独立 verifier 仍自行哈希。rl5915/d15112 的 proof init 加速 `44.302×/99.936×`，search 加速 `1.063×/1.028×`；pcb3038 端到端处于噪声范围。新画像显示 d15112 的 path child normalize 为 `180.448 ms`，下一切片以 sparse/dense 双 oracle 门禁增量 parent append。
 
+path-append child 增量规范化已完成：batch 入口仍用通用 sparse 规范器认证 parent，生产 child 只合并新增边触及的至多两个规范链；992 个合法 point/end tasks 与独立 dense 规范器逐项比较完整结果和失败原因。三实例 child normalize 加速 `8.511×/9.752×/8.179×`，CPU-fused search 加速 `1.038×/1.220×/1.244×`，五路 proof、边和 tour 不变。下一热点是 d15112 Hamilton reply 中 `121.818 ms` 的重复 graph validation。
+
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义

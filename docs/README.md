@@ -49,5 +49,6 @@
 45. [M5 HT point-candidate 静态次序缓存](research/41_M5_HT_Point_Candidate_Order_Cache.md)：复用 target 级严格次序并以 generation marks 过滤 state，累计获得 1.135×–1.858× search 加速。
 46. [M5 HT leaf proof 批内快照绑定复用](research/42_M5_HT_Leaf_Proof_Snapshot_Binding.md)：保持公开独立 verifier 不变，消除成功 leaf 的重复整图哈希并获得 8.882×–27.449× verify 加速。
 47. [M5 HT wavefront leaf 快照绑定复用](research/43_M5_HT_Wavefront_Snapshot_Binding.md)：强类型绑定同一只读 graph 对象，消除跨 leaf batch 重复哈希并保持全部独立 verifier 不变。
+48. [M5 HT path-append child 增量规范化](research/44_M5_HT_Path_Append_Incremental_Normalization.md)：从已认证 parent 直接合并规范链，以 992-task dense 差分获得 8.179×–9.752× child normalize 加速。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。
