@@ -27,6 +27,7 @@
 - 同步 leaf batch 内复用 snapshot binding，同时保持公开 proof verifier 独立哈希；
 - 同一只读 wavefront 内用强类型 graph binding 复用 leaf batch 快照哈希，并拒绝对象错配；
 - 同一只读 wavefront 内让 c,d/Hamilton/end batches 复用一次完整 CSR 图验证；
+- 同一不可变 HT scan 的 targets 间复用 graph/hash bindings，并保留逐目标内容哈希变更守卫；
 - path-append 的 sparse parent 认证与增量规范链合并，以及保留的 dense proof 重放认证；
 - path-count matching catalog 与 3/4/5-opt reconnect templates 的线程安全不可变缓存；
 - CPU/CUDA 共用的增量 leaf 精确成本矩阵路径，以及与 CPU scalar 逐字节一致的规范 proof 计数；

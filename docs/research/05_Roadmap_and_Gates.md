@@ -105,6 +105,8 @@ path-append child 增量规范化已完成：batch 入口仍用通用 sparse 规
 
 wavefront 图验证绑定复用已完成：强类型 binding 构造时完整验证 graph，c,d/Hamilton/end bound APIs 每次检查对象身份，公开 APIs 与独立 verifier 仍自行验证。三实例 Hamilton validation 加速 `305.600×/583.206×/3388.723×`，CPU-fused search 加速 `1.017×/1.146×/1.411×`；五路 proof、边和 tour 不变。下一切片把相同 binding 与 snapshot hash 上移到同一不可变 scan 的多个 targets。
 
+scan 跨目标快照绑定复用已完成：`RunHtScanEpoch` 在只读 target 切片入口完整构造一次 graph/hash bindings，内部 wavefront 检查对象身份后复用；每个 target 后的独立 `ContentHash()` 变更守卫、即时 proof 重放和最终 V2 原子提交均保留。三实例 CPU-fused candidate 加速 `1.674×/3.162×/7.355×`，search 加速 `1.007×/1.135×/1.246×`，d15112 wall 加速 `1.123×`；54 项跨提交精确比较全部通过。下一切片审计 d15112 leaf cursor construct 的 `69.004 ms`。
+
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
