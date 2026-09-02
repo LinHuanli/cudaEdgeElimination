@@ -204,9 +204,15 @@ validate_device_affinity() {
       if ((selected >= 0 && selected != assigned) || (leaf >= 0 && leaf != assigned) ||
           (path >= 0 && path != assigned) || (hamilton >= 0 && hamilton != assigned) ||
           (end >= 0 && end != assigned)) exit 11
+      if (selected == assigned || leaf == assigned || path == assigned || hamilton == assigned ||
+          end == assigned) actual_device[assigned] = 1
       ++rows
     }
-    END { if (rows != expected_rows) exit 12 }
+    END {
+      if (rows != expected_rows) exit 12
+      if (!actual_device[0]) exit 13
+      if (mode == "two" && !actual_device[1]) exit 14
+    }
   ' "${stdout_file}"
 }
 
@@ -248,6 +254,13 @@ run_scan() {
     >"${prefix}.work-signature"
   validate_device_affinity "${mode}" "${prefix}.stdout" \
     "$(read_field "${report}" attempted_targets)"
+  if [[ "${mode}" == "one" ]]; then
+    [[ "$(read_field "${report}" target_workers)" == "1" ]]
+    [[ "$(read_field "${report}" target_parallel)" == "0" ]]
+  else
+    [[ "$(read_field "${report}" target_workers)" == "2" ]]
+    [[ "$(read_field "${report}" target_parallel)" == "1" ]]
+  fi
 
   if [[ "${run}" != "warm" ]]; then
     echo "${mode},${run},$(read_field "${report}" target_execution_ms),$(read_field "${report}" search_ms),$(read_field "${report}" total_ms),${wall_ms},$(read_field "${report}" candidate_ms),$(read_field "${report}" work_graph_ms),$(read_field "${report}" leaf_ms),$(read_field "${report}" hamilton_reply_ms),$(read_field "${report}" end_reply_ms),$(read_field "${report}" immediate_verify_ms),$(read_field "${report}" commit_ms),$(read_field "${report}" target_workers),$(read_field "${report}" target_parallel),$(read_field "${report}" states_expanded),$(read_field "${report}" replies_expanded),$(read_field "${report}" leaf_calls),$(read_field "${report}" committed_targets)" >>"${metrics}"
