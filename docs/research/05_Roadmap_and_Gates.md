@@ -131,7 +131,9 @@ HT reply CUDA 图与工作区驻留复用已完成：线程/设备本地缓存�
 
 HT reply batch-local 精确任务去重已完成：Hamilton 在固定 target 的 batch 内按 center 首次出现顺序提交，end 以无碰撞的有向 `(endpoint,internal_neighbor)` 为 key；CPU 仍按原任务顺序展开完整 offsets/replies，CUDA 唯一 slices 逐项与 CPU 比较。d15112 的物理 reply tasks 从 28,497 降至 418（`-98.533%`），Hamilton/search/total/wall 七次中位数改善 `11.851%/3.327%/2.582%/2.158%`，驻留峰值减少 12,529,904 bytes。14 份 proof、边、工作签名和最优 tour 全部一致；报告/summary 升为 V16/V19，默认开启并保留完整逻辑提交开关。
 
-M5 仍未完成：跨 batch/target 的 HT leaf/reply 语义结果缓存与 work-graph 融合、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending；reply 静态设备资源驻留和 batch-local 精确任务去重已完成，根 `c,d` screen 融合不再列为 pending。
+跨 batch reply 结果缓存已完成排除画像：按最长安全生命周期，Hamilton 的 242 个 batch-local keys 只能缩为 160，end 的 176 个只能缩为 122，合计上界为 `418 -> 282`。15 个 Hamilton 和 8 个 end batches 均仍含新 key，可跳过的同步 CUDA 调用为 0。临时 observer 已移除；除非出现全命中 batch 或持久设备队列，否则不引入 scan/epoch 结果缓存。
+
+M5 仍未完成：跨 batch/target 的 HT leaf 语义结果缓存与 work-graph 融合、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending；reply 静态设备资源驻留和 batch-local 精确任务去重已完成，长生命周期 reply 结果缓存与根 `c,d` screen 融合不再列为 pending。
 
 ## 当前完成定义
 

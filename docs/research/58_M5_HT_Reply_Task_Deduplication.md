@@ -219,7 +219,8 @@ tour 哈希为 `4495654253f2318e`。
 4. 不把唯一率、CUDA 提交量、cache hit 或性能计时写入任何授权证书；
 5. 设备 workspace 按唯一物理任务增长，因此本切片同时降低计算量和驻留峰值。
 
-下一步先画像剩余 418 个物理 reply tasks 在不同 batches/targets 间的精确重复率，并与 leaf
-任务/结果及 work-graph child 子结构重复率比较。只有收益能覆盖跨生命周期 key、失效与内存
-管理成本，且逐 target 预算和确定顺序可证明保持时，才实现语义结果缓存。单卡闭环稳定后再
-进入多 GPU 静态 target 切片；不得用跨 target 调度改变原子 epoch 提交边界。
+后续 [跨 batch reply 结果缓存画像](59_M5_HT_Cross_Batch_Reply_Result_Cache_Profile.md) 已确认：
+418 个物理 tasks 最多再缩为 282，但 23 个 batches 中没有任何一批能全命中，因而不能消除
+同步 CUDA 调用。当前不引入长生命周期结果缓存，下一边界转向 target 级并行或真正主导的
+leaf/work-graph 计算。进入多 GPU 静态 target 切片时，不得改变逐 target 预算、确定顺序或
+原子 epoch 提交边界。
