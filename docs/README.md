@@ -65,5 +65,6 @@
 61. [M5 HT reply CUDA 图与工作区驻留复用](research/57_M5_HT_Reply_CUDA_Device_Residency.md)：跨 batches/targets 精确复用坐标、CSR 与增长 workspace，并以 d15112 七对 A/B、proof 和 tour 门禁确认收益。
 62. [M5 HT reply 精确任务去重](research/58_M5_HT_Reply_Task_Deduplication.md)：按首次出现顺序折叠 batch-local Hamilton/end 任务，以完整 CPU 逻辑结果、开关差分和 d15112 七对 A/B 确认收益。
 63. [M5 HT 跨 batch reply 结果缓存排除画像](research/59_M5_HT_Cross_Batch_Reply_Result_Cache_Profile.md)：量化长生命周期精确 key 只能再减少 136 个 tasks、不能消除任何 CUDA batch，因此不引入结果缓存。
+64. [M5 HT 目标级多 GPU 静态切片](research/60_M5_HT_Target_Multi_GPU_Static_Slicing.md)：按可见设备固定 target workers，保持规范 proof/提交顺序，并以双 A4000 七对 A/B 验证正确性与扩展收益。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

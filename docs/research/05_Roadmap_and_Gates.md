@@ -133,8 +133,10 @@ HT reply batch-local 精确任务去重已完成：Hamilton 在固定 target 的
 
 跨 batch reply 结果缓存已完成排除画像：按最长安全生命周期，Hamilton 的 242 个 batch-local keys 只能缩为 160，end 的 176 个只能缩为 122，合计上界为 `418 -> 282`。15 个 Hamilton 和 8 个 end batches 均仍含新 key，可跳过的同步 CUDA 调用为 0。临时 observer 已移除；除非出现全命中 batch 或持久设备队列，否则不引入 scan/epoch 结果缓存。
 
-M5 仍未完成：跨 batch/target 的 HT leaf 语义结果缓存与 work-graph 融合、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending；reply 静态设备资源驻留和 batch-local 精确任务去重已完成，长生命周期 reply 结果缓存与根 `c,d` screen 融合不再列为 pending。
+HT 目标级多 GPU 静态切片已完成：显式可见设备各绑定一个 target worker，在同一不可变快照上按相对目标序号轮转搜索，全部结果再按原规范序 CPU 重放和原子提交。d15112 双 A4000 的 32-target 七对 A/B 中，target execution、算法 total 和进程 wall 中位数分别加速 `1.251×/1.214×/1.157×`；40,044 states、52,917 replies、4,100 leaf calls、11 条提交边、规范 proof 和最优 tour 全部一致。V17 报告区分并行 stage wall 与逐 target search 求和，并审计 assigned/actual devices。
+
+M5 仍未完成：跨 batch/target 的 HT leaf 语义结果缓存与跨 target work-graph 融合，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending；目标级静态多 GPU、reply 静态设备资源驻留和 batch-local 精确任务去重已完成，长生命周期 reply 结果缓存与根 `c,d` screen 融合不再列为 pending。
 
 ## 当前完成定义
 
-当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append、M4.3b3b2b2b1 规范 child edge SoA、M4.3b3b2b2b2a frontier leaf batching、M4.3b3b2b2b2b1 一般 leaf 游标、M4.3b3b2b2b2b2a GPU leaf 驻留缓存、M4.3b3b2b2b2b2b1 CPU long-tail、M4.3b3b2b2b2b2b2 cooperative multi-block continuation、M4.3b3b2b2c HT epoch commit，以及 M5 JV 三轮优化、有界全图 HT scan、reply CUDA 驻留、reply batch-local 精确任务去重和 JV—HT 多 epoch 调度基线。M3.1 未完成时必须在状态清单中标为 pending；不得把显式 epoch 上限结束的运行冒充完整 Local Elimination 固定点或性能结论。
+当前已交付 M0、M1、M2、M3 安全桥接、M4.1、M4.2a、M4.2b 候选器、M4.3a 有界精确困难叶、M4.3b1 浅层 HT、M4.3b2 CPU 递归语义与全局证书、M4.3b3a 混合 wavefront、M4.3b3b1 path-append 候选器、M4.3b3b2a1/a2 reply count/write、M4.3b3b2b1 frontier reply batching、M4.3b3b2b2a frontier path-append、M4.3b3b2b2b1 规范 child edge SoA、M4.3b3b2b2b2a frontier leaf batching、M4.3b3b2b2b2b1 一般 leaf 游标、M4.3b3b2b2b2b2a GPU leaf 驻留缓存、M4.3b3b2b2b2b2b1 CPU long-tail、M4.3b3b2b2b2b2b2 cooperative multi-block continuation、M4.3b3b2b2c HT epoch commit，以及 M5 JV 三轮优化、有界全图 HT scan、reply CUDA 驻留、reply batch-local 精确任务去重、目标级静态多 GPU 和 JV—HT 多 epoch 调度基线。M3.1 未完成时必须在状态清单中标为 pending；不得把显式 epoch 上限结束的运行冒充完整 Local Elimination 固定点或性能结论。

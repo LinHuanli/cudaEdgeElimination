@@ -4,7 +4,7 @@
 
 提交 `5ef3c63` 增加 `RunHtScanEpoch` 与 `ht-scan`，把原来必须手工指定一条边的 Hamilton–Tutte wavefront 接到确定性目标选择、显式资源预算、sidecar 汇集和不可变 epoch 提交链。提交 `cd5ec3e` 固化 CPU/CUDA 对照脚本。
 
-这完成的是**单进程、单快照、有界目标切片基线**，不是完整 Local Elimination 流水线。`gpu-eliminate` 仍只自动执行 JV；`ht-scan` 是独立入口。多 epoch 重新排序、跨目标 GPU 融合、rl5915/d15112 资源门禁与多 GPU 仍未完成。
+该提交当时完成的是**单进程、单快照、有界目标切片基线**，不是完整 Local Elimination 流水线。`gpu-eliminate` 仍只自动执行 JV；`ht-scan` 是独立入口。后续已经完成[多 epoch 编排](54_M5_Local_Elimination_Multi_Epoch_Orchestration.md)、三实例资源门禁和[目标级多 GPU 静态切片](60_M5_HT_Target_Multi_GPU_Static_Slicing.md)；跨目标共享 GPU 工作图仍未完成。
 
 pcb3038 pilot 在 JV 固定点的 6,704 条边上扫描 8 个最高权重且度数安全的目标，CPU/CUDA 都证明并提交同两条边，最终剩余 6,702 条。CUDA 搜索为 33.646 秒，CPU 为 34.103 秒，仅 `1.014×`；该结果主要证明闭环和工作量一致，不能作为显著加速结论。
 
@@ -104,6 +104,6 @@ CUDA 处理 51,309,996 个 leaf cost cells、1,835 个 cost batches，leaf devic
 2. 分段统计 host graph build、CPU certification、各 CUDA 候选器与 proof extraction；
 3. 在相同预算下扩展目标数和 pcb3038 重复运行，再进入 rl5915/d15112；
 4. 新图的下一 epoch 从 offset 0 重新排序，测量强度固定点；
-5. 单卡跨目标融合稳定后再按不可变 snapshot 切片到多 GPU。
+5. 后续已按不可变 snapshot 完成目标级多 GPU 静态切片；跨目标工作图共享与负载感知调度仍需独立门禁。
 
 阶段计时、`CUDAEE_HT_SCAN_REPORT_V2` 与 CPU/全 CUDA/混合三路复测见 [M5 HT 阶段画像与混合后端](26_M5_HT_Phase_Profiling_and_Hybrid.md)。

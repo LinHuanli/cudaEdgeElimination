@@ -10,7 +10,7 @@
 4. 无删除时保持同一快照，推进 offset 扫描下一切片；
 5. 把所有 JV records 与 HT sidecars 合并为一个可独立 CPU 重放的 V1/V2 消元证明。
 
-这是**多 epoch 调度与证明组合基线**。它没有实现跨目标 GPU 工作图或多 GPU，也没有把尚未完成的 M3.1 LP 删除授权接入固定点；活动 edge-id 紧凑 launch 已另行评测并因端到端回退而撤销。
+这是**多 epoch 调度与证明组合基线**。后续提交已允许每个 HT 切片按固定 target worker 静态分配到多张 GPU，但仍没有跨目标共享 GPU 工作图，也没有把尚未完成的 M3.1 LP 删除授权接入固定点；活动 edge-id 紧凑 launch 已另行评测并因端到端回退而撤销。
 
 ## 2. 调度状态机
 
@@ -75,22 +75,22 @@ build/cuda-release/cudaee local-eliminate \
   --output OUTPUT.edg --proof OUTPUT.proof --report OUTPUT.report \
   --backend auto --max-jv-rounds 100 \
   --max-ht-epochs 100 --max-targets 8 \
-  --target-order weight-desc \
+  --target-order weight-desc [--target-devices 0,1] \
   [HT wavefront budgets]
 ```
 
 可选的 `--protected-tour FILE --expected-cost COST` 在入口和全部阶段结束后分别检查成本、节点置换、规范 tour hash 与活动边缺失数；失败时不写出本次结果。该门禁是额外的已知 witness 保留约束，不替代方法专属证明。
 
-`CUDAEE_LOCAL_ELIMINATION_REPORT_V1` 为每个 stage 记录：
+`CUDAEE_LOCAL_ELIMINATION_REPORT_V2` 为每个 stage 记录：
 
 - `JV/HT` 类型、实际 backend、初末快照哈希和边数；
 - proposed/verified/rejected/committed；
 - JV round 数；
-- HT eligible/offset/attempted/proven/unresolved；
+- HT eligible/offset/attempted/proven/unresolved，以及 target workers/parallel/执行墙钟；
 - stage wall time；
 - 全局 termination、proof record/sidecar 数及 protected-tour 结果。
 
-细粒度 leaf/path/reply 性能画像仍使用单快照 `ht-scan` V16 报告；联合报告只承担调度和哈希链审计，避免复制体积巨大的逐目标 sidecar/attempt 数据。`local-eliminate` 会透传 reply CUDA 驻留与精确任务去重开关；同一进程的 graph/增长 workspace 可跨 targets 和 stages 复用，但任务结果只在当前 batch 内按完整 key 折叠，新 epoch 的完整坐标/CSR 键不相等时仍必须重新上传。
+细粒度 leaf/path/reply 性能画像仍使用单快照 `ht-scan` V17 报告；联合报告只承担调度和哈希链审计，避免复制体积巨大的逐目标 sidecar/attempt 数据。`local-eliminate` 会透传 target devices、reply CUDA 驻留与精确任务去重开关。默认顺序路径的线程局部 graph/增长 workspace 可跨 targets 和 stages 复用；显式 target workers 在同一 stage 的静态切片内复用缓存，但当前 worker 会在每次 scan 后销毁，因此不跨 stages 驻留。任务结果始终只在当前 batch 内按完整 key 折叠，新 epoch 的完整坐标/CSR 键不相等时仍必须重新上传。
 
 ## 5. 固定 8 点穷举门禁
 
@@ -145,6 +145,6 @@ artifact：`artifacts/pcb3038-local-elimination-20260902-OiRUCG`。运行绑定�
 
 1. 根 `c,d` screen 跨 target 融合已因端到端回退而排除；reply CUDA 静态图和增长 workspace 驻留已由后续 d15112 七对 A/B 保留。下一步只画像 leaf/reply 语义结果与 work-graph 子结构的实质重复，同时保持每目标预算与 proof 顺序；
 2. 活动 edge-id 紧凑 launch 已在 d15112 上因端到端回退而排除；只有 inactive 比例显著提高或设备端能免费维护索引时才重新评估；
-3. 单卡闭环稳定后再做多 GPU 静态切片和 CPU 汇总复核；
+3. 目标级多 GPU 静态切片和顺序 CPU 汇总复核已完成；下一步只在门禁证明收益后考虑常驻 worker 或负载感知分配；
 4. M3.1 能输出逐边安全 LP 授权后，再评测 LP—JV—HT 交替固定点；
 5. 在 rl5915/d15112 上先跑有界多 epoch 正确性门禁，再决定完整 sweep 的资源预算。

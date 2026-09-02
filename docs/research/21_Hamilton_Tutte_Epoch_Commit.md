@@ -73,4 +73,4 @@ build/cpu-release/cudaee verify \
 
 ## 后续衔接
 
-M5 已在本提交器之上增加[有界全图 HT 目标扫描](25_M5_HT_Target_Scan.md)：同一快照的确定性目标切片先全部搜索，再调用本接口原子发布。`gpu-eliminate` 的自动候选器仍是 JV；跨目标融合、多 epoch 搜索策略和多 GPU 仍待完成。M3.1 的对偶稳定化与精确定价后边集导出也仍独立待完成。
+M5 已在本提交器之上增加[有界全图 HT 目标扫描](25_M5_HT_Target_Scan.md)：同一快照的确定性目标切片先全部搜索，再调用本接口原子发布。后续[多 epoch 搜索策略](54_M5_Local_Elimination_Multi_Epoch_Orchestration.md)和[目标级多 GPU 静态切片](60_M5_HT_Target_Multi_GPU_Static_Slicing.md)也继续复用本提交边界；跨目标共享工作图仍待完成。`gpu-eliminate` 的自动候选器仍是 JV，M3.1 的对偶稳定化与精确定价后边集导出也仍独立待完成。

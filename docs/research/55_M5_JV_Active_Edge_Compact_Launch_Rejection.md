@@ -77,4 +77,4 @@ d15112 的三个 JV epochs 中，inactive 槽位只占 2.925%。全长路径的 
 3. 不改变稳定原始 edge id、CPU verifier、proof 顺序和不可变 snapshot 契约；
 4. 在 pcb3038、rl5915、d15112 至少三实例 clean-commit A/B 中获得稳健端到端收益，并通过现有差分、重放和 sanitizer 门禁。
 
-在此之前，路线图不再把“活动 edge-id 紧凑 launch”列为 pending；后续资源优先投入跨目标 HT 工作共享、单卡完整 sweep 和多 GPU 静态切片。
+在此之前，路线图不再把“活动 edge-id 紧凑 launch”列为 pending；后续已完成目标级多 GPU 静态切片，剩余资源优先投入跨目标 HT 工作共享、负载感知调度和单卡完整 sweep。

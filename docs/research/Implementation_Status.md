@@ -34,7 +34,8 @@
 | M5 HT reply CUDA 驻留共享 | 完成（静态资源/工作区） | 完整图键；Hamilton/end 共用；d15112 七对 A/B；14 份 proof/tour 门禁；memcheck 0 error |
 | M5 HT reply 精确任务去重 | 完成（batch-local） | 物理 tasks `28497 -> 418`；CPU 完整逻辑展开；V16/V19；d15112 七对 A/B 与 14 份 proof/tour 门禁 |
 | M5 HT 跨 batch reply 结果缓存 | 已画像并排除 | 最多 `418 -> 282`，但 23/23 batches 仍含新 key、可消除调用为 0；observer 已移除 |
-| M5 中大型调优 | 进行中（JV 三轮 + HT host/device fast paths） | point/path/reply/leaf/scan-binding fast paths；reply 驻留与精确任务去重 |
+| M5 HT 目标级多 GPU | 完成（静态切片基线） | 固定设备 worker；顺序 CPU proof/原子提交；双 A4000 32-target `1.251×` target execution；V17/V20 |
+| M5 中大型调优 | 进行中（JV 三轮 + HT host/device/multi-GPU fast paths） | point/path/reply/leaf/scan-binding fast paths；reply 驻留、任务去重与目标级静态多 GPU |
 
 ## 当前基准结果
 
@@ -55,6 +56,8 @@ M5 HT reply CUDA 驻留共享绑定 `4396489`：线程/设备本地缓存对维�
 M5 HT reply 精确任务去重绑定 `4428aa4`：Hamilton 在固定 target 的 batch 内按 center 首次出现顺序折叠，end 使用无碰撞的有向 `(endpoint,internal_neighbor)` 整数 key；CPU 仍按原 task 顺序展开完整逻辑 offsets/replies，CUDA 只计算唯一 slices 并逐项与 CPU 比较。d15112 的 Hamilton/end 逻辑量 `23939/4558` 缩为 batch-local 唯一量 `242/176`，物理 CUDA tasks 从 28,497 降至 418（`-98.533%`），驻留峰值从 14,183,576 降至 1,653,672 bytes。七对交错 A/B 的 Hamilton/search/total/wall 中位数改善 `11.851%/3.327%/2.582%/2.158%`；14 份 proof、活动边、工作签名和最优 tour 全部一致，CPU Debug/Release、CUDA Release 与 memcheck 门禁通过。报告/summary 升为 V16/V19，默认开启并保留完整逻辑提交开关。
 
 M5 HT 跨 batch reply 结果缓存排除画像基于 `589caf5`：临时 observer 记录完整逻辑 key，计时因同步 stderr 明确作废。Hamilton 按 `(target,center)` 从 242 个 batch-local keys 只能降至 160，end 按 scan 级有向 task 从 176 降至 122，合计再减少 136 个；但 15 个 Hamilton 与 8 个 end batches 全部仍含新 key，无法跳过任何同步 CUDA 调用。画像运行的边、规范 proof、工作签名和 d15112 tour 与正式结果相同，observer 已移除；当前不实现长生命周期结果缓存。
+
+M5 HT 目标级多 GPU 静态切片绑定 `caed660`：显式 `target_devices` 为每个可见 ordinal 创建固定 worker，按相对目标序号轮转搜索；线程完成顺序不参与结果消费，成功 proof 仍按规范 target 顺序即时 CPU 重放并经原 V2 epoch 提交器整批重放。d15112 双空闲 RTX A4000 的 32-target 七对交错 A/B 中，target execution 从 `3208.626` 降至 `2564.352 ms`（`1.251×`），算法 total 从 `3739.995` 降至 `3081.042 ms`（`1.214×`），进程 wall 从 `4043.140` 降至 `3495.274 ms`（`1.157×`）。单/双卡始终为 40,044 states、52,917 replies、4,100 leaf calls 和 11 条提交边；17 次 CPU proof 重放、17 次最优 tour 检查、设备归属审计、CUDA Release 23/23 与 memcheck 0 errors 全部通过。报告/summary 升为 V17/V20，另以 `target_execution_ms` 区分并行墙钟和 `search_ms` 求和。
 
 M5 HT scan pilot 绑定 `cd5ec3e`：pcb3038 的 CPU JV 固定点有 6,704 条边和 6,476 个度数安全目标；最高权重 8-target 切片的 CPU/CUDA 工作签名均为 12,383 states、14,285 replies、9,120 leaf calls 和 5,085 moves，证明并提交相同 2 条边。CUDA/CPU search 为 `33.646/34.103 s`，仅 `1.014×`；最终 6,702 条边、哈希 `fe11f98414b04c0e`，两份 V2 均独立重放且 pcb3038 最优 tour 为 0 缺边。这是功能与资源 pilot，不是显著性能结论。
 
@@ -158,4 +161,4 @@ HT epoch commit：`ht-commit` 可重复接收同一不可变快照上的 recursi
 
 ## 安全边界
 
-`gpu-eliminate` 的自动候选器仍只实现 JV；HT 可使用显式 `ht-prove -> ht-commit`、单快照 `ht-scan`，或由 `local-eliminate` 执行有界 JV—HT 多 epoch 调度。reply 的静态设备图和工作区可跨 targets 驻留，同一 batch 的精确重复任务也已折叠；跨 batch/target reply 结果缓存已经画像并因不能消除同步调用而排除，当前也尚无跨 target GPU 工作图或 leaf 语义结果缓存，且未接入 LP 删除授权。显式 `ht-epoch-limit` 结果只能视为安全部分消元，不能外推为完整 Local Elimination 固定点或性能加速。`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集；M3.1 仍为 pending。仍严禁从未完整验证的局部结果、过期 HT sidecar、cache hit、去重命中或 cuOpt 浮点 reduced cost 直接构造删除记录。
+`gpu-eliminate` 的自动候选器仍只实现 JV；HT 可使用显式 `ht-prove -> ht-commit`、单快照 `ht-scan`，或由 `local-eliminate` 执行有界 JV—HT 多 epoch 调度。目标级静态多 GPU 已可显式启用，reply 的静态设备图和工作区可在各 worker 的 targets 间驻留，同一 batch 的精确重复任务也已折叠；跨 batch/target reply 结果缓存已经画像并因不能消除同步调用而排除，当前仍没有把单个 target 或共享 work graph 拆到多 GPU，也没有 leaf 语义结果缓存或 LP 删除授权。显式 `ht-epoch-limit` 结果只能视为安全部分消元，不能外推为完整 Local Elimination 固定点或性能加速。`lp-solve` 始终不修改图。Concorde 桥接已能产生完整图安全下界，但测试 wrapper 使用 `-B`，尚不输出消元边集；M3.1 仍为 pending。仍严禁从未完整验证的局部结果、过期 HT sidecar、cache hit、去重命中或 cuOpt 浮点 reduced cost 直接构造删除记录。

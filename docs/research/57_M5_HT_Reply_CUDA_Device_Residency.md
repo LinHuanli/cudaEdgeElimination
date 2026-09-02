@@ -205,4 +205,6 @@ wall 改善只有 0.450%，不能宣传为大幅端到端加速；保留依据�
 d15112 的 CUDA reply 提交量从 28,497 降为 418，且保持完整逻辑结果与 proof 不变；报告与
 五路 summary 随之升级为 V16/V19。尚未实现的是跨 batch/target 的语义结果缓存和 work-graph
 子结构共享。只有完整 key 相等且能保持逐 target 预算、稳定顺序、快照守卫和 proof 字节语义
-时，才扩大复用生命周期。单卡闭环稳定后再进行多 GPU 静态 target 切片。
+时，才扩大复用生命周期。后续[目标级多 GPU 静态切片](60_M5_HT_Target_Multi_GPU_Static_Slicing.md)
+已让每个 worker 保有独立线程/设备缓存；当前缓存只跨该 worker 在单次 scan 中的 targets，不跨
+显式多 GPU 的 Local Elimination stages。
