@@ -128,6 +128,7 @@ struct KOptDeviceCache {
   std::array<KOptTemplateDeviceCache, 3U> templates;
   DeviceBuffer<KOptCostTask> device_tasks;
   DeviceBuffer<std::int64_t> device_costs;
+  DeviceBuffer<std::uint64_t> device_candidate_masks;
 };
 
 thread_local std::vector<std::unique_ptr<KOptDeviceCache>> g_kopt_device_caches;
@@ -285,9 +286,27 @@ bool PrepareWorkspace(KOptDeviceCache* const cache, const std::size_t task_count
   return hit;
 }
 
+bool PrepareCandidateWorkspace(KOptDeviceCache* const cache, const std::size_t task_count,
+                               const std::size_t mask_count) {
+  const bool hit = cache->device_tasks.count() >= task_count &&
+                   cache->device_candidate_masks.count() >= mask_count;
+  if (cache->device_tasks.count() < task_count) {
+    DeviceBuffer<KOptCostTask> tasks(GrowthCapacity(cache->device_tasks.count(), task_count),
+                                     cache->device);
+    cache->device_tasks = std::move(tasks);
+  }
+  if (cache->device_candidate_masks.count() < mask_count) {
+    DeviceBuffer<std::uint64_t> masks(
+        GrowthCapacity(cache->device_candidate_masks.count(), mask_count), cache->device);
+    cache->device_candidate_masks = std::move(masks);
+  }
+  return hit;
+}
+
 std::uint64_t ResidentBytes(const KOptDeviceCache& cache) {
   std::uint64_t bytes = cache.device_x.bytes() + cache.device_y.bytes() +
-                        cache.device_tasks.bytes() + cache.device_costs.bytes();
+                        cache.device_tasks.bytes() + cache.device_costs.bytes() +
+                        cache.device_candidate_masks.bytes();
   for (const KOptTemplateDeviceCache& entry : cache.templates) {
     bytes += entry.device_templates.bytes();
   }
@@ -346,6 +365,52 @@ __device__ void CanonicalEndpoints(const std::int32_t first, const std::int32_t 
   }
 }
 
+__device__ std::int64_t EvaluateTemplateCostDevice(const std::uint32_t k, const KOptCostTask& task,
+                                                   const EndpointMatching& matching,
+                                                   const std::int64_t* const x,
+                                                   const std::int64_t* const y,
+                                                   const std::uint8_t distance_type) {
+  std::int32_t added_u[5];
+  std::int32_t added_v[5];
+  std::uint32_t added_count = 0;
+  std::int64_t total = 0;
+  for (std::uint32_t port = 0; port < 2U * k; ++port) {
+    const std::uint32_t partner = matching.mate[port];
+    if (port >= partner) {
+      continue;
+    }
+    std::int32_t u = -1;
+    std::int32_t v = -1;
+    CanonicalEndpoints(task.port_nodes[port], task.port_nodes[partner], &u, &v);
+    if (u == v) {
+      return kInvalidKOptTemplateCost;
+    }
+    for (std::uint32_t edge = 0; edge < k; ++edge) {
+      std::int32_t deleted_u = -1;
+      std::int32_t deleted_v = -1;
+      CanonicalEndpoints(task.port_nodes[2U * edge], task.port_nodes[2U * edge + 1U], &deleted_u,
+                         &deleted_v);
+      if (u == deleted_u && v == deleted_v) {
+        return kInvalidKOptTemplateCost;
+      }
+    }
+    for (std::uint32_t edge = 0; edge < added_count; ++edge) {
+      if (u == added_u[edge] && v == added_v[edge]) {
+        return kInvalidKOptTemplateCost;
+      }
+    }
+    const std::int64_t distance = ExactDistanceDevice(u, v, x, y, distance_type);
+    if (distance < 0 || total > LLONG_MAX - distance) {
+      return kInvalidKOptTemplateCost;
+    }
+    added_u[added_count] = u;
+    added_v[added_count] = v;
+    ++added_count;
+    total += distance;
+  }
+  return added_count == k ? total : kInvalidKOptTemplateCost;
+}
+
 __global__ void KOptTemplateCostsKernel(const std::uint32_t k, const KOptCostTask* const tasks,
                                         const std::size_t task_count,
                                         const EndpointMatching* const templates,
@@ -360,52 +425,31 @@ __global__ void KOptTemplateCostsKernel(const std::uint32_t k, const KOptCostTas
   }
   const std::size_t task_index = flat_index / template_count;
   const std::uint32_t template_index = static_cast<std::uint32_t>(flat_index % template_count);
-  const KOptCostTask task = tasks[task_index];
-  const EndpointMatching matching = templates[template_index];
+  costs[flat_index] = EvaluateTemplateCostDevice(k, tasks[task_index], templates[template_index], x,
+                                                 y, distance_type);
+}
 
-  std::int32_t added_u[5];
-  std::int32_t added_v[5];
-  std::uint32_t added_count = 0;
-  std::int64_t total = 0;
-  for (std::uint32_t port = 0; port < 2U * k; ++port) {
-    const std::uint32_t partner = matching.mate[port];
-    if (port >= partner) {
-      continue;
-    }
-    std::int32_t u = -1;
-    std::int32_t v = -1;
-    CanonicalEndpoints(task.port_nodes[port], task.port_nodes[partner], &u, &v);
-    if (u == v) {
-      costs[flat_index] = kInvalidKOptTemplateCost;
-      return;
-    }
-    for (std::uint32_t edge = 0; edge < k; ++edge) {
-      std::int32_t deleted_u = -1;
-      std::int32_t deleted_v = -1;
-      CanonicalEndpoints(task.port_nodes[2U * edge], task.port_nodes[2U * edge + 1U], &deleted_u,
-                         &deleted_v);
-      if (u == deleted_u && v == deleted_v) {
-        costs[flat_index] = kInvalidKOptTemplateCost;
-        return;
-      }
-    }
-    for (std::uint32_t edge = 0; edge < added_count; ++edge) {
-      if (u == added_u[edge] && v == added_v[edge]) {
-        costs[flat_index] = kInvalidKOptTemplateCost;
-        return;
-      }
-    }
-    const std::int64_t distance = ExactDistanceDevice(u, v, x, y, distance_type);
-    if (distance < 0 || total > LLONG_MAX - distance) {
-      costs[flat_index] = kInvalidKOptTemplateCost;
-      return;
-    }
-    added_u[added_count] = u;
-    added_v[added_count] = v;
-    ++added_count;
-    total += distance;
+__global__ void
+KOptCandidateMasksKernel(const std::uint32_t k, const KOptCostTask* const tasks,
+                         const std::size_t task_count, const EndpointMatching* const templates,
+                         const std::uint32_t template_count, const std::uint32_t words_per_task,
+                         const std::int64_t* const x, const std::int64_t* const y,
+                         const std::uint8_t distance_type, std::uint64_t* const candidate_masks) {
+  const std::size_t task_index = blockIdx.x;
+  const std::uint32_t template_index = threadIdx.x;
+  if (task_index >= task_count || template_index >= template_count) {
+    return;
   }
-  costs[flat_index] = added_count == k ? total : kInvalidKOptTemplateCost;
+  const KOptCostTask task = tasks[task_index];
+  const std::int64_t added_cost =
+      EvaluateTemplateCostDevice(k, task, templates[template_index], x, y, distance_type);
+  if (added_cost >= task.deleted_cost) {
+    return;
+  }
+  const std::size_t word_index =
+      task_index * words_per_task + static_cast<std::size_t>(template_index / 64U);
+  const auto bit = static_cast<unsigned long long>(1ULL << (template_index % 64U));
+  atomicOr(reinterpret_cast<unsigned long long*>(candidate_masks + word_index), bit);
 }
 
 } // namespace
@@ -467,6 +511,69 @@ std::vector<std::int64_t> EvaluateKOptTemplateCostsCuda(const GraphSnapshot& gra
     cache_usage->resident_bytes = ResidentBytes(cache);
   }
   return costs;
+}
+
+std::vector<std::uint64_t> EvaluateKOptCandidateMasksCuda(const GraphSnapshot& graph,
+                                                          const KOptReconnectTable& table,
+                                                          const std::vector<KOptCostTask>& tasks,
+                                                          std::uint32_t* const words_per_task,
+                                                          int* const selected_device,
+                                                          KOptCudaCacheUsage* const cache_usage) {
+  if (words_per_task == nullptr) {
+    throw std::invalid_argument("CUDA k-opt candidate 缺少 words_per_task 输出");
+  }
+  if (cache_usage != nullptr) {
+    *cache_usage = {};
+  }
+  std::string reason;
+  const int device = SelectDevice(&reason);
+  if (device < 0) {
+    throw std::runtime_error("CUDA k-opt candidate 后端不可用: " + reason);
+  }
+  if (selected_device != nullptr) {
+    *selected_device = device;
+  }
+  if (table.k < 3U || table.k > 5U || table.templates.empty() || table.templates.size() > 256U) {
+    throw std::invalid_argument("CUDA k-opt candidate reconnect table 非法");
+  }
+  const std::uint32_t mask_words = static_cast<std::uint32_t>((table.templates.size() + 63U) / 64U);
+  *words_per_task = mask_words;
+  if (tasks.empty()) {
+    return {};
+  }
+  if (tasks.size() > std::numeric_limits<unsigned int>::max() ||
+      tasks.size() > std::numeric_limits<std::size_t>::max() / mask_words) {
+    throw std::overflow_error("CUDA k-opt candidate batch 规模溢出");
+  }
+  const std::size_t mask_count = tasks.size() * mask_words;
+
+  KOptDeviceCache& cache = CacheForDevice(device);
+  const bool snapshot_hit = PrepareSnapshot(&cache, graph);
+  const bool template_hit = PrepareTemplates(&cache, table);
+  const bool workspace_hit = PrepareCandidateWorkspace(&cache, tasks.size(), mask_count);
+  cache.device_tasks.CopyFromHost(tasks.data(), tasks.size());
+  CheckCuda(cudaMemset(cache.device_candidate_masks.get(), 0, mask_count * sizeof(std::uint64_t)),
+            "cudaMemset(k-opt candidate masks)");
+
+  constexpr unsigned int kThreads = 256U;
+  KOptCandidateMasksKernel<<<static_cast<unsigned int>(tasks.size()), kThreads>>>(
+      table.k, cache.device_tasks.get(), tasks.size(),
+      cache.templates[static_cast<std::size_t>(table.k - 3U)].device_templates.get(),
+      static_cast<std::uint32_t>(table.templates.size()), mask_words, cache.device_x.get(),
+      cache.device_y.get(), static_cast<std::uint8_t>(graph.distance_type),
+      cache.device_candidate_masks.get());
+  CheckCuda(cudaGetLastError(), "KOptCandidateMasksKernel launch");
+  CheckCuda(cudaDeviceSynchronize(), "KOptCandidateMasksKernel synchronize");
+
+  std::vector<std::uint64_t> masks(mask_count);
+  cache.device_candidate_masks.CopyToHost(masks.data(), masks.size());
+  if (cache_usage != nullptr) {
+    cache_usage->snapshot_hit = snapshot_hit;
+    cache_usage->template_hit = template_hit;
+    cache_usage->workspace_hit = workspace_hit;
+    cache_usage->resident_bytes = ResidentBytes(cache);
+  }
+  return masks;
 }
 
 void ClearKOptCostCudaCache() {

@@ -1075,6 +1075,45 @@ void TestRecursivePointProof() {
           "CPU target workers preserve canonical HT proof bytes");
   }
 
+  cudaee::HtScanOptions serial_transposed_options = serial_cpu_slice_options;
+  serial_transposed_options.wavefront_options.scheduler = cudaee::HtScheduler::kTransposed;
+  serial_transposed_options.wavefront_options.speculation_width = 1U;
+  serial_transposed_options.wavefront_options.search_options.root_options.leaf_options
+      .cost_backend = cudaee::PathCompatibilityBackend::kCpu;
+  cudaee::GraphSnapshot serial_transposed_graph = graph;
+  const cudaee::HtScanResult serial_transposed =
+      cudaee::RunHtScanEpoch(&serial_transposed_graph, serial_transposed_options);
+  cudaee::HtScanOptions brokered_transposed_options = serial_transposed_options;
+  brokered_transposed_options.target_workers = 2U;
+  cudaee::GraphSnapshot brokered_transposed_graph = graph;
+  const cudaee::HtScanResult brokered_transposed =
+      cudaee::RunHtScanEpoch(&brokered_transposed_graph, brokered_transposed_options);
+  Check(brokered_transposed.target_workers == 2U && brokered_transposed.target_parallel &&
+            brokered_transposed.leaf_broker_batches == 0U &&
+            brokered_transposed.leaf_broker_requests == 0U &&
+            brokered_transposed_graph.ContentHash() == serial_transposed_graph.ContentHash() &&
+            brokered_transposed.elimination.proof.size() ==
+                serial_transposed.elimination.proof.size() &&
+            brokered_transposed.elimination.ht_proofs.size() ==
+                serial_transposed.elimination.ht_proofs.size(),
+        "CPU transposed target workers keep independent leaf execution and ordered commit");
+  for (std::size_t index = 0U; index < brokered_transposed.attempts.size(); ++index) {
+    Check(brokered_transposed.attempts[index].edge_id ==
+                  serial_transposed.attempts[index].edge_id &&
+              brokered_transposed.attempts[index].status ==
+                  serial_transposed.attempts[index].status &&
+              brokered_transposed.attempts[index].states_expanded ==
+                  serial_transposed.attempts[index].states_expanded &&
+              brokered_transposed.attempts[index].replies_expanded ==
+                  serial_transposed.attempts[index].replies_expanded,
+          "transposed broker preserves each target's strict short-circuit work");
+  }
+  for (std::size_t index = 0U; index < brokered_transposed.elimination.ht_proofs.size(); ++index) {
+    Check(cudaee::SerializeHtRecursiveProof(brokered_transposed.elimination.ht_proofs[index]) ==
+              cudaee::SerializeHtRecursiveProof(serial_transposed.elimination.ht_proofs[index]),
+          "transposed broker preserves canonical HT proof bytes");
+  }
+
   cudaee::HtScanOptions completed_scan_options = scan_options;
   completed_scan_options.target_offset = weighted_targets.size();
   cudaee::GraphSnapshot completed_scan_graph = graph;
@@ -1668,6 +1707,59 @@ void TestRecursivePointProof() {
                 cudaee::SerializeHtRecursiveProof(
                     shared_device_serial_scan.elimination.ht_proofs[index]),
             "shared-device target workers preserve canonical HT proof bytes");
+    }
+
+    cudaee::HtScanOptions transposed_cuda_serial_options = shared_device_serial_options;
+    transposed_cuda_serial_options.wavefront_options.scheduler = cudaee::HtScheduler::kTransposed;
+    transposed_cuda_serial_options.wavefront_options.speculation_width = 1U;
+    transposed_cuda_serial_options.wavefront_options.propagation_backend =
+        cudaee::PathCompatibilityBackend::kCpu;
+    transposed_cuda_serial_options.wavefront_options.path_append_backend =
+        cudaee::PathCompatibilityBackend::kCpu;
+    transposed_cuda_serial_options.wavefront_options.hamilton_reply_backend =
+        cudaee::PathCompatibilityBackend::kCpu;
+    cudaee::GraphSnapshot transposed_cuda_serial_graph = graph;
+    const cudaee::HtScanResult transposed_cuda_serial =
+        cudaee::RunHtScanEpoch(&transposed_cuda_serial_graph, transposed_cuda_serial_options);
+    cudaee::HtScanOptions transposed_cuda_broker_options = transposed_cuda_serial_options;
+    transposed_cuda_broker_options.target_workers = 2U;
+    transposed_cuda_broker_options.wavefront_options.speculation_width = 0U;
+    cudaee::GraphSnapshot transposed_cuda_broker_graph = graph;
+    const cudaee::HtScanResult transposed_cuda_broker =
+        cudaee::RunHtScanEpoch(&transposed_cuda_broker_graph, transposed_cuda_broker_options);
+    Check(transposed_cuda_broker.leaf_broker_batches > 0U &&
+              transposed_cuda_broker.leaf_broker_batches <=
+                  transposed_cuda_broker.leaf_frontier_batches &&
+              transposed_cuda_broker.leaf_broker_requests ==
+                  transposed_cuda_broker.leaf_frontier_batches &&
+              transposed_cuda_broker.leaf_broker_states ==
+                  transposed_cuda_broker.leaf_frontier_states &&
+              transposed_cuda_broker.peak_leaf_broker_requests <= 2U &&
+              transposed_cuda_broker.peak_speculation_width == 8U &&
+              transposed_cuda_broker.leaf_cuda_cost_batches ==
+                  transposed_cuda_broker.leaf_cost_batches &&
+              transposed_cuda_broker.leaf_cpu_certified_cost_cells == 0U &&
+              transposed_cuda_broker.leaf_cpu_cost_rows_scored == 0U &&
+              transposed_cuda_broker.leaf_cpu_completeness_rows == 0U &&
+              transposed_cuda_broker_graph.ContentHash() ==
+                  transposed_cuda_serial_graph.ContentHash() &&
+              transposed_cuda_broker.elimination.ht_proofs.size() ==
+                  transposed_cuda_serial.elimination.ht_proofs.size(),
+          "single-GPU transposed broker fuses heterogeneous leaves without changing the graph");
+    for (const cudaee::HtScanAttempt& attempt : transposed_cuda_broker.attempts) {
+      Check(attempt.assigned_device == 0 &&
+                (attempt.leaf_frontier_batches == 0U ||
+                 (attempt.leaf_cost_backend == "cuda-candidate" &&
+                  attempt.leaf_cost_selected_device == 0 && attempt.leaf_cpu_verified)),
+            "transposed broker runs candidate-only CUDA leaves on its pinned dispatcher");
+    }
+    for (std::size_t index = 0U; index < transposed_cuda_broker.elimination.ht_proofs.size();
+         ++index) {
+      Check(
+          cudaee::SerializeHtRecursiveProof(transposed_cuda_broker.elimination.ht_proofs[index]) ==
+              cudaee::SerializeHtRecursiveProof(
+                  transposed_cuda_serial.elimination.ht_proofs[index]),
+          "single-GPU transposed broker preserves canonical HT proof bytes");
     }
 
     if (visible_devices >= 2) {

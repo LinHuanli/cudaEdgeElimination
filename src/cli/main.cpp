@@ -1018,13 +1018,18 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V18\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V19\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
   output << "scheduler " << HtSchedulerName(options.wavefront_options.scheduler) << '\n';
   output << "requested_speculation_width " << options.wavefront_options.speculation_width << '\n';
-  output << "speculation_width " << ResolvedSpeculationWidth(options.wavefront_options) << '\n';
+  output << "speculation_width "
+         << (options.wavefront_options.scheduler == cudaee::HtScheduler::kTransposed
+                 ? scan.peak_speculation_width
+                 : ResolvedSpeculationWidth(options.wavefront_options))
+         << '\n';
+  output << "peak_speculation_width " << scan.peak_speculation_width << '\n';
   output << "eligible_targets " << scan.eligible_targets << '\n';
   output << "target_offset " << scan.target_offset << '\n';
   output << "target_end_offset " << scan.target_offset + scan.attempts.size() << '\n';
@@ -1051,6 +1056,11 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "leaf_frontier_states " << scan.leaf_frontier_states << '\n';
   output << "leaf_bucket_count " << scan.leaf_bucket_count << '\n';
   output << "peak_leaf_frontier_batch " << scan.peak_leaf_frontier_batch << '\n';
+  output << "leaf_broker_batches " << scan.leaf_broker_batches << '\n';
+  output << "leaf_broker_requests " << scan.leaf_broker_requests << '\n';
+  output << "leaf_broker_states " << scan.leaf_broker_states << '\n';
+  output << "peak_leaf_broker_requests " << scan.peak_leaf_broker_requests << '\n';
+  output << "peak_leaf_broker_states " << scan.peak_leaf_broker_states << '\n';
   output << "leaf_cost_batches " << scan.leaf_cost_batches << '\n';
   output << "leaf_cost_tasks " << scan.leaf_cost_tasks << '\n';
   output << "leaf_cost_cells " << scan.leaf_cost_cells << '\n';
@@ -1140,7 +1150,9 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
             "peak_frontier assigned_device propagation_backend device blocks cooperative "
             "propagation_verified "
             "leaf_backend leaf_device leaf_verified leaf_frontier_batches leaf_frontier_states "
-            "leaf_buckets peak_leaf_frontier_batch leaf_cost_batches leaf_cost_tasks leaf_cells "
+            "leaf_buckets peak_leaf_frontier_batch leaf_broker_batches leaf_broker_requests "
+            "leaf_broker_states peak_leaf_broker_requests peak_leaf_broker_states "
+            "leaf_cost_batches leaf_cost_tasks leaf_cells "
             "leaf_cursor_searches leaf_cuda_batches "
             "leaf_cpu_long_tail_cells leaf_cost_rows leaf_candidate_rechecks "
             "leaf_completeness_rows leaf_completeness_templates leaf_cpu_certified_cells "
@@ -1182,14 +1194,16 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << attempt.leaf_cost_selected_device << ' ' << (attempt.leaf_cpu_verified ? 1 : 0) << ' '
            << attempt.leaf_frontier_batches << ' ' << attempt.leaf_frontier_states << ' '
            << attempt.leaf_bucket_count << ' ' << attempt.peak_leaf_frontier_batch << ' '
-           << attempt.leaf_cost_batches << ' ' << attempt.leaf_cost_tasks << ' '
-           << attempt.leaf_cost_cells << ' ' << attempt.leaf_cursor_searches_started << ' '
-           << attempt.leaf_cuda_cost_batches << ' ' << attempt.leaf_cpu_long_tail_cells << ' '
-           << attempt.leaf_cost_rows_consumed << ' ' << attempt.leaf_candidate_templates_rechecked
-           << ' ' << attempt.leaf_cpu_completeness_rows << ' '
-           << attempt.leaf_cpu_completeness_templates << ' '
-           << attempt.leaf_cpu_certified_cost_cells << ' ' << attempt.leaf_cpu_cost_rows_scored
-           << ' ' << attempt.leaf_cpu_cost_rows_reused << ' '
+           << attempt.leaf_broker_batches << ' ' << attempt.leaf_broker_requests << ' '
+           << attempt.leaf_broker_states << ' ' << attempt.peak_leaf_broker_requests << ' '
+           << attempt.peak_leaf_broker_states << ' ' << attempt.leaf_cost_batches << ' '
+           << attempt.leaf_cost_tasks << ' ' << attempt.leaf_cost_cells << ' '
+           << attempt.leaf_cursor_searches_started << ' ' << attempt.leaf_cuda_cost_batches << ' '
+           << attempt.leaf_cpu_long_tail_cells << ' ' << attempt.leaf_cost_rows_consumed << ' '
+           << attempt.leaf_candidate_templates_rechecked << ' '
+           << attempt.leaf_cpu_completeness_rows << ' ' << attempt.leaf_cpu_completeness_templates
+           << ' ' << attempt.leaf_cpu_certified_cost_cells << ' '
+           << attempt.leaf_cpu_cost_rows_scored << ' ' << attempt.leaf_cpu_cost_rows_reused << ' '
            << attempt.leaf_cpu_parallel_cost_batches << ' ' << attempt.leaf_cpu_parallel_cost_cells
            << ' ' << attempt.peak_leaf_cpu_cost_threads << ' '
            << attempt.peak_leaf_device_cache_bytes << ' ' << attempt.path_append_selected_device
@@ -1362,6 +1376,7 @@ void HtScanCommand(const Arguments& arguments) {
               << " status=" << HtSearchStatusName(attempt.status)
               << " states=" << attempt.states_expanded << " replies=" << attempt.replies_expanded
               << " leaf_calls=" << attempt.leaf_calls
+              << " speculation_width=" << attempt.speculation_width
               << " assigned_device=" << attempt.assigned_device
               << " propagation_backend=" << attempt.propagation_backend
               << " selected_device=" << attempt.selected_device
@@ -1371,6 +1386,8 @@ void HtScanCommand(const Arguments& arguments) {
               << " hamilton_reply_device=" << attempt.hamilton_reply_selected_device
               << " end_reply_device=" << attempt.end_reply_selected_device
               << " leaf_frontier_batches=" << attempt.leaf_frontier_batches
+              << " leaf_broker_batches=" << attempt.leaf_broker_batches
+              << " peak_leaf_broker_states=" << attempt.peak_leaf_broker_states
               << " leaf_cost_batches=" << attempt.leaf_cost_batches
               << " leaf_cost_cells=" << attempt.leaf_cost_cells << " work_graph_ms=" << std::fixed
               << std::setprecision(3) << attempt.work_graph_ms << " leaf_ms=" << attempt.leaf_ms
@@ -1399,7 +1416,10 @@ void HtScanCommand(const Arguments& arguments) {
   }
   std::cout << "scan_status=OK target_order=" << HtTargetOrderName(options.target_order)
             << " scheduler=" << HtSchedulerName(options.wavefront_options.scheduler)
-            << " speculation_width=" << ResolvedSpeculationWidth(options.wavefront_options)
+            << " speculation_width="
+            << (options.wavefront_options.scheduler == cudaee::HtScheduler::kTransposed
+                    ? scan.peak_speculation_width
+                    : ResolvedSpeculationWidth(options.wavefront_options))
             << " eligible=" << scan.eligible_targets << " attempted=" << scan.attempts.size()
             << " proven=" << scan.proven_targets << " unresolved=" << scan.unresolved_targets
             << " committed=" << scan.elimination.proof.size()
@@ -1411,6 +1431,9 @@ void HtScanCommand(const Arguments& arguments) {
             << " target_devices=" << TargetDevicesName(options.target_devices)
             << " target_workers=" << scan.target_workers
             << " target_parallel=" << (scan.target_parallel ? 1 : 0)
+            << " leaf_broker_batches=" << scan.leaf_broker_batches
+            << " leaf_broker_requests=" << scan.leaf_broker_requests
+            << " peak_leaf_broker_states=" << scan.peak_leaf_broker_states
             << " reply_cuda_batches=" << scan.reply_cuda_batches
             << " reply_cuda_tasks_submitted=" << scan.reply_cuda_tasks_submitted
             << " reply_graph_cache_hits=" << scan.reply_cuda_graph_cache_hits

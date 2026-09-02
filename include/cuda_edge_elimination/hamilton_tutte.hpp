@@ -259,6 +259,12 @@ struct HtWavefrontResult {
   std::uint64_t leaf_frontier_states{};
   std::uint64_t leaf_bucket_count{};
   std::uint64_t peak_leaf_frontier_batch{};
+  // broker 指标按实际物理合批计数；frontier 指标仍保留每个 target 的逻辑窗口口径。
+  std::uint64_t leaf_broker_batches{};
+  std::uint64_t leaf_broker_requests{};
+  std::uint64_t leaf_broker_states{};
+  std::uint64_t peak_leaf_broker_requests{};
+  std::uint64_t peak_leaf_broker_states{};
   std::uint64_t leaf_cost_batches{};
   std::uint64_t leaf_cost_tasks{};
   std::uint64_t leaf_cost_cells{};
@@ -471,6 +477,8 @@ void WriteHtRecursiveProof(const std::filesystem::path& path, const HtRecursiveP
 
 namespace detail {
 
+class TransposedLeafBroker;
+
 // 构造时完整验证 HT graph；仅供同一同步只读作用域内的内部 batch API 复用。
 class HtGraphValidationBinding {
 public:
@@ -492,7 +500,8 @@ ProveEdgeByWavefrontHtBoundToSnapshot(const GraphSnapshot& graph, NodeEdge targe
 ProveEdgeByTransposedHtBoundToSnapshot(const GraphSnapshot& graph, NodeEdge target_edge,
                                        const HtWavefrontOptions& options,
                                        const KOptSnapshotBinding& snapshot_binding,
-                                       const HtGraphValidationBinding& graph_validation_binding);
+                                       const HtGraphValidationBinding& graph_validation_binding,
+                                       TransposedLeafBroker* leaf_broker = nullptr);
 
 [[nodiscard]] HtCdBatchResult
 EvaluateHtCdCandidatesBoundToValidatedGraph(const GraphSnapshot& graph, NodeEdge target_edge,

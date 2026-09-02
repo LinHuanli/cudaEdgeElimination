@@ -18,6 +18,14 @@ std::vector<std::int64_t> EvaluateKOptTemplateCostsCuda(const GraphSnapshot&,
   throw std::runtime_error("当前二进制未编译 CUDA k-opt cost 后端");
 }
 
+std::vector<std::uint64_t> EvaluateKOptCandidateMasksCuda(const GraphSnapshot&,
+                                                          const KOptReconnectTable&,
+                                                          const std::vector<KOptCostTask>&,
+                                                          std::uint32_t*, int*,
+                                                          KOptCudaCacheUsage*) {
+  throw std::runtime_error("当前二进制未编译 CUDA k-opt candidate 后端");
+}
+
 void ClearKOptCostCudaCache() { ClearExactTourCostCudaCache(); }
 
 } // namespace cudaee::detail

@@ -242,6 +242,31 @@ void TestKOptCostMatrixCpuCuda() {
                   cached.cuda_cache.resident_bytes == gpu.cuda_cache.resident_bytes,
               "repeated CUDA k-opt batch reuses the exact resident snapshot and workspace");
       }
+
+      std::uint32_t words_per_task = 0U;
+      int candidate_device = -1;
+      cudaee::KOptCudaCacheUsage candidate_cache;
+      const std::vector<std::uint64_t> candidate_masks =
+          cudaee::detail::EvaluateKOptCandidateMasksCuda(
+              graph, reconnect_table, tasks, &words_per_task, &candidate_device, &candidate_cache);
+      const std::uint32_t expected_words =
+          static_cast<std::uint32_t>((reconnect_table.templates.size() + 63U) / 64U);
+      std::vector<std::uint64_t> expected_masks(tasks.size() * expected_words, 0U);
+      for (std::size_t task_index = 0U; task_index < tasks.size(); ++task_index) {
+        for (std::size_t template_index = 0U; template_index < reconnect_table.templates.size();
+             ++template_index) {
+          const std::size_t cell = task_index * reconnect_table.templates.size() + template_index;
+          if (cpu.added_costs[cell] < tasks[task_index].deleted_cost) {
+            expected_masks[task_index * expected_words + template_index / 64U] |=
+                std::uint64_t{1} << (template_index % 64U);
+          }
+        }
+      }
+      Check(words_per_task == expected_words && candidate_masks == expected_masks,
+            "CUDA candidate mask matches the exact CPU cost predicate");
+      Check(candidate_device == gpu.selected_device && candidate_cache.snapshot_hit &&
+                candidate_cache.template_hit && candidate_cache.resident_bytes > 0U,
+            "CUDA candidate mask reuses the selected snapshot and template cache");
     }
 #endif
   }
@@ -713,6 +738,41 @@ void TestNoImprovementAndBudget() {
             cudaee::SerializePathSystemKOptProof(bound_cursor_batch.proofs[1]) ==
                 cudaee::SerializePathSystemKOptProof(cursor_batch.proofs[1]),
         "snapshot-bound batches preserve canonical work and proof bytes");
+
+  const std::vector<std::optional<cudaee::NodeEdge>> heterogeneous_required = {
+      cudaee::NodeEdge{0, 1}, cudaee::NodeEdge{1, 2}};
+  const cudaee::PathSystemKOptBatchResult heterogeneous_batch =
+      cudaee::ProvePathSystemsByKOptWithRequiredEdges(seven_node_graph,
+                                                      {seven_node_paths, seven_node_paths},
+                                                      heterogeneous_required, cursor_options);
+  const cudaee::PathSystemKOptProof second_required_scalar = cudaee::ProvePathSystemByKOpt(
+      seven_node_graph, seven_node_paths, heterogeneous_required[1], cursor_options);
+  std::string heterogeneous_reason;
+  Check(heterogeneous_batch.cpu_verified && heterogeneous_batch.proofs.size() == 2U,
+        "heterogeneous leaf batch returns one CPU-certified proof per request");
+  Check(cudaee::SerializePathSystemKOptProof(heterogeneous_batch.proofs[0]) ==
+            cudaee::SerializePathSystemKOptProof(scalar_cursor),
+        "heterogeneous leaf batch preserves the first target's canonical scalar proof");
+  Check(cudaee::SerializePathSystemKOptProof(heterogeneous_batch.proofs[1]) ==
+            cudaee::SerializePathSystemKOptProof(second_required_scalar),
+        "heterogeneous leaf batch preserves the second target's canonical scalar proof");
+  for (std::size_t index = 0U; index < heterogeneous_batch.proofs.size(); ++index) {
+    if (heterogeneous_batch.proofs[index].proven) {
+      Check(cudaee::VerifyPathSystemKOptProof(
+                seven_node_graph, seven_node_paths, heterogeneous_required[index],
+                heterogeneous_batch.proofs[index], &heterogeneous_reason),
+            heterogeneous_reason);
+    }
+  }
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::ProvePathSystemsByKOptWithRequiredEdges(
+            seven_node_graph, {seven_node_paths, seven_node_paths}, {cudaee::NodeEdge{0, 1}},
+            cursor_options);
+        static_cast<void>(ignored);
+      },
+      "heterogeneous leaf batch rejects a required-edge cardinality mismatch");
+
   cudaee::GraphSnapshot copied_seven_node_graph = seven_node_graph;
   bool mismatched_binding_rejected = false;
   try {

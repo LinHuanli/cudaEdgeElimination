@@ -35,6 +35,7 @@ set(CUDAEE_SOURCES
     src/cpu/hamilton_tutte_recursive.cpp
     src/cpu/hamilton_tutte_transposed.cpp
     src/cpu/hamilton_tutte_wavefront.cpp
+    src/cpu/transposed_leaf_broker.cpp
     src/cpu/ht_path_append.cpp
     src/cpu/jv_elimination.cpp
     src/cpu/kopt_search.cpp

@@ -2,6 +2,8 @@
 
 #include "cuda_edge_elimination/cuda_device_affinity.hpp"
 
+#include "transposed_leaf_broker.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -88,18 +90,34 @@ struct HtTargetEvaluation {
   std::optional<HtShortCircuitTrace> short_circuit_trace;
 };
 
-HtTargetEvaluation
-EvaluateHtTarget(const GraphSnapshot& graph, const std::int32_t edge_id, const int assigned_device,
-                 const HtWavefrontOptions& options,
-                 const detail::KOptSnapshotBinding& snapshot_binding,
-                 const detail::HtGraphValidationBinding& graph_validation_binding,
-                 const std::uint64_t snapshot_hash) {
+class LeafBrokerWorkerGuard {
+public:
+  explicit LeafBrokerWorkerGuard(detail::TransposedLeafBroker* const broker) : broker_(broker) {}
+  ~LeafBrokerWorkerGuard() {
+    if (broker_ != nullptr) {
+      broker_->FinishWorkers();
+    }
+  }
+
+  LeafBrokerWorkerGuard(const LeafBrokerWorkerGuard&) = delete;
+  LeafBrokerWorkerGuard& operator=(const LeafBrokerWorkerGuard&) = delete;
+
+private:
+  detail::TransposedLeafBroker* broker_{};
+};
+
+HtTargetEvaluation EvaluateHtTarget(
+    const GraphSnapshot& graph, const std::int32_t edge_id, const int assigned_device,
+    const HtWavefrontOptions& options, const detail::KOptSnapshotBinding& snapshot_binding,
+    const detail::HtGraphValidationBinding& graph_validation_binding,
+    const std::uint64_t snapshot_hash, detail::TransposedLeafBroker* const leaf_broker) {
   const Edge& edge = graph.edges[static_cast<std::size_t>(edge_id)];
   const auto search_start = std::chrono::steady_clock::now();
   HtWavefrontResult wavefront =
       options.scheduler == HtScheduler::kTransposed
-          ? detail::ProveEdgeByTransposedHtBoundToSnapshot(
-                graph, {edge.u, edge.v}, options, snapshot_binding, graph_validation_binding)
+          ? detail::ProveEdgeByTransposedHtBoundToSnapshot(graph, {edge.u, edge.v}, options,
+                                                           snapshot_binding,
+                                                           graph_validation_binding, leaf_broker)
           : detail::ProveEdgeByWavefrontHtBoundToSnapshot(
                 graph, {edge.u, edge.v}, options, snapshot_binding, graph_validation_binding);
 
@@ -113,6 +131,7 @@ EvaluateHtTarget(const GraphSnapshot& graph, const std::int32_t edge_id, const i
   attempt.leaf_calls = wavefront.proof.leaf_calls;
   attempt.moves_generated = wavefront.moves_generated;
   attempt.peak_frontier = wavefront.peak_frontier;
+  attempt.speculation_width = wavefront.speculation_width;
   attempt.assigned_device = assigned_device;
   attempt.propagation_backend = wavefront.propagation_backend;
   attempt.selected_device = wavefront.selected_device;
@@ -126,6 +145,11 @@ EvaluateHtTarget(const GraphSnapshot& graph, const std::int32_t edge_id, const i
   attempt.leaf_frontier_states = wavefront.leaf_frontier_states;
   attempt.leaf_bucket_count = wavefront.leaf_bucket_count;
   attempt.peak_leaf_frontier_batch = wavefront.peak_leaf_frontier_batch;
+  attempt.leaf_broker_batches = wavefront.leaf_broker_batches;
+  attempt.leaf_broker_requests = wavefront.leaf_broker_requests;
+  attempt.leaf_broker_states = wavefront.leaf_broker_states;
+  attempt.peak_leaf_broker_requests = wavefront.peak_leaf_broker_requests;
+  attempt.peak_leaf_broker_states = wavefront.peak_leaf_broker_states;
   attempt.leaf_cost_batches = wavefront.leaf_cost_batches;
   attempt.leaf_cost_tasks = wavefront.leaf_cost_tasks;
   attempt.leaf_cost_cells = wavefront.leaf_cost_cells;
@@ -227,11 +251,19 @@ void AccumulateHtAttempt(HtScanResult* const scan, const HtScanAttempt& attempt)
   scan->replies_expanded += attempt.replies_expanded;
   scan->leaf_calls += attempt.leaf_calls;
   scan->moves_generated += attempt.moves_generated;
+  scan->peak_speculation_width = std::max(scan->peak_speculation_width, attempt.speculation_width);
   scan->leaf_frontier_batches += attempt.leaf_frontier_batches;
   scan->leaf_frontier_states += attempt.leaf_frontier_states;
   scan->leaf_bucket_count += attempt.leaf_bucket_count;
   scan->peak_leaf_frontier_batch =
       std::max(scan->peak_leaf_frontier_batch, attempt.peak_leaf_frontier_batch);
+  scan->leaf_broker_batches += attempt.leaf_broker_batches;
+  scan->leaf_broker_requests += attempt.leaf_broker_requests;
+  scan->leaf_broker_states += attempt.leaf_broker_states;
+  scan->peak_leaf_broker_requests =
+      std::max(scan->peak_leaf_broker_requests, attempt.peak_leaf_broker_requests);
+  scan->peak_leaf_broker_states =
+      std::max(scan->peak_leaf_broker_states, attempt.peak_leaf_broker_states);
   scan->leaf_cost_batches += attempt.leaf_cost_batches;
   scan->leaf_cost_tasks += attempt.leaf_cost_tasks;
   scan->leaf_cost_cells += attempt.leaf_cost_cells;
@@ -406,7 +438,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
       const std::int32_t edge_id = targets[static_cast<std::size_t>(target_index)];
       ConsumeHtTargetEvaluation(EvaluateHtTarget(*graph, edge_id, -1, options.wavefront_options,
                                                  snapshot_binding, graph_validation_binding,
-                                                 snapshot_hash),
+                                                 snapshot_hash, nullptr),
                                 &scan, &proven);
     }
   } else if (attempt_count == 0U) {
@@ -418,39 +450,62 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     // jthread 让线程构造中途失败时也能先 join 已启动 worker，避免 std::terminate。
     std::vector<std::jthread> workers;
     workers.reserve(worker_count);
-    for (std::size_t worker = 0U; worker < worker_count; ++worker) {
-      workers.emplace_back([&, worker] {
-        // 连设备绑定和错误消息分配也纳入捕获，线程入口不得让异常逃逸并触发 terminate。
-        std::size_t failure_slot = worker;
-        try {
-          const int device = options.target_devices.empty()
-                                 ? -1
-                                 : options.target_devices[worker % options.target_devices.size()];
-          if (device >= 0) {
-            std::string reason;
-            if (!detail::SetCudaDevicePreferenceForCurrentThread(device, &reason)) {
-              throw std::runtime_error("HT target worker 无法绑定 CUDA device " +
-                                       std::to_string(device) + ": " + reason);
+    std::unique_ptr<detail::TransposedLeafBroker> leaf_broker;
+    if (options.wavefront_options.scheduler == HtScheduler::kTransposed && worker_count > 1U &&
+        options.wavefront_options.search_options.root_options.leaf_options.cost_backend !=
+            PathCompatibilityBackend::kCpu) {
+      const int broker_device =
+          options.target_devices.empty() ? -1 : options.target_devices.front();
+      leaf_broker = std::make_unique<detail::TransposedLeafBroker>(
+          *graph, snapshot_binding,
+          options.wavefront_options.search_options.root_options.leaf_options, worker_count,
+          broker_device);
+    }
+    std::exception_ptr worker_launch_failure;
+    try {
+      for (std::size_t worker = 0U; worker < worker_count; ++worker) {
+        workers.emplace_back([&, worker] {
+          LeafBrokerWorkerGuard broker_guard(leaf_broker.get());
+          // 连设备绑定和错误消息分配也纳入捕获，线程入口不得让异常逃逸并触发 terminate。
+          std::size_t failure_slot = worker;
+          try {
+            const int device = options.target_devices.empty()
+                                   ? -1
+                                   : options.target_devices[worker % options.target_devices.size()];
+            if (device >= 0) {
+              std::string reason;
+              if (!detail::SetCudaDevicePreferenceForCurrentThread(device, &reason)) {
+                throw std::runtime_error("HT target worker 无法绑定 CUDA device " +
+                                         std::to_string(device) + ": " + reason);
+              }
             }
+            for (std::size_t relative = worker; relative < evaluations.size();
+                 relative += worker_count) {
+              failure_slot = relative;
+              const std::uint64_t target_index =
+                  options.target_offset + static_cast<std::uint64_t>(relative);
+              const std::int32_t edge_id = targets[static_cast<std::size_t>(target_index)];
+              evaluations[relative] = std::make_unique<HtTargetEvaluation>(EvaluateHtTarget(
+                  *graph, edge_id, device, options.wavefront_options, snapshot_binding,
+                  graph_validation_binding, snapshot_hash, leaf_broker.get()));
+            }
+          } catch (...) {
+            failures[failure_slot] = std::current_exception();
+            // 同一 worker 后续 target 不再运行；整批仍等待其他只读 worker 安全结束。
           }
-          for (std::size_t relative = worker; relative < evaluations.size();
-               relative += worker_count) {
-            failure_slot = relative;
-            const std::uint64_t target_index =
-                options.target_offset + static_cast<std::uint64_t>(relative);
-            const std::int32_t edge_id = targets[static_cast<std::size_t>(target_index)];
-            evaluations[relative] = std::make_unique<HtTargetEvaluation>(
-                EvaluateHtTarget(*graph, edge_id, device, options.wavefront_options,
-                                 snapshot_binding, graph_validation_binding, snapshot_hash));
-          }
-        } catch (...) {
-          failures[failure_slot] = std::current_exception();
-          // 同一 worker 后续 target 不再运行；整批仍等待其他只读 worker 安全结束。
-        }
-      });
+        });
+      }
+    } catch (...) {
+      worker_launch_failure = std::current_exception();
+      if (leaf_broker != nullptr) {
+        leaf_broker->FinishWorkers(worker_count - workers.size());
+      }
     }
     for (std::jthread& worker : workers) {
       worker.join();
+    }
+    if (worker_launch_failure != nullptr) {
+      std::rethrow_exception(worker_launch_failure);
     }
     for (const std::exception_ptr& failure : failures) {
       if (failure != nullptr) {

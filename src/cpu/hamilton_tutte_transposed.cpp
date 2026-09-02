@@ -1,5 +1,7 @@
 #include "cuda_edge_elimination/hamilton_tutte.hpp"
 
+#include "transposed_leaf_broker.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -251,13 +253,24 @@ struct TransposedContext {
   NodeEdge target;
   const HtRecursiveOptions* options{};
   const detail::KOptSnapshotBinding* snapshot_binding{};
+  detail::TransposedLeafBroker* leaf_broker{};
   HtWavefrontResult* result{};
-  std::uint32_t speculation_width{1U};
+  std::uint32_t requested_speculation_width{};
   PointCandidateOrderCache point_candidate_order;
   std::vector<std::optional<std::vector<HtNeighborPair>>> point_reply_cache;
   std::unordered_map<std::uint64_t, std::vector<NodeEdge>> end_reply_cache;
   bool budget_exhausted{false};
 };
+
+std::uint32_t ResolveSpeculationWidth(TransposedContext* const context) {
+  const std::uint32_t width =
+      context->requested_speculation_width != 0U
+          ? context->requested_speculation_width
+          : (context->leaf_broker != nullptr ? context->leaf_broker->SuggestedSpeculationWidth()
+                                             : 1U);
+  context->result->speculation_width = std::max(context->result->speculation_width, width);
+  return width;
+}
 
 bool MoveReplyCountAllowed(const TransposedContext& context, const std::uint64_t count) {
   return context.options->max_replies_per_move == 0U ||
@@ -284,12 +297,36 @@ void AddMetric(std::uint64_t* const destination, const std::uint64_t value,
 }
 
 void RecordLeafBatch(TransposedContext* const context, const PathSystemKOptBatchResult& batch,
-                     const std::size_t state_count) {
+                     const std::size_t state_count, const bool owns_physical_metrics,
+                     const std::uint64_t physical_request_count,
+                     const std::uint64_t physical_state_count) {
   HtWavefrontResult& result = *context->result;
   AddMetric(&result.leaf_frontier_batches, 1U, "leaf batch");
   AddMetric(&result.leaf_frontier_states, state_count, "leaf states");
   result.peak_leaf_frontier_batch =
       std::max(result.peak_leaf_frontier_batch, static_cast<std::uint64_t>(state_count));
+  result.leaf_cpu_verified = result.leaf_frontier_batches == 1U
+                                 ? batch.cpu_verified
+                                 : result.leaf_cpu_verified && batch.cpu_verified;
+  if (result.leaf_cost_backend == "none") {
+    result.leaf_cost_backend = batch.cost_backend;
+  } else if (result.leaf_cost_backend != batch.cost_backend) {
+    result.leaf_cost_backend = "mixed";
+  }
+  if (batch.selected_device >= 0) {
+    result.leaf_cost_selected_device = batch.selected_device;
+  }
+  if (!owns_physical_metrics) {
+    return;
+  }
+  if (physical_request_count != 0U) {
+    AddMetric(&result.leaf_broker_batches, 1U, "leaf broker batches");
+    AddMetric(&result.leaf_broker_requests, physical_request_count, "leaf broker requests");
+    AddMetric(&result.leaf_broker_states, physical_state_count, "leaf broker states");
+    result.peak_leaf_broker_requests =
+        std::max(result.peak_leaf_broker_requests, physical_request_count);
+    result.peak_leaf_broker_states = std::max(result.peak_leaf_broker_states, physical_state_count);
+  }
   AddMetric(&result.leaf_cost_batches, batch.cost_batches, "cost batches");
   AddMetric(&result.leaf_cost_tasks, batch.cost_tasks, "cost tasks");
   AddMetric(&result.leaf_cost_cells, batch.cost_cells, "cost cells");
@@ -334,35 +371,32 @@ void RecordLeafBatch(TransposedContext* const context, const PathSystemKOptBatch
   result.leaf_scalar_search_ms += batch.scalar_search_ms;
   result.leaf_apply_ms += batch.apply_ms;
   result.leaf_proof_verify_ms += batch.proof_verify_ms;
-  result.leaf_cpu_verified = result.leaf_frontier_batches == 1U
-                                 ? batch.cpu_verified
-                                 : result.leaf_cpu_verified && batch.cpu_verified;
-  if (result.leaf_cost_backend == "none") {
-    result.leaf_cost_backend = batch.cost_backend;
-  } else if (result.leaf_cost_backend != batch.cost_backend) {
-    result.leaf_cost_backend = "mixed";
-  }
-  if (batch.selected_device >= 0) {
-    result.leaf_cost_selected_device = batch.selected_device;
-  }
 }
 
-std::vector<PathSystemKOptProof>
-EvaluateLeafWindow(TransposedContext* const context,
-                   const std::vector<NormalizedPathSystem>& states) {
+std::vector<PathSystemKOptProof> EvaluateLeafWindow(TransposedContext* const context,
+                                                    std::vector<NormalizedPathSystem> states) {
   if (states.empty()) {
     return {};
   }
+  const std::size_t state_count = states.size();
   const SteadyClock::time_point begin = SteadyClock::now();
-  const PathSystemKOptBatchResult batch = detail::ProvePathSystemsByKOptBoundToSnapshot(
-      *context->graph, states, context->target, *context->snapshot_binding,
-      context->options->root_options.leaf_options);
+  detail::TransposedLeafBatchResponse response;
+  if (context->leaf_broker != nullptr) {
+    response = context->leaf_broker->Evaluate(std::move(states), context->target);
+  } else {
+    response.batch = detail::ProvePathSystemsByKOptBoundToSnapshot(
+        *context->graph, states, context->target, *context->snapshot_binding,
+        context->options->root_options.leaf_options);
+    response.owns_physical_metrics = true;
+  }
   context->result->leaf_ms += ElapsedMilliseconds(begin);
-  if (batch.proofs.size() != states.size() || !batch.cpu_verified) {
+  PathSystemKOptBatchResult& batch = response.batch;
+  if (batch.proofs.size() != state_count || !batch.cpu_verified) {
     throw std::logic_error("转置 HT leaf batch 未返回完整 CPU 认证结果");
   }
-  RecordLeafBatch(context, batch, states.size());
-  return batch.proofs;
+  RecordLeafBatch(context, batch, state_count, response.owns_physical_metrics,
+                  response.physical_request_count, response.physical_state_count);
+  return std::move(batch.proofs);
 }
 
 std::optional<std::uint32_t> ProvePreparedState(TransposedContext* context,
@@ -386,10 +420,10 @@ bool TryPointMove(TransposedContext* const context, const std::uint32_t node_ind
   const std::size_t checkpoint = context->result->proof.nodes.size();
   std::vector<HtTreeReply> records;
   records.reserve(candidate.replies.size());
-  for (std::size_t begin = 0U; begin < candidate.replies.size();
-       begin += context->speculation_width) {
+  for (std::size_t begin = 0U; begin < candidate.replies.size();) {
+    const std::uint32_t speculation_width = ResolveSpeculationWidth(context);
     const std::size_t end =
-        begin + std::min<std::size_t>(context->speculation_width, candidate.replies.size() - begin);
+        begin + std::min<std::size_t>(speculation_width, candidate.replies.size() - begin);
     std::vector<NormalizedPathSystem> valid_states;
     std::vector<std::optional<std::size_t>> proof_indices(end - begin);
     std::vector<NormalizedPathSystem> normalized(end - begin);
@@ -402,7 +436,8 @@ bool TryPointMove(TransposedContext* const context, const std::uint32_t node_ind
         valid_states.push_back(normalized[index - begin]);
       }
     }
-    std::vector<PathSystemKOptProof> leaf_proofs = EvaluateLeafWindow(context, valid_states);
+    std::vector<PathSystemKOptProof> leaf_proofs =
+        EvaluateLeafWindow(context, std::move(valid_states));
     for (std::size_t index = begin; index < end; ++index) {
       if (!ConsumeReply(context)) {
         AddMetric(&context->result->speculative_leaf_tasks,
@@ -433,6 +468,7 @@ bool TryPointMove(TransposedContext* const context, const std::uint32_t node_ind
       record.child_index = *child;
       records.push_back(std::move(record));
     }
+    begin = end;
   }
   HtTreeNode& node = context->result->proof.nodes[node_index];
   node.move_type = HtMoveType::kPoint;
@@ -453,10 +489,10 @@ bool TryEndMove(TransposedContext* const context, const std::uint32_t node_index
   const std::size_t checkpoint = context->result->proof.nodes.size();
   std::vector<HtTreeReply> records;
   records.reserve(candidate.replies.size());
-  for (std::size_t begin = 0U; begin < candidate.replies.size();
-       begin += context->speculation_width) {
+  for (std::size_t begin = 0U; begin < candidate.replies.size();) {
+    const std::uint32_t speculation_width = ResolveSpeculationWidth(context);
     const std::size_t end =
-        begin + std::min<std::size_t>(context->speculation_width, candidate.replies.size() - begin);
+        begin + std::min<std::size_t>(speculation_width, candidate.replies.size() - begin);
     std::vector<NormalizedPathSystem> valid_states;
     std::vector<std::optional<std::size_t>> proof_indices(end - begin);
     std::vector<NormalizedPathSystem> normalized(end - begin);
@@ -470,7 +506,8 @@ bool TryEndMove(TransposedContext* const context, const std::uint32_t node_index
         valid_states.push_back(normalized[index - begin]);
       }
     }
-    std::vector<PathSystemKOptProof> leaf_proofs = EvaluateLeafWindow(context, valid_states);
+    std::vector<PathSystemKOptProof> leaf_proofs =
+        EvaluateLeafWindow(context, std::move(valid_states));
     for (std::size_t index = begin; index < end; ++index) {
       if (!ConsumeReply(context)) {
         AddMetric(&context->result->speculative_leaf_tasks,
@@ -501,6 +538,7 @@ bool TryEndMove(TransposedContext* const context, const std::uint32_t node_index
       record.child_index = *child;
       records.push_back(std::move(record));
     }
+    begin = end;
   }
   HtTreeNode& node = context->result->proof.nodes[node_index];
   node.move_type = HtMoveType::kEnd;
@@ -602,9 +640,10 @@ bool TryRootMove(TransposedContext* const context, const HtCdCandidate& candidat
   const std::size_t checkpoint = context->result->proof.nodes.size();
   std::vector<HtTreeReply> records;
   records.reserve(replies.size());
-  for (std::size_t begin = 0U; begin < replies.size(); begin += context->speculation_width) {
+  for (std::size_t begin = 0U; begin < replies.size();) {
+    const std::uint32_t speculation_width = ResolveSpeculationWidth(context);
     const std::size_t end =
-        begin + std::min<std::size_t>(context->speculation_width, replies.size() - begin);
+        begin + std::min<std::size_t>(speculation_width, replies.size() - begin);
     std::vector<NormalizedPathSystem> valid_states;
     std::vector<std::optional<std::size_t>> proof_indices(end - begin);
     std::vector<NormalizedPathSystem> normalized(end - begin);
@@ -620,7 +659,8 @@ bool TryRootMove(TransposedContext* const context, const HtCdCandidate& candidat
         valid_states.push_back(normalized[index - begin]);
       }
     }
-    std::vector<PathSystemKOptProof> leaf_proofs = EvaluateLeafWindow(context, valid_states);
+    std::vector<PathSystemKOptProof> leaf_proofs =
+        EvaluateLeafWindow(context, std::move(valid_states));
     for (std::size_t index = begin; index < end; ++index) {
       if (!ConsumeReply(context)) {
         AddMetric(&context->result->speculative_leaf_tasks,
@@ -651,6 +691,7 @@ bool TryRootMove(TransposedContext* const context, const HtCdCandidate& candidat
       record.child_index = *child;
       records.push_back(std::move(record));
     }
+    begin = end;
   }
   HtTreeNode& root = context->result->proof.nodes.front();
   root.move_type = HtMoveType::kCd;
@@ -660,12 +701,11 @@ bool TryRootMove(TransposedContext* const context, const HtCdCandidate& candidat
   return true;
 }
 
-HtWavefrontResult
-ProveEdgeByTransposedHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target,
-                            const HtWavefrontOptions& options,
-                            const detail::KOptSnapshotBinding* snapshot_binding,
-                            const detail::HtGraphValidationBinding* graph_validation_binding,
-                            const bool verify_extracted_proof) {
+HtWavefrontResult ProveEdgeByTransposedHtImpl(
+    const GraphSnapshot& graph, const NodeEdge raw_target, const HtWavefrontOptions& options,
+    const detail::KOptSnapshotBinding* snapshot_binding,
+    const detail::HtGraphValidationBinding* graph_validation_binding,
+    detail::TransposedLeafBroker* const leaf_broker, const bool verify_extracted_proof) {
   HtWavefrontResult result;
   result.scheduler = "transposed";
   result.propagation_backend = "cpu-short-circuit";
@@ -689,8 +729,8 @@ ProveEdgeByTransposedHtImpl(const GraphSnapshot& graph, const NodeEdge raw_targe
     result.proof.reason = "转置 HT 当前只支持 CPU path-append/reply；GPU leaf 仍可使用";
     return result;
   }
-  // 当前 host-window 原型尚未跨 target 汇聚 leaf。d15112 宽度扫描显示大于 1
-  // 只会扩大投机空洞，因此 auto 保持严格短路；真正的跨目标 broker 落地后再调参。
+  // d15112 宽度扫描显示大于 1 会扩大投机空洞；跨目标 broker 只转置独立 target，
+  // 不改变单棵树的规范 child 顺序，因此 auto 继续保持严格短路。
   result.speculation_width = options.speculation_width == 0U ? 1U : options.speculation_width;
 
   std::optional<detail::KOptSnapshotBinding> owned_snapshot;
@@ -744,8 +784,9 @@ ProveEdgeByTransposedHtImpl(const GraphSnapshot& graph, const NodeEdge raw_targe
                             .target = proof.target_edge,
                             .options = &options.search_options,
                             .snapshot_binding = snapshot_binding,
+                            .leaf_broker = leaf_broker,
                             .result = &result,
-                            .speculation_width = result.speculation_width,
+                            .requested_speculation_width = options.speculation_width,
                             .point_candidate_order = {},
                             .point_reply_cache =
                                 std::vector<std::optional<std::vector<HtNeighborPair>>>(
@@ -810,19 +851,20 @@ ProveEdgeByTransposedHtImpl(const GraphSnapshot& graph, const NodeEdge raw_targe
 
 HtWavefrontResult ProveEdgeByTransposedHt(const GraphSnapshot& graph, const NodeEdge target_edge,
                                           const HtWavefrontOptions& options) {
-  return ProveEdgeByTransposedHtImpl(graph, target_edge, options, nullptr, nullptr, true);
+  return ProveEdgeByTransposedHtImpl(graph, target_edge, options, nullptr, nullptr, nullptr, true);
 }
 
 HtWavefrontResult detail::ProveEdgeByTransposedHtBoundToSnapshot(
     const GraphSnapshot& graph, const NodeEdge target_edge, const HtWavefrontOptions& options,
     const KOptSnapshotBinding& snapshot_binding,
-    const HtGraphValidationBinding& graph_validation_binding) {
+    const HtGraphValidationBinding& graph_validation_binding,
+    TransposedLeafBroker* const leaf_broker) {
   if (!snapshot_binding.Matches(graph) || !graph_validation_binding.Matches(graph)) {
     throw std::invalid_argument("转置 HT snapshot binding 与图对象不一致");
   }
   // 与 wavefront 一致，scan 中只在原子 epoch 提交前执行一次完整 CPU verifier。
   return ProveEdgeByTransposedHtImpl(graph, target_edge, options, &snapshot_binding,
-                                     &graph_validation_binding, false);
+                                     &graph_validation_binding, leaf_broker, false);
 }
 
 } // namespace cudaee

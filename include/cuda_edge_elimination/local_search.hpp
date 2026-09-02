@@ -69,6 +69,9 @@ struct KOptCostBatchResult {
   std::uint32_t k{};
   std::uint32_t template_count{};
   std::vector<std::int64_t> added_costs;
+  // candidate-only CUDA 使用每 task 的规范模板 bitmask，不把完整 cost matrix 带回主机。
+  std::vector<std::uint64_t> candidate_masks;
+  std::uint32_t candidate_mask_words{};
   std::string backend;
   int selected_device{-1};
   KOptCudaCacheUsage cuda_cache;
@@ -232,6 +235,13 @@ ProvePathSystemByKOpt(const GraphSnapshot& graph, const NormalizedPathSystem& pa
     const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
     const std::optional<NodeEdge>& required_edge, const KOptSearchOptions& options = {});
 
+// 跨目标批处理：每个 path system 使用同下标 required edge，proof 也逐项按该约束复核。
+[[nodiscard]] PathSystemKOptBatchResult
+ProvePathSystemsByKOptWithRequiredEdges(const GraphSnapshot& graph,
+                                        const std::vector<NormalizedPathSystem>& path_systems,
+                                        const std::vector<std::optional<NodeEdge>>& required_edges,
+                                        const KOptSearchOptions& options = {});
+
 [[nodiscard]] bool VerifyPathSystemKOptProof(const GraphSnapshot& graph,
                                              const NormalizedPathSystem& paths,
                                              const std::optional<NodeEdge>& required_edge,
@@ -264,11 +274,27 @@ private:
     const std::optional<NodeEdge>& required_edge, const KOptSnapshotBinding& binding,
     const KOptSearchOptions& options = {});
 
+[[nodiscard]] PathSystemKOptBatchResult ProvePathSystemsByKOptWithRequiredEdgesBoundToSnapshot(
+    const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
+    const std::vector<std::optional<NodeEdge>>& required_edges, const KOptSnapshotBinding& binding,
+    const KOptSearchOptions& options = {});
+
+// 仅供 GPU 调度器：CUDA cost 只筛选候选；每个成功 witness 和最终 proof 仍由 CPU 精确复核。
+[[nodiscard]] PathSystemKOptBatchResult ProvePathSystemsByKOptCandidateOnlyBoundToSnapshot(
+    const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
+    const std::vector<std::optional<NodeEdge>>& required_edges, const KOptSnapshotBinding& binding,
+    const KOptSearchOptions& options = {});
+
 [[nodiscard]] bool KOptCostCudaAvailable(std::string* reason);
 [[nodiscard]] std::vector<std::int64_t>
 EvaluateKOptTemplateCostsCuda(const GraphSnapshot& graph, const KOptReconnectTable& table,
                               const std::vector<KOptCostTask>& tasks, int* selected_device,
                               KOptCudaCacheUsage* cache_usage);
+[[nodiscard]] std::vector<std::uint64_t>
+EvaluateKOptCandidateMasksCuda(const GraphSnapshot& graph, const KOptReconnectTable& table,
+                               const std::vector<KOptCostTask>& tasks,
+                               std::uint32_t* words_per_task, int* selected_device,
+                               KOptCudaCacheUsage* cache_usage);
 
 [[nodiscard]] bool ExactTourCostCudaAvailable(std::string* reason);
 [[nodiscard]] std::vector<std::int64_t>

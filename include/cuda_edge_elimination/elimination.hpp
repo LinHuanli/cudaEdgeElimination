@@ -86,6 +86,7 @@ struct HtScanAttempt {
   std::uint64_t leaf_calls{};
   std::uint64_t moves_generated{};
   std::uint64_t peak_frontier{};
+  std::uint32_t speculation_width{1U};
   // -1 表示顺序执行并由各 CUDA 后端自动选卡。
   int assigned_device{-1};
   std::string propagation_backend{"none"};
@@ -100,6 +101,11 @@ struct HtScanAttempt {
   std::uint64_t leaf_frontier_states{};
   std::uint64_t leaf_bucket_count{};
   std::uint64_t peak_leaf_frontier_batch{};
+  std::uint64_t leaf_broker_batches{};
+  std::uint64_t leaf_broker_requests{};
+  std::uint64_t leaf_broker_states{};
+  std::uint64_t peak_leaf_broker_requests{};
+  std::uint64_t peak_leaf_broker_states{};
   std::uint64_t leaf_cost_batches{};
   std::uint64_t leaf_cost_tasks{};
   std::uint64_t leaf_cost_cells{};
@@ -191,10 +197,16 @@ struct HtScanResult {
   std::uint64_t replies_expanded{};
   std::uint64_t leaf_calls{};
   std::uint64_t moves_generated{};
+  std::uint32_t peak_speculation_width{1U};
   std::uint64_t leaf_frontier_batches{};
   std::uint64_t leaf_frontier_states{};
   std::uint64_t leaf_bucket_count{};
   std::uint64_t peak_leaf_frontier_batch{};
+  std::uint64_t leaf_broker_batches{};
+  std::uint64_t leaf_broker_requests{};
+  std::uint64_t leaf_broker_states{};
+  std::uint64_t peak_leaf_broker_requests{};
+  std::uint64_t peak_leaf_broker_states{};
   std::uint64_t leaf_cost_batches{};
   std::uint64_t leaf_cost_tasks{};
   std::uint64_t leaf_cost_cells{};

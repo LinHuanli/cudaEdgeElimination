@@ -25,17 +25,29 @@ max_targets="${CUDAEE_HT_MAX_TARGETS:-32}"
 target_offset="${CUDAEE_HT_TARGET_OFFSET:-0}"
 cpu_cost_threads="${CUDAEE_CPU_COST_THREADS:-8}"
 hybrid_cost_threads="${CUDAEE_HYBRID_CPU_COST_THREADS:-2}"
+cpu_target_workers="${CUDAEE_CPU_TARGET_WORKERS:-1}"
 hybrid_target_workers="${CUDAEE_HYBRID_TARGET_WORKERS:-4}"
+ht_scheduler="${CUDAEE_HT_SCHEDULER:-wavefront}"
+cpu_speculation="${CUDAEE_CPU_SPECULATION:-1}"
+hybrid_speculation="${CUDAEE_HYBRID_SPECULATION:-1}"
 cuda_preset="${CUDAEE_CUDA_PRESET:-cuda-sm86-release}"
 if [[ ! "${max_targets}" =~ ^[1-9][0-9]*$ || ! "${target_offset}" =~ ^[0-9]+$ ||
       ! "${cpu_cost_threads}" =~ ^[1-8]$ || ! "${hybrid_cost_threads}" =~ ^[1-8]$ ||
+      ! "${cpu_target_workers}" =~ ^[1-9][0-9]*$ ||
       ! "${hybrid_target_workers}" =~ ^[1-9][0-9]*$ ||
+      ! "${cpu_speculation}" =~ ^[1-9][0-9]*$ ||
+      ! "${hybrid_speculation}" =~ ^[1-9][0-9]*$ ||
       ! "${cuda_preset}" =~ ^cuda(-sm[0-9]+)?-release$ ]]; then
   echo "错误：target、线程数或 CUDA preset 参数非法。" >&2
   exit 2
 fi
-if (( hybrid_target_workers > 32 )); then
-  echo "错误：CUDAEE_HYBRID_TARGET_WORKERS 不得超过 32。" >&2
+if [[ "${ht_scheduler}" != "wavefront" && "${ht_scheduler}" != "transposed" ]]; then
+  echo "错误：CUDAEE_HT_SCHEDULER 仅支持 wavefront/transposed。" >&2
+  exit 2
+fi
+if (( cpu_target_workers > 32 || hybrid_target_workers > 32 || cpu_speculation > 256 ||
+      hybrid_speculation > 256 )); then
+  echo "错误：target workers 不得超过 32，speculation 不得超过 256。" >&2
   exit 2
 fi
 
@@ -163,8 +175,6 @@ ht_common=(
   --max-targets "${max_targets}"
   --target-offset "${target_offset}"
   --target-order weight-desc
-  --scheduler wavefront
-  --speculation 1
   --cd-mode missing-or-incompatible
   --max-neighborhood 25
   --max-cd-candidates 5
@@ -189,7 +199,7 @@ ht_common=(
 )
 
 metrics="${run_dir}/metrics.csv"
-echo "mode,run,target_execution_ms,search_ms,total_ms,wall_ms,candidate_ms,work_graph_ms,leaf_ms,immediate_verify_ms,commit_ms,states,replies,leaf_calls,committed" >"${metrics}"
+echo "mode,run,target_execution_ms,search_ms,total_ms,wall_ms,candidate_ms,work_graph_ms,leaf_ms,immediate_verify_ms,commit_ms,states,replies,leaf_calls,committed,leaf_broker_batches,leaf_broker_states,leaf_cost_batches,leaf_cost_cells,leaf_cost_evaluate_ms,leaf_cursor_consume_ms,peak_leaf_device_cache_bytes" >"${metrics}"
 
 read_field() {
   awk -v key="$2" '$1 == key { print $2; found = 1 } END { if (!found) exit 1 }' "$1"
@@ -206,7 +216,9 @@ run_scan() {
     binary="${cpu_binary}"
     omp_threads="${cpu_cost_threads}"
     backend_arguments=(
-      --target-workers 1
+      --target-workers "${cpu_target_workers}"
+      --scheduler "${ht_scheduler}"
+      --speculation "${cpu_speculation}"
       --backend cpu
       --leaf-backend cpu
       --reply-backend cpu
@@ -223,6 +235,8 @@ run_scan() {
     backend_arguments=(
       --target-devices 0
       --target-workers "${hybrid_target_workers}"
+      --scheduler "${ht_scheduler}"
+      --speculation "${hybrid_speculation}"
       --backend cuda
       --leaf-backend cuda
       --reply-backend cpu
@@ -254,8 +268,8 @@ run_scan() {
     >"${prefix}.work-signature"
 
   if [[ "${mode}" == "cpu" ]]; then
-    [[ "$(read_field "${report}" target_workers)" == "1" ]]
-    [[ "$(read_field "${report}" target_parallel)" == "0" ]]
+    [[ "$(read_field "${report}" target_workers)" == "${cpu_target_workers}" ]]
+    [[ "$(read_field "${report}" target_parallel)" == "$((cpu_target_workers > 1 ? 1 : 0))" ]]
   else
     [[ "$(read_field "${report}" target_workers)" == "${hybrid_target_workers}" ]]
     if (( hybrid_target_workers > 1 )); then
@@ -278,11 +292,11 @@ run_scan() {
   fi
 
   if [[ "${run}" != "warm" ]]; then
-    echo "${mode},${run},$(read_field "${report}" target_execution_ms),$(read_field "${report}" search_ms),$(read_field "${report}" total_ms),${wall_ms},$(read_field "${report}" candidate_ms),$(read_field "${report}" work_graph_ms),$(read_field "${report}" leaf_ms),$(read_field "${report}" immediate_verify_ms),$(read_field "${report}" commit_ms),$(read_field "${report}" states_expanded),$(read_field "${report}" replies_expanded),$(read_field "${report}" leaf_calls),$(read_field "${report}" committed_targets)" >>"${metrics}"
+    echo "${mode},${run},$(read_field "${report}" target_execution_ms),$(read_field "${report}" search_ms),$(read_field "${report}" total_ms),${wall_ms},$(read_field "${report}" candidate_ms),$(read_field "${report}" work_graph_ms),$(read_field "${report}" leaf_ms),$(read_field "${report}" immediate_verify_ms),$(read_field "${report}" commit_ms),$(read_field "${report}" states_expanded),$(read_field "${report}" replies_expanded),$(read_field "${report}" leaf_calls),$(read_field "${report}" committed_targets),$(read_field "${report}" leaf_broker_batches),$(read_field "${report}" leaf_broker_states),$(read_field "${report}" leaf_cost_batches),$(read_field "${report}" leaf_cost_cells),$(read_field "${report}" leaf_cost_evaluate_ms),$(read_field "${report}" leaf_cursor_consume_ms),$(read_field "${report}" peak_leaf_device_cache_bytes)" >>"${metrics}"
   fi
 }
 
-echo "预热：CPU wavefront"
+echo "预热：CPU ${ht_scheduler}"
 run_scan cpu warm
 echo "预热：单 GPU hybrid（物理 GPU ${physical_gpu}, UUID ${gpu_uuid}）"
 run_scan hybrid warm
@@ -402,8 +416,11 @@ manifest="${run_dir}/manifest.txt"
   echo "timed_order odd=cpu/hybrid,even=hybrid/cpu"
   echo "target_offset ${target_offset}"
   echo "max_targets ${max_targets}"
+  echo "ht_scheduler ${ht_scheduler}"
+  echo "cpu_speculation ${cpu_speculation}"
+  echo "hybrid_speculation ${hybrid_speculation}"
   echo "cpu_cost_threads ${cpu_cost_threads}"
-  echo "cpu_target_workers 1"
+  echo "cpu_target_workers ${cpu_target_workers}"
   echo "hybrid_cpu_cost_threads ${hybrid_cost_threads}"
   echo "hybrid_target_workers ${hybrid_target_workers}"
   echo "hybrid_gpu_phases candidate,leaf"

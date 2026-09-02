@@ -862,6 +862,58 @@ ReconnectAttempt TryReconnectFromCostRow(const GraphSnapshot& graph, const TourC
   return exhausted;
 }
 
+ReconnectAttempt
+TryReconnectFromCandidateMask(const GraphSnapshot& graph, const TourContext& context,
+                              const EndpointMatching& outside,
+                              const std::span<const std::size_t> deleted_positions,
+                              const std::vector<EndpointMatching>& reconnect_templates,
+                              const std::span<const std::uint64_t> candidate_masks) {
+  const std::size_t expected_words = (reconnect_templates.size() + 63U) / 64U;
+  if (reconnect_templates.empty() || candidate_masks.size() != expected_words) {
+    ReconnectAttempt invalid;
+    invalid.fatal = true;
+    invalid.reason = "k-opt candidate mask 规模错误";
+    return invalid;
+  }
+  const std::size_t tail_bits = reconnect_templates.size() % 64U;
+  if (tail_bits != 0U && (candidate_masks.back() & ~((std::uint64_t{1} << tail_bits) - 1U)) != 0U) {
+    ReconnectAttempt invalid;
+    invalid.fatal = true;
+    invalid.reason = "k-opt candidate mask 包含越界 bit";
+    return invalid;
+  }
+
+  const SteadyClock::time_point candidate_begin = SteadyClock::now();
+  std::uint64_t candidate_templates_rechecked = 0U;
+  for (std::size_t template_index = 0U; template_index < reconnect_templates.size();
+       ++template_index) {
+    const std::uint64_t bit = std::uint64_t{1} << (template_index % 64U);
+    if ((candidate_masks[template_index / 64U] & bit) == 0U) {
+      continue;
+    }
+    ++candidate_templates_rechecked;
+    const std::vector<EndpointMatching> preferred = {reconnect_templates[template_index]};
+    ReconnectAttempt attempt = TryReconnect(graph, context, outside, deleted_positions, preferred);
+    if (attempt.fatal) {
+      attempt.candidate_templates_rechecked = candidate_templates_rechecked;
+      attempt.candidate_recheck_ms = ElapsedMilliseconds(candidate_begin);
+      return attempt;
+    }
+    if (attempt.witness.has_value()) {
+      // proof 仍使用规范模板序号，不把 GPU 筛选顺序写入证书。
+      attempt.matchings_tested = static_cast<std::uint64_t>(template_index + 1U);
+      attempt.candidate_templates_rechecked = candidate_templates_rechecked;
+      attempt.candidate_recheck_ms = ElapsedMilliseconds(candidate_begin);
+      return attempt;
+    }
+  }
+  ReconnectAttempt exhausted;
+  exhausted.matchings_tested = static_cast<std::uint64_t>(reconnect_templates.size());
+  exhausted.candidate_templates_rechecked = candidate_templates_rechecked;
+  exhausted.candidate_recheck_ms = ElapsedMilliseconds(candidate_begin);
+  return exhausted;
+}
+
 bool AdvanceCombination(std::vector<std::size_t>* const combination, const std::size_t item_count) {
   if (combination->size() <= 1) {
     return false;
@@ -2460,6 +2512,8 @@ struct KOptCostBlockView {
   std::uint32_t template_count{};
   std::span<const std::int64_t> added_costs;
   std::span<const std::size_t> row_indices;
+  std::span<const std::uint64_t> candidate_masks;
+  std::uint32_t candidate_mask_words{};
   std::string_view backend;
   bool cpu_verified{false};
 };
@@ -2546,12 +2600,23 @@ public:
     const KOptCursorBlock& block = *pending_;
     const KOptReconnectTable& reconnect_table = CachedKOptReconnectTable(block.k);
     const std::size_t template_count = reconnect_table.templates.size();
+    const bool candidate_only = costs.backend == "cuda-candidate";
     const bool mapped_rows = !costs.row_indices.empty();
-    const bool invalid_shape =
-        costs.k != block.k || costs.template_count != template_count || template_count == 0U ||
-        costs.added_costs.size() % template_count != 0U ||
-        (!mapped_rows && costs.added_costs.size() != block.works.size() * template_count) ||
-        (mapped_rows && costs.row_indices.size() != block.works.size());
+    const std::size_t expected_mask_words = (template_count + 63U) / 64U;
+    const bool invalid_candidate_shape =
+        candidate_only &&
+        (!costs.added_costs.empty() || mapped_rows ||
+         costs.candidate_mask_words != expected_mask_words ||
+         costs.candidate_masks.size() != block.works.size() * expected_mask_words);
+    const bool invalid_matrix_shape =
+        !candidate_only &&
+        (template_count == 0U || !costs.candidate_masks.empty() ||
+         costs.candidate_mask_words != 0U || costs.added_costs.size() % template_count != 0U ||
+         (!mapped_rows && costs.added_costs.size() != block.works.size() * template_count) ||
+         (mapped_rows && costs.row_indices.size() != block.works.size()));
+    const bool invalid_shape = costs.k != block.k || costs.template_count != template_count ||
+                               template_count == 0U || invalid_candidate_shape ||
+                               invalid_matrix_shape;
     const std::size_t available_rows =
         template_count == 0U ? 0U : costs.added_costs.size() / template_count;
     if (invalid_shape ||
@@ -2574,15 +2639,23 @@ public:
         return stats;
       }
       ++stats.cost_rows;
-      const std::size_t cost_row = mapped_rows ? costs.row_indices[work_index] : work_index;
-      const std::size_t row_offset = cost_row * template_count;
-      const std::span<const std::int64_t> row =
-          costs.added_costs.subspan(row_offset, template_count);
       const std::span<const std::size_t> deleted_positions(
           block.works[work_index].deleted_positions.data(), block.k);
-      ReconnectAttempt attempt = TryReconnectFromCostRow(
-          *graph_, context_, outside_, deleted_positions, block.works[work_index].task,
-          reconnect_table.templates, row, costs.backend, costs.cpu_verified);
+      ReconnectAttempt attempt;
+      if (candidate_only) {
+        const std::size_t mask_offset = work_index * expected_mask_words;
+        attempt = TryReconnectFromCandidateMask(
+            *graph_, context_, outside_, deleted_positions, reconnect_table.templates,
+            costs.candidate_masks.subspan(mask_offset, expected_mask_words));
+      } else {
+        const std::size_t cost_row = mapped_rows ? costs.row_indices[work_index] : work_index;
+        const std::size_t row_offset = cost_row * template_count;
+        const std::span<const std::int64_t> row =
+            costs.added_costs.subspan(row_offset, template_count);
+        attempt = TryReconnectFromCostRow(*graph_, context_, outside_, deleted_positions,
+                                          block.works[work_index].task, reconnect_table.templates,
+                                          row, costs.backend, costs.cpu_verified);
+      }
       stats.candidate_templates_rechecked += attempt.candidate_templates_rechecked;
       stats.candidate_recheck_ms += attempt.candidate_recheck_ms;
       stats.completeness_fallback_ms += attempt.completeness_fallback_ms;
@@ -2879,7 +2952,7 @@ void RecordKOptBatchBackend(PathSystemKOptBatchResult* const result, const std::
 
 void RecordKOptCudaCache(PathSystemKOptBatchResult* const result,
                          const KOptCostBatchResult& costs) {
-  if (costs.backend != "cuda") {
+  if (costs.backend != "cuda" && costs.backend != "cuda-candidate") {
     return;
   }
   if (!AddWithoutOverflow(&result->cuda_cost_batches, 1U) ||
@@ -2908,11 +2981,41 @@ detail::KOptSnapshotBinding::KOptSnapshotBinding(const GraphSnapshot& graph)
 
 namespace {
 
+KOptCostBatchResult EvaluateKOptTemplateCostsCudaCandidate(const GraphSnapshot& graph,
+                                                           const std::uint32_t k,
+                                                           const std::vector<KOptCostTask>& tasks) {
+  const KOptCostEvaluationPlan plan = PrepareKOptCostEvaluation(graph, k, tasks);
+  std::string reason;
+  if (!detail::KOptCostCudaAvailable(&reason)) {
+    throw std::runtime_error("CUDA k-opt candidate 后端不可用: " + reason);
+  }
+  KOptCostBatchResult result;
+  result.k = k;
+  result.template_count = static_cast<std::uint32_t>(plan.table.templates.size());
+  result.candidate_masks =
+      detail::EvaluateKOptCandidateMasksCuda(graph, plan.table, tasks, &result.candidate_mask_words,
+                                             &result.selected_device, &result.cuda_cache);
+  const std::size_t expected_words = (plan.table.templates.size() + 63U) / 64U;
+  if (result.candidate_mask_words != expected_words ||
+      result.candidate_masks.size() != tasks.size() * expected_words) {
+    throw std::logic_error("CUDA k-opt candidate mask 规模错误");
+  }
+  // 该位图不形成证书；只有随后由 CPU 重建并验证成功的 witness 才能进入 proof。
+  result.backend = "cuda-candidate";
+  result.cpu_verified = false;
+  result.cpu_cost_rows_scored = 0U;
+  result.cpu_cost_rows_reused = 0U;
+  return result;
+}
+
 PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
     const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
-    const std::optional<NodeEdge>& required_edge, const KOptSearchOptions& options,
-    const std::optional<std::uint64_t> bound_snapshot_hash) {
+    const std::vector<std::optional<NodeEdge>>& required_edges, const KOptSearchOptions& options,
+    const std::optional<std::uint64_t> bound_snapshot_hash, const bool cuda_candidate_only) {
   PathSystemKOptBatchResult result;
+  if (required_edges.size() != path_systems.size()) {
+    throw std::invalid_argument("path-system k-opt 的 required edge 数量必须与 path system 一致");
+  }
   if (path_systems.empty()) {
     result.cpu_verified = true;
     return result;
@@ -2970,7 +3073,7 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
           {
             ScopedPhaseTimer cursor_timer(&result.cursor_construct_ms);
             search.cursor.emplace(graph, path_systems[path_index], work.catalog->outside[source],
-                                  required_edge, options, *work.path_validation);
+                                  required_edges[path_index], options, *work.path_validation);
           }
           if (!AddWithoutOverflow(&result.cursor_searches_started, 1U)) {
             throw std::overflow_error("path-system k-opt cursor 构造计数溢出");
@@ -3044,6 +3147,8 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
             if (selected_cost_backend == PathCompatibilityBackend::kCpu) {
               costs = EvaluateKOptTemplateCostsCpuWithWorkspace(
                   graph, k, cost_tasks, &cpu_cost_workspace, &cost_values, &row_to_unique);
+            } else if (cuda_candidate_only) {
+              costs = EvaluateKOptTemplateCostsCudaCandidate(graph, k, cost_tasks);
             } else {
               costs = EvaluateKOptTemplateCosts(graph, k, cost_tasks, selected_cost_backend);
               cost_values = costs.added_costs;
@@ -3067,38 +3172,55 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
         if (!AddWithoutOverflow(&result.cost_cells, requested_cells)) {
           throw std::overflow_error("path-system k-opt batch cost cell 统计溢出");
         }
-        if (!costs.cpu_verified) {
+        const bool candidate_only_result = costs.backend == "cuda-candidate";
+        if (!costs.cpu_verified && !candidate_only_result) {
           throw std::logic_error("path-system k-opt cost 矩阵未通过 CPU 完整认证");
         }
-        if (costs.cpu_cost_rows_scored > cost_tasks.size() ||
-            costs.cpu_cost_rows_reused != cost_tasks.size() - costs.cpu_cost_rows_scored) {
+        if ((!candidate_only_result &&
+             (costs.cpu_cost_rows_scored > cost_tasks.size() ||
+              costs.cpu_cost_rows_reused != cost_tasks.size() - costs.cpu_cost_rows_scored)) ||
+            (candidate_only_result &&
+             (costs.cpu_cost_rows_scored != 0U || costs.cpu_cost_rows_reused != 0U))) {
           throw std::logic_error("path-system k-opt CPU cost row 统计错误");
         }
         if (!AddWithoutOverflow(&result.cpu_cost_rows_scored, costs.cpu_cost_rows_scored) ||
             !AddWithoutOverflow(&result.cpu_cost_rows_reused, costs.cpu_cost_rows_reused)) {
           throw std::overflow_error("path-system k-opt CPU cost row 统计溢出");
         }
-        if (!AddWithoutOverflow(&result.cpu_certified_cost_cells, requested_cells)) {
-          throw std::overflow_error("path-system k-opt CPU 认证 cell 统计溢出");
+        if (costs.cpu_verified) {
+          if (!AddWithoutOverflow(&result.cpu_certified_cost_cells, requested_cells)) {
+            throw std::overflow_error("path-system k-opt CPU 认证 cell 统计溢出");
+          }
+          RecordKOptCpuParallelism(&result, costs, requested_cells);
         }
         result.cost_cpu_certify_ms += costs.cpu_certify_ms;
-        RecordKOptCpuParallelism(&result, costs, requested_cells);
         RecordKOptBatchBackend(&result, costs.backend, costs.selected_device);
         RecordKOptCudaCache(&result, costs);
         if (cpu_long_tail) {
           RecordKOptCpuLongTail(&result, cost_tasks.size(), requested_cells);
         }
         const bool mapped_rows = !row_to_unique.empty();
-        const std::size_t available_rows =
-            costs.template_count == 0U ? 0U : cost_values.size() / costs.template_count;
-        if (costs.template_count == 0U || cost_values.size() % costs.template_count != 0U ||
-            (!mapped_rows && cost_values.size() != requested_cells) ||
-            (mapped_rows && (row_to_unique.size() != cost_tasks.size() ||
-                             std::any_of(row_to_unique.begin(), row_to_unique.end(),
-                                         [available_rows](const std::size_t row) {
-                                           return row >= available_rows;
-                                         })))) {
-          throw std::logic_error("path-system k-opt batch cost 矩阵规模错误");
+        if (candidate_only_result) {
+          const std::size_t expected_words =
+              (static_cast<std::size_t>(costs.template_count) + 63U) / 64U;
+          if (costs.template_count == 0U || !cost_values.empty() || !row_to_unique.empty() ||
+              costs.candidate_mask_words != expected_words ||
+              costs.candidate_masks.size() != cost_tasks.size() * expected_words) {
+            throw std::logic_error("path-system k-opt batch candidate mask 规模错误");
+          }
+        } else {
+          const std::size_t available_rows =
+              costs.template_count == 0U ? 0U : cost_values.size() / costs.template_count;
+          if (costs.template_count == 0U || !costs.candidate_masks.empty() ||
+              costs.candidate_mask_words != 0U || cost_values.size() % costs.template_count != 0U ||
+              (!mapped_rows && cost_values.size() != requested_cells) ||
+              (mapped_rows && (row_to_unique.size() != cost_tasks.size() ||
+                               std::any_of(row_to_unique.begin(), row_to_unique.end(),
+                                           [available_rows](const std::size_t row) {
+                                             return row >= available_rows;
+                                           })))) {
+            throw std::logic_error("path-system k-opt batch cost 矩阵规模错误");
+          }
         }
         for (const CursorSlice& slice : slices_by_k[bucket]) {
           const std::size_t cell_begin = slice.row_begin * costs.template_count;
@@ -3108,7 +3230,15 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
             ScopedPhaseTimer timer(&result.cost_scatter_ms);
             cursor_costs.k = k;
             cursor_costs.template_count = costs.template_count;
-            if (mapped_rows) {
+            if (candidate_only_result) {
+              const std::size_t mask_begin =
+                  slice.row_begin * static_cast<std::size_t>(costs.candidate_mask_words);
+              const std::size_t mask_count =
+                  slice.row_count * static_cast<std::size_t>(costs.candidate_mask_words);
+              cursor_costs.candidate_masks = std::span<const std::uint64_t>(costs.candidate_masks)
+                                                 .subspan(mask_begin, mask_count);
+              cursor_costs.candidate_mask_words = costs.candidate_mask_words;
+            } else if (mapped_rows) {
               cursor_costs.added_costs = cost_values;
               cursor_costs.row_indices = std::span<const std::size_t>(row_to_unique)
                                              .subspan(slice.row_begin, slice.row_count);
@@ -3149,13 +3279,14 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
           ScopedPhaseTimer timer(&result.scalar_search_ms);
           search_result = FindKOptWitness(graph, path_systems[search.path_index],
                                           works[search.path_index].catalog->outside[search.source],
-                                          required_edge, options);
+                                          required_edges[search.path_index], options);
         }
       }
       {
         ScopedPhaseTimer timer(&result.apply_ms);
-        ApplyBatchedKOptSearch(graph, path_systems[search.path_index], required_edge, options,
-                               search.source, std::move(search_result), &works[search.path_index]);
+        ApplyBatchedKOptSearch(graph, path_systems[search.path_index],
+                               required_edges[search.path_index], options, search.source,
+                               std::move(search_result), &works[search.path_index]);
       }
     }
   }
@@ -3163,19 +3294,22 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
   result.proofs.reserve(works.size());
   result.cpu_verified = true;
   for (std::size_t index = 0U; index < works.size(); ++index) {
-    if (works[index].proof.proven) {
+    if (works[index].proof.proven && !cuda_candidate_only) {
       std::string reason;
       bool verified = false;
       {
         ScopedPhaseTimer timer(&result.proof_verify_ms);
         // graph 在整个同步 batch 内只读；沿用入口哈希，逐 proof 仍完整复核绑定与 witness。
         verified = VerifyPathSystemKOptProofBoundToSnapshot(
-            graph, path_systems[index], required_edge, works[index].proof, snapshot_hash, &reason);
+            graph, path_systems[index], required_edges[index], works[index].proof, snapshot_hash,
+            &reason);
       }
       if (!verified) {
         throw std::logic_error("批量 path-system proof CPU 复核失败: " + reason);
       }
     }
+    // candidate-only broker 中每条 witness 已在 ApplyBatchedKOptSearch 精确复核；完整
+    // leaf coverage/proof 由同一快照上的 CommitHtProofEpoch 在任何图修改前统一重放。
     result.proofs.push_back(std::move(works[index].proof));
   }
   if (result.cost_backend == "none" && result.scalar_searches != 0U) {
@@ -3190,7 +3324,16 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
 PathSystemKOptBatchResult ProvePathSystemsByKOpt(
     const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
     const std::optional<NodeEdge>& required_edge, const KOptSearchOptions& options) {
-  return ProvePathSystemsByKOptImpl(graph, path_systems, required_edge, options, std::nullopt);
+  return ProvePathSystemsByKOptImpl(
+      graph, path_systems, std::vector<std::optional<NodeEdge>>(path_systems.size(), required_edge),
+      options, std::nullopt, false);
+}
+
+PathSystemKOptBatchResult ProvePathSystemsByKOptWithRequiredEdges(
+    const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
+    const std::vector<std::optional<NodeEdge>>& required_edges, const KOptSearchOptions& options) {
+  return ProvePathSystemsByKOptImpl(graph, path_systems, required_edges, options, std::nullopt,
+                                    false);
 }
 
 PathSystemKOptBatchResult detail::ProvePathSystemsByKOptBoundToSnapshot(
@@ -3200,8 +3343,31 @@ PathSystemKOptBatchResult detail::ProvePathSystemsByKOptBoundToSnapshot(
   if (!binding.Matches(graph)) {
     throw std::invalid_argument("k-opt snapshot binding 与图对象不一致");
   }
-  return ProvePathSystemsByKOptImpl(graph, path_systems, required_edge, options,
-                                    binding.snapshot_hash());
+  return ProvePathSystemsByKOptImpl(
+      graph, path_systems, std::vector<std::optional<NodeEdge>>(path_systems.size(), required_edge),
+      options, binding.snapshot_hash(), false);
+}
+
+PathSystemKOptBatchResult detail::ProvePathSystemsByKOptWithRequiredEdgesBoundToSnapshot(
+    const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
+    const std::vector<std::optional<NodeEdge>>& required_edges, const KOptSnapshotBinding& binding,
+    const KOptSearchOptions& options) {
+  if (!binding.Matches(graph)) {
+    throw std::invalid_argument("k-opt snapshot binding 与图对象不一致");
+  }
+  return ProvePathSystemsByKOptImpl(graph, path_systems, required_edges, options,
+                                    binding.snapshot_hash(), false);
+}
+
+PathSystemKOptBatchResult detail::ProvePathSystemsByKOptCandidateOnlyBoundToSnapshot(
+    const GraphSnapshot& graph, const std::vector<NormalizedPathSystem>& path_systems,
+    const std::vector<std::optional<NodeEdge>>& required_edges, const KOptSnapshotBinding& binding,
+    const KOptSearchOptions& options) {
+  if (!binding.Matches(graph)) {
+    throw std::invalid_argument("k-opt snapshot binding 与图对象不一致");
+  }
+  return ProvePathSystemsByKOptImpl(graph, path_systems, required_edges, options,
+                                    binding.snapshot_hash(), true);
 }
 
 bool VerifyPathSystemKOptProof(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
