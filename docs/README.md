@@ -55,5 +55,6 @@
 51. [M5 HT leaf path 稀疏验证绑定复用](research/47_M5_HT_Leaf_Path_Validation_Binding.md)：每个 batch path 只做一次稀疏规范认证，成功 proof 仍由公开 dense verifier 独立重放。
 52. [M5 HT CPU cost 固定验证与重连计划](research/48_M5_HT_CPU_Cost_Fixed_Plans.md)：消除小集合堆分配与逐 cell template 解码，并保持完整 CPU/CUDA 整数矩阵认证。
 53. [M5 HT CPU batch 精确距离表复用](research/49_M5_HT_CPU_Batch_Distance_Cache.md)：在有界同步 batch 内复用跨 task 整数距离，并以容量/收益门禁安全回退。
+54. [M5 HT leaf cost 零复制分发](research/50_M5_HT_Leaf_Cost_Zero_Copy_Scatter.md)：用生命周期受限的只读 view 分发融合矩阵，消除按 cursor slice 的重复分配与复制。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

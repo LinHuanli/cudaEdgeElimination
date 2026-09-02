@@ -113,6 +113,8 @@ CPU exact cost 固定验证与重连计划已完成：3–5 条删除边用固�
 
 CPU batch 精确距离表复用已完成：画像确认 pcb3038/d15112 的 batch 内 task-pair 对局部 unique pair 分别有 `282.948×/131.206×` 重用空间；同步 cost 调用在最多 512 个端口节点、约 6 MiB 总额外内存且预计至少 2× 减少距离计算时建表，其他情况安全回退。三实例 cost evaluate 加速 `1.195×/1.057×/1.216×`，pcb3038 CPU-fused search/wall 加速 `1.083×/1.078×`，d15112 search 加速 `1.012×`；rl5915 距离阶段改善但端到端处于负向噪声。54 项跨提交精确比较与完整 sanitizer 门禁通过。下一切片消除融合矩阵按 cursor slice 的 scatter 复制。
 
+leaf cost 零复制分发已完成：内部生命周期受限 view 直接引用融合矩阵的连续 cursor slice，仍在消费入口验证 k、模板数、形状、后端与 CPU 认证标志。三实例 scatter 加速 `70.871×/30.817×/28.441×`；pcb3038/rl5915 CPU-fused search 加速 `1.028×/1.052×`，d15112 固定节省被约 1% host 波动覆盖。sanitizer 与 54 项跨提交精确比较全部通过。下一切片审计 cursor prepare 的组合映射、排序和小向量分配。
+
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
