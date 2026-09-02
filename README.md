@@ -21,7 +21,7 @@
 - `ht-scan` 的确定性有界目标切片、逐目标 wavefront、CPU 双重复核与 V2 原子提交；
 - HT scan V2 阶段计时，以及用 `--leaf-backend` 将 CUDA leaf cost 与 CPU 候选器解耦的混合路径；
 - CPU leaf CLI 默认开启、auto/CUDA 默认关闭且可显式 0/1 覆盖的 `--fuse-leaf-buckets` 调度；
-- HT scan V12 leaf/setup/cost/reply/path/root/point-candidate 子阶段计时及 V15 五路 benchmark summary；
+- HT scan V13 leaf/setup/cost/reply/path/root/point-candidate 子阶段计时及 V16 五路 benchmark summary；
 - point-candidate 严格全序的有界 Top-K 选择，并保留无界分支的完整排序语义；
 - target 级 point-candidate 静态次序缓存与逐 state generation-mark 过滤；
 - 同步 leaf batch 内复用 snapshot binding，同时保持公开 proof verifier 独立哈希；
@@ -37,6 +37,7 @@
 - 融合 leaf cost matrix 按 cursor slice 的生命周期受限只读 view，避免重复分配和复制；
 - cursor deletion work 的固定 5 元位置数组与路径边精确成本缓存，并保留候选通用重算；
 - 内部 CPU cost 的可增长输出 workspace 与 Debug 全覆盖哨兵，同时保留公开 owning vector API；
+- CPU leaf batch 的完全相同 task row 精确去重、零展开 cursor 映射，以及逻辑/物理 row 分离计数；
 - Hamilton reply 的批内 center 去重、每邻边 quick-filter 缓存与 CPU/CUDA 全数组差分；
 - leaf setup 的 proof/coverage/cursor 画像，以及同一批次只计算一次的不可变快照哈希；
 - 8,192-cell 门槛以上按 task row 静态分片的有界 OpenMP CPU 精确成本矩阵；

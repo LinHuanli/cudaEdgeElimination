@@ -58,5 +58,6 @@
 54. [M5 HT leaf cost 零复制分发](research/50_M5_HT_Leaf_Cost_Zero_Copy_Scatter.md)：用生命周期受限的只读 view 分发融合矩阵，消除按 cursor slice 的重复分配与复制。
 55. [M5 HT cursor prepare 路径边成本缓存](research/51_M5_HT_Cursor_Prepare_Edge_Cost_Cache.md)：固定化删除位置并在 cursor 内复用路径边精确成本，候选仍由通用路径重新取距复核。
 56. [M5 HT CPU cost 输出 workspace](research/52_M5_HT_CPU_Cost_Output_Workspace.md)：以同步逻辑 span 覆盖可增长 storage，消除大矩阵先清零再全量覆写，并保留公开 owning API。
+57. [M5 HT CPU cost 完全相同 task row 去重](research/53_M5_HT_CPU_Cost_Task_Row_Deduplication.md)：只评分精确相同 key 的首次 row，以零展开索引供 cursor 复用，并分别记录逻辑认证量与物理评分量。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

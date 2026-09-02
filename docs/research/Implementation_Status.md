@@ -92,6 +92,8 @@ M5 HT cursor prepare 路径边成本缓存绑定 `611c701`：删除位置改为�
 
 M5 HT CPU cost 输出 workspace 绑定 `900f5d9`：临时画像否定同轮跨 k 距离表共享，并定位到 owning vector 的重复预清零；内部 CPU cursor 改以单一可增长 storage 的逻辑 span 全量覆写，公开 API 与 CUDA 完整认证不变。三实例 cost evaluate 加速 `1.407×/1.263×/1.306×`，CPU-fused search 加速 `1.148×/1.134×/1.032×`；pcb3038 search/wall 降至 `634.582/674.254 ms`，d15112 search 为 `284.330 ms`。Debug 全覆盖哨兵、CPU/CUDA 全套、memcheck 和 54 项跨提交精确比较全部通过。
 
+M5 HT CPU cost 完全相同 task row 去重绑定 `a4afa29`：8,192-cell 与至少 25% row 缩减双门槛后，只评分完整 `port_nodes[10]+deleted_cost` key 的首次 row，cursor 通过已完整验证的只读映射零展开消费。公开 owning API、CUDA 每逻辑 row 的独立 CPU 矩阵认证和通用 witness verifier 不变；V13/V16 分开记录逻辑认证量与物理 scored/reused rows。三实例 CPU-fused 物理 row 复用为 `3.523×/2.143×/1.938×`，cost evaluate 加速 `1.344×/1.066×/1.102×`；pcb3038 search/wall 加速 `1.186×/1.181×`，d15112 为 `1.021×/1.013×`，rl5915 端到端处于负向噪声。CPU/CUDA 全套、memcheck 和选定三实例的 54 项跨提交精确比较全部通过。
+
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
 Concorde 随机 20 点 epoch：25 行、43 列；QSopt 与 cuOpt 模型目标均为 `88`。cuOpt primal violation 为 `4.44e-15`，reduced-cost residual 为 `1.57e-14`；完整图 exact lower bound 为 `87.3932819641`，上界为 `88`。
