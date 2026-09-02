@@ -469,6 +469,9 @@ std::vector<std::int64_t> EvaluateKOptTemplateCostsCuda(const GraphSnapshot& gra
   return costs;
 }
 
-void ClearKOptCostCudaCache() { g_kopt_device_caches.clear(); }
+void ClearKOptCostCudaCache() {
+  g_kopt_device_caches.clear();
+  ClearExactTourCostCudaCache();
+}
 
 } // namespace cudaee::detail

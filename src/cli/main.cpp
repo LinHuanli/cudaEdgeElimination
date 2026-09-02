@@ -42,27 +42,33 @@ void PrintHelp() {
       << "  lp-example    --output FILE\n"
       << "  path-table    --paths 1..5 --output FILE [--backend auto|cpu|cuda]\n"
       << "  ht-prove      --tsp FILE --edges FILE --u NODE --v NODE --proof FILE\n"
-      << "                [--scheduler dfs|wavefront] [--backend auto|cpu|cuda]\n"
+      << "                [--scheduler dfs|wavefront|transposed] [--backend auto|cpu|cuda]\n"
+      << "                [--speculation 1..256|auto]\n"
+      << "                [--trace-output FILE]（当前由 wavefront 生成）\n"
       << "                [--leaf-backend auto|cpu|cuda]\n"
       << "                [--reply-backend auto|cpu|cuda]\n"
       << "                [--reply-frontier-batch-states N]\n"
       << "                [--leaf-frontier-batch-states N]\n"
       << "                [--fuse-leaf-buckets 0|1]（CPU leaf 默认 1，其余默认 0）\n"
       << "                [--cost-batch-size N] [--cuda-min-cost-cells N]\n"
+      << "                [--exact-blocks N] [--exact-backend auto|cpu|cuda]\n"
       << "                [--path-append-backend auto|cpu|cuda]\n"
       << "                [--reuse-reply-cuda-cache 0|1]（默认 1）\n"
       << "                [--deduplicate-reply-tasks 0|1]（默认 1）\n"
       << "                [--propagation-backend auto|cpu|cuda] [--propagation-blocks N]\n"
       << "                [--max-depth N] [HT budgets]\n"
       << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
+      << "  ht-trace-replay --input FILE --output FILE\n"
+      << "                [--speculation-widths 1,2,4,8,all]\n"
       << "  ht-scan       --tsp FILE --edges FILE --output FILE --proof FILE --report FILE\n"
       << "                --max-targets N [--target-offset N]\n"
-      << "                [--target-order weight-desc|canonical] [--target-devices D[,D...]]\n"
+      << "                [--target-order weight-desc|canonical] [--target-workers N]\n"
+      << "                [--target-devices D[,D...]]（允许多个 worker 共享单 GPU）\n"
       << "                [--protected-tour FILE --expected-cost COST] [HT wavefront options]\n"
       << "  local-eliminate --tsp FILE --edges FILE --output FILE --proof FILE --report FILE\n"
       << "                --max-targets N [--max-ht-epochs N] [--max-jv-rounds N]\n"
       << "                [--target-order weight-desc|canonical] [--backend auto|cpu|cuda]\n"
-      << "                [--target-devices D[,D...]]\n"
+      << "                [--target-workers N] [--target-devices D[,D...]]\n"
       << "                [--protected-tour FILE --expected-cost COST] [HT wavefront options]\n"
       << "  pipeline      与 gpu-eliminate 相同，可附加 --lp-epoch FILE\n"
       << "                --lp-solution FILE [--cuopt-library FILE]\n\n"
@@ -192,6 +198,28 @@ cudaee::HtCdMode ParseHtCdMode(const std::string& value) {
   if (value == "missing-or-incompatible")
     return cudaee::HtCdMode::kMissingOrIncompatible;
   throw std::invalid_argument("--cd-mode 必须是 active-incompatible 或 missing-or-incompatible");
+}
+
+cudaee::HtScheduler ParseHtScheduler(const std::string& value) {
+  if (value == "wavefront") {
+    return cudaee::HtScheduler::kWavefront;
+  }
+  if (value == "transposed") {
+    return cudaee::HtScheduler::kTransposed;
+  }
+  throw std::invalid_argument("--scheduler 必须是 wavefront 或 transposed");
+}
+
+std::uint32_t ParseSpeculationWidth(const Arguments& arguments) {
+  const std::string value = Optional(arguments, "speculation", "1");
+  if (value == "auto") {
+    return 0U;
+  }
+  const std::uint32_t width = ParseIntegerValue<std::uint32_t>(value, "--speculation");
+  if (width == 0U || width > 256U) {
+    throw std::invalid_argument("--speculation 必须位于 [1,256] 或为 auto");
+  }
+  return width;
 }
 
 bool ParseBooleanOption(const Arguments& arguments, const std::string& name, const bool fallback) {
@@ -447,6 +475,8 @@ cudaee::HtRecursiveOptions ParseHtRecursiveOptions(const Arguments& arguments) {
   if (root.leaf_options.exact_fallback_max_blocks > 18U) {
     throw std::invalid_argument("--exact-blocks 不得超过 18");
   }
+  root.leaf_options.exact_backend =
+      ParsePathCompatibilityBackend(Optional(arguments, "exact-backend", "cpu"));
 
   options.max_depth = OptionalInteger<std::uint32_t>(arguments, "max-depth", options.max_depth);
   options.max_states = OptionalInteger<std::uint64_t>(arguments, "max-states", options.max_states);
@@ -485,8 +515,41 @@ ParseHtWavefrontOptions(const Arguments& arguments,
           .hamilton_reply_backend =
               ParsePathCompatibilityBackend(Optional(arguments, "reply-backend", "auto")),
           .reuse_reply_cuda_cache = ParseBooleanOption(arguments, "reuse-reply-cuda-cache", true),
-          .deduplicate_reply_tasks =
-              ParseBooleanOption(arguments, "deduplicate-reply-tasks", true)};
+          .deduplicate_reply_tasks = ParseBooleanOption(arguments, "deduplicate-reply-tasks", true),
+          .collect_short_circuit_trace = arguments.contains("trace-output"),
+          .scheduler = ParseHtScheduler(Optional(arguments, "scheduler", "wavefront")),
+          .speculation_width = ParseSpeculationWidth(arguments)};
+}
+
+std::vector<std::uint32_t> ParseSpeculationWidths(const Arguments& arguments) {
+  const std::string value = Optional(arguments, "speculation-widths", "1,2,4,8,all");
+  std::vector<std::uint32_t> widths;
+  std::size_t begin = 0U;
+  while (begin < value.size()) {
+    const std::size_t comma = value.find(',', begin);
+    const std::size_t end = comma == std::string::npos ? value.size() : comma;
+    if (end == begin) {
+      throw std::invalid_argument("--speculation-widths 不得包含空值");
+    }
+    const std::string token = value.substr(begin, end - begin);
+    const std::uint32_t width =
+        token == "all" ? 0U : ParseIntegerValue<std::uint32_t>(token, "--speculation-widths");
+    if (token != "all" && width == 0U) {
+      throw std::invalid_argument("--speculation-widths 仅可用 all 表示无限窗口");
+    }
+    if (std::find(widths.begin(), widths.end(), width) != widths.end()) {
+      throw std::invalid_argument("--speculation-widths 不得包含重复宽度");
+    }
+    widths.push_back(width);
+    if (comma == std::string::npos) {
+      break;
+    }
+    begin = comma + 1U;
+  }
+  if (widths.empty()) {
+    throw std::invalid_argument("--speculation-widths 不得为空");
+  }
+  return widths;
 }
 
 cudaee::HtTargetOrder ParseHtTargetOrder(const std::string& value) {
@@ -548,6 +611,15 @@ std::string TargetDevicesName(const std::vector<int>& devices) {
 
 const char* HtTargetOrderName(const cudaee::HtTargetOrder order) {
   return order == cudaee::HtTargetOrder::kCanonical ? "canonical" : "weight-desc";
+}
+
+const char* HtSchedulerName(const cudaee::HtScheduler scheduler) {
+  return scheduler == cudaee::HtScheduler::kTransposed ? "transposed" : "wavefront";
+}
+
+std::uint32_t ResolvedSpeculationWidth(const cudaee::HtWavefrontOptions& options) {
+  // 当前 transposed auto 已由实测固定为严格短路；wavefront 仅记录该选项而不使用它。
+  return options.speculation_width == 0U ? 1U : options.speculation_width;
 }
 
 const char* HtSearchStatusName(const cudaee::HtSearchStatus status) {
@@ -674,16 +746,30 @@ bool HtProveCommand(const Arguments& arguments) {
   double propagation_ms = 0.0;
   double proof_extract_ms = 0.0;
   double proof_verify_ms = 0.0;
+  cudaee::HtShortCircuitTrace short_circuit_trace;
+  std::uint32_t actual_speculation_width = 1U;
+  std::uint64_t continuations_created = 0U;
+  std::uint64_t short_circuits = 0U;
+  std::uint64_t speculative_leaf_tasks = 0U;
   if (scheduler == "dfs") {
+    if (arguments.contains("trace-output")) {
+      throw std::invalid_argument("ht-prove 的 --trace-output 当前只支持 wavefront scheduler");
+    }
     cudaee::HtRecursiveResult result = cudaee::ProveEdgeByRecursiveHt(graph, target, options);
     search_status = result.status;
     proof = std::move(result.proof);
-  } else if (scheduler == "wavefront") {
+  } else if (scheduler == "wavefront" || scheduler == "transposed") {
     const cudaee::HtWavefrontOptions wavefront_options =
         ParseHtWavefrontOptions(arguments, options);
+    if (scheduler == "transposed" && arguments.contains("trace-output")) {
+      throw std::invalid_argument(
+          "transposed scheduler 的实际执行 Trace 尚不导出；请先用 wavefront 生成 replay 基线");
+    }
     fuse_leaf_buckets = wavefront_options.fuse_leaf_buckets;
     cudaee::HtWavefrontResult result =
-        cudaee::ProveEdgeByWavefrontHt(graph, target, wavefront_options);
+        scheduler == "transposed"
+            ? cudaee::ProveEdgeByTransposedHt(graph, target, wavefront_options)
+            : cudaee::ProveEdgeByWavefrontHt(graph, target, wavefront_options);
     search_status = result.status;
     proof = std::move(result.proof);
     propagation_backend = std::move(result.propagation_backend);
@@ -786,17 +872,32 @@ bool HtProveCommand(const Arguments& arguments) {
     propagation_ms = result.propagation_ms;
     proof_extract_ms = result.proof_extract_ms;
     proof_verify_ms = result.proof_verify_ms;
+    short_circuit_trace = std::move(result.short_circuit_trace);
+    actual_speculation_width = result.speculation_width;
+    continuations_created = result.continuations_created;
+    short_circuits = result.short_circuits;
+    speculative_leaf_tasks = result.speculative_leaf_tasks;
   } else {
-    throw std::invalid_argument("--scheduler 必须是 dfs 或 wavefront");
+    throw std::invalid_argument("--scheduler 必须是 dfs、wavefront 或 transposed");
   }
 
   cudaee::WriteHtRecursiveProof(proof_path, proof);
+  if (arguments.contains("trace-output")) {
+    cudaee::HtShortCircuitTraceBundle bundle;
+    bundle.traces.push_back(std::move(short_circuit_trace));
+    cudaee::WriteHtShortCircuitTraceBundle(CheckedOutputPath(Required(arguments, "trace-output")),
+                                           bundle);
+  }
   std::cout << "status=" << HtSearchStatusName(search_status) << " scheduler=" << scheduler
             << " target=" << proof.target_edge.u << '-' << proof.target_edge.v
             << " nodes=" << proof.nodes.size() << " states=" << proof.states_expanded
             << " replies=" << proof.replies_expanded << " leaf_calls=" << proof.leaf_calls;
-  if (scheduler == "wavefront") {
+  if (scheduler == "wavefront" || scheduler == "transposed") {
     std::cout << " propagation_backend=" << propagation_backend
+              << " speculation_width=" << actual_speculation_width
+              << " continuations_created=" << continuations_created
+              << " short_circuits=" << short_circuits
+              << " speculative_leaf_tasks=" << speculative_leaf_tasks
               << " selected_device=" << selected_device << " moves=" << moves_generated
               << " propagation_blocks=" << propagation_blocks
               << " propagation_cooperative=" << (propagation_cooperative ? 1 : 0)
@@ -917,15 +1018,20 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V17\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V18\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
+  output << "scheduler " << HtSchedulerName(options.wavefront_options.scheduler) << '\n';
+  output << "requested_speculation_width " << options.wavefront_options.speculation_width << '\n';
+  output << "speculation_width " << ResolvedSpeculationWidth(options.wavefront_options) << '\n';
   output << "eligible_targets " << scan.eligible_targets << '\n';
   output << "target_offset " << scan.target_offset << '\n';
   output << "target_end_offset " << scan.target_offset + scan.attempts.size() << '\n';
   output << "max_targets " << options.max_targets << '\n';
   output << "target_devices " << TargetDevicesName(options.target_devices) << '\n';
+  output << "requested_target_workers " << options.target_workers << '\n';
+  output << "short_circuit_trace_count " << scan.short_circuit_traces.traces.size() << '\n';
   output << "target_workers " << scan.target_workers << '\n';
   output << "target_parallel " << (scan.target_parallel ? 1 : 0) << '\n';
   output << "fuse_leaf_buckets " << (options.wavefront_options.fuse_leaf_buckets ? 1 : 0) << '\n';
@@ -1134,7 +1240,7 @@ void WriteLocalEliminationReport(const std::filesystem::path& path,
   if (!output) {
     throw std::runtime_error("无法创建 Local Elimination 报告: " + path.string());
   }
-  output << "CUDAEE_LOCAL_ELIMINATION_REPORT_V2\n";
+  output << "CUDAEE_LOCAL_ELIMINATION_REPORT_V3\n";
   output << "initial_hash " << cudaee::HexHash(local.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(local.elimination.final_hash) << '\n';
   output << "termination " << cudaee::ToString(local.termination) << '\n';
@@ -1144,7 +1250,14 @@ void WriteLocalEliminationReport(const std::filesystem::path& path,
   output << "max_ht_epochs " << options.max_ht_epochs << '\n';
   output << "max_targets_per_ht_epoch " << options.ht_scan_options.max_targets << '\n';
   output << "target_order " << HtTargetOrderName(options.ht_scan_options.target_order) << '\n';
+  output << "scheduler " << HtSchedulerName(options.ht_scan_options.wavefront_options.scheduler)
+         << '\n';
+  output << "requested_speculation_width "
+         << options.ht_scan_options.wavefront_options.speculation_width << '\n';
+  output << "speculation_width "
+         << ResolvedSpeculationWidth(options.ht_scan_options.wavefront_options) << '\n';
   output << "target_devices " << TargetDevicesName(options.ht_scan_options.target_devices) << '\n';
+  output << "short_circuit_trace_count " << local.short_circuit_traces.traces.size() << '\n';
   output << "proof_records " << local.elimination.proof.size() << '\n';
   output << "ht_sidecars " << local.elimination.ht_proofs.size() << '\n';
   output << "stage_count " << local.stages.size() << '\n';
@@ -1188,9 +1301,13 @@ void HtScanCommand(const Arguments& arguments) {
   options.target_offset = OptionalInteger<std::uint64_t>(arguments, "target-offset", 0U);
   options.max_targets = RequiredInteger<std::uint64_t>(arguments, "max-targets");
   options.target_order = ParseHtTargetOrder(Optional(arguments, "target-order", "weight-desc"));
+  options.target_workers =
+      OptionalInteger<std::uint32_t>(arguments, "target-workers", options.target_workers);
   options.target_devices = ParseTargetDevices(arguments);
-  if (arguments.contains("scheduler") && Optional(arguments, "scheduler") != "wavefront") {
-    throw std::invalid_argument("ht-scan 只支持 wavefront scheduler");
+  if (options.wavefront_options.scheduler == cudaee::HtScheduler::kTransposed &&
+      arguments.contains("trace-output")) {
+    throw std::invalid_argument(
+        "transposed ht-scan 的实际执行 Trace 尚不导出；请使用 wavefront 生成 replay 基线");
   }
 
   const std::string protected_tour_path = Optional(arguments, "protected-tour");
@@ -1229,6 +1346,10 @@ void HtScanCommand(const Arguments& arguments) {
   graph.WriteActiveEdges(output_path);
   cudaee::WriteProof(proof_path, scan.elimination);
   WriteHtScanReport(report_path, scan, options, protected_tour_report);
+  if (arguments.contains("trace-output")) {
+    cudaee::WriteHtShortCircuitTraceBundle(CheckedOutputPath(Required(arguments, "trace-output")),
+                                           scan.short_circuit_traces);
+  }
   const std::string manifest = Optional(arguments, "manifest");
   if (!manifest.empty()) {
     WriteManifest(CheckedOutputPath(manifest), graph, scan.elimination, arguments);
@@ -1277,6 +1398,8 @@ void HtScanCommand(const Arguments& arguments) {
               << " reason=" << std::quoted(SingleLine(attempt.reason)) << '\n';
   }
   std::cout << "scan_status=OK target_order=" << HtTargetOrderName(options.target_order)
+            << " scheduler=" << HtSchedulerName(options.wavefront_options.scheduler)
+            << " speculation_width=" << ResolvedSpeculationWidth(options.wavefront_options)
             << " eligible=" << scan.eligible_targets << " attempted=" << scan.attempts.size()
             << " proven=" << scan.proven_targets << " unresolved=" << scan.unresolved_targets
             << " committed=" << scan.elimination.proof.size()
@@ -1315,9 +1438,6 @@ void LocalEliminationCommand(const Arguments& arguments) {
   if (arguments.contains("target-offset")) {
     throw std::invalid_argument("local-eliminate 在每次提交后自动重排，不接受 --target-offset");
   }
-  if (arguments.contains("scheduler") && Optional(arguments, "scheduler") != "wavefront") {
-    throw std::invalid_argument("local-eliminate 只支持 wavefront HT scheduler");
-  }
   cudaee::LocalEliminationOptions options;
   options.jv_backend = ParseBackend(Optional(arguments, "backend", "auto"));
   options.max_jv_rounds =
@@ -1329,7 +1449,14 @@ void LocalEliminationCommand(const Arguments& arguments) {
   options.ht_scan_options.max_targets = RequiredInteger<std::uint64_t>(arguments, "max-targets");
   options.ht_scan_options.target_order =
       ParseHtTargetOrder(Optional(arguments, "target-order", "weight-desc"));
+  options.ht_scan_options.target_workers = OptionalInteger<std::uint32_t>(
+      arguments, "target-workers", options.ht_scan_options.target_workers);
   options.ht_scan_options.target_devices = ParseTargetDevices(arguments);
+  if (options.ht_scan_options.wavefront_options.scheduler == cudaee::HtScheduler::kTransposed &&
+      arguments.contains("trace-output")) {
+    throw std::invalid_argument(
+        "transposed local-eliminate 的实际执行 Trace 尚不导出；请使用 wavefront 生成 replay 基线");
+  }
 
   const std::string protected_tour_path = Optional(arguments, "protected-tour");
   const bool has_protected_tour = !protected_tour_path.empty();
@@ -1369,6 +1496,10 @@ void LocalEliminationCommand(const Arguments& arguments) {
   graph.WriteActiveEdges(output_path);
   cudaee::WriteProof(proof_path, local.elimination);
   WriteLocalEliminationReport(report_path, local, options, protected_tour_report);
+  if (arguments.contains("trace-output")) {
+    cudaee::WriteHtShortCircuitTraceBundle(CheckedOutputPath(Required(arguments, "trace-output")),
+                                           local.short_circuit_traces);
+  }
   const std::string manifest = Optional(arguments, "manifest");
   if (!manifest.empty()) {
     WriteManifest(CheckedOutputPath(manifest), graph, local.elimination, arguments);
@@ -1388,7 +1519,9 @@ void LocalEliminationCommand(const Arguments& arguments) {
   }
   std::cout << "local_status=OK termination=" << cudaee::ToString(local.termination)
             << " stages=" << local.stages.size() << " committed=" << local.elimination.proof.size()
-            << " protected_tour_checked=" << (protected_tour_report != nullptr ? 1 : 0) << '\n';
+            << " protected_tour_checked=" << (protected_tour_report != nullptr ? 1 : 0)
+            << " scheduler=" << HtSchedulerName(options.ht_scan_options.wavefront_options.scheduler)
+            << '\n';
   PrintEliminationSummary(graph, local.elimination);
 }
 
@@ -1402,6 +1535,65 @@ void HtVerifyCommand(const Arguments& arguments) {
   }
   std::cout << "status=VERIFIED target=" << proof.target_edge.u << '-' << proof.target_edge.v
             << " nodes=" << proof.nodes.size() << " replies=" << proof.replies_expanded << '\n';
+}
+
+void HtTraceReplayCommand(const Arguments& arguments) {
+  const cudaee::HtShortCircuitTraceBundle bundle =
+      cudaee::ReadHtShortCircuitTraceBundle(Required(arguments, "input"));
+  const std::vector<std::uint32_t> widths = ParseSpeculationWidths(arguments);
+  const std::filesystem::path output_path = CheckedOutputPath(Required(arguments, "output"));
+  std::ofstream output(output_path);
+  if (!output) {
+    throw std::runtime_error("无法创建 HT trace replay 报告: " + output_path.string());
+  }
+  output << "CUDAEE_HT_TRACE_REPLAY_REPORT_V1\n";
+  output << "trace_count " << bundle.traces.size() << '\n';
+  output << "fields speculation_width true_traces scheduled_nodes scheduled_work_units "
+            "canonical_nodes speculative_nodes short_circuits peak_ready_width\n";
+  for (const std::uint32_t width : widths) {
+    std::uint64_t true_traces = 0U;
+    std::uint64_t scheduled_nodes = 0U;
+    std::uint64_t scheduled_work_units = 0U;
+    std::uint64_t canonical_nodes = 0U;
+    std::uint64_t speculative_nodes = 0U;
+    std::uint64_t short_circuits = 0U;
+    std::uint64_t peak_ready_width = 0U;
+    const auto add = [](std::uint64_t* const destination, const std::uint64_t value,
+                        const char* const field) {
+      if (value > std::numeric_limits<std::uint64_t>::max() - *destination) {
+        throw std::overflow_error(std::string("HT trace replay ") + field + " 聚合溢出");
+      }
+      *destination += value;
+    };
+    for (std::size_t trace_index = 0U; trace_index < bundle.traces.size(); ++trace_index) {
+      const cudaee::HtShortCircuitTrace& trace = bundle.traces[trace_index];
+      if (!trace.complete) {
+        throw std::runtime_error("HT trace bundle 含部分 trace，索引=" +
+                                 std::to_string(trace_index));
+      }
+      const cudaee::HtTraceReplayResult replay = cudaee::ReplayHtShortCircuitTrace(trace, width);
+      true_traces += replay.value ? 1U : 0U;
+      add(&scheduled_nodes, replay.scheduled_nodes, "scheduled_nodes");
+      add(&scheduled_work_units, replay.scheduled_work_units, "scheduled_work_units");
+      add(&canonical_nodes, replay.canonical_nodes, "canonical_nodes");
+      add(&speculative_nodes, replay.speculative_nodes, "speculative_nodes");
+      add(&short_circuits, replay.short_circuits, "short_circuits");
+      peak_ready_width = std::max(peak_ready_width, replay.peak_ready_width);
+    }
+    const std::string width_name = width == 0U ? "all" : std::to_string(width);
+    output << "replay " << width_name << ' ' << true_traces << ' ' << scheduled_nodes << ' '
+           << scheduled_work_units << ' ' << canonical_nodes << ' ' << speculative_nodes << ' '
+           << short_circuits << ' ' << peak_ready_width << '\n';
+    std::cout << "trace_replay speculation_width=" << width_name
+              << " traces=" << bundle.traces.size() << " true_traces=" << true_traces
+              << " scheduled_nodes=" << scheduled_nodes << " canonical_nodes=" << canonical_nodes
+              << " speculative_nodes=" << speculative_nodes << " short_circuits=" << short_circuits
+              << " peak_ready_width=" << peak_ready_width << '\n';
+  }
+  output << "END\n";
+  if (!output) {
+    throw std::runtime_error("写入 HT trace replay 报告失败: " + output_path.string());
+  }
 }
 
 } // namespace
@@ -1438,6 +1630,8 @@ int main(const int argc, char** argv) {
       LocalEliminationCommand(arguments);
     } else if (command == "ht-verify") {
       HtVerifyCommand(arguments);
+    } else if (command == "ht-trace-replay") {
+      HtTraceReplayCommand(arguments);
     } else if (command == "pipeline") {
       const std::string lp_epoch = Optional(arguments, "lp-epoch");
       const std::string lp_solution = Optional(arguments, "lp-solution");

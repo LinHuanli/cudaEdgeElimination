@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cuda_edge_elimination/ht_trace.hpp"
 #include "cuda_edge_elimination/local_search.hpp"
 
 #include <compare>
@@ -194,6 +195,11 @@ struct HtRecursiveResult {
   HtRecursiveProof proof;
 };
 
+enum class HtScheduler : std::uint8_t {
+  kWavefront,
+  kTransposed,
+};
+
 struct HtWavefrontOptions {
   HtRecursiveOptions search_options{};
   // 每个 reply 生成 chunk 的父状态上限；0 表示一次覆盖完整 frontier，不裁剪状态。
@@ -214,11 +220,21 @@ struct HtWavefrontOptions {
   bool reuse_reply_cuda_cache{true};
   // 精确相同的 center/end task 只向 CUDA 提交一次；CPU 仍构造完整逻辑结果。
   bool deduplicate_reply_tasks{true};
+  // Trace 仅用于离线调度研究；关闭时不构建额外 AND/OR 树。
+  bool collect_short_circuit_trace{false};
+  HtScheduler scheduler{HtScheduler::kWavefront};
+  // 0 表示按后端自动选择；正数表示每个 AND 窗口预取的规范 replies 数。
+  std::uint32_t speculation_width{1U};
 };
 
 struct HtWavefrontResult {
   HtSearchStatus status{HtSearchStatus::kInvalid};
   HtRecursiveProof proof;
+  std::string scheduler{"wavefront"};
+  std::uint32_t speculation_width{1U};
+  std::uint64_t continuations_created{};
+  std::uint64_t short_circuits{};
+  std::uint64_t speculative_leaf_tasks{};
   std::string propagation_backend{"none"};
   int selected_device{-1};
   bool cpu_verified{false};
@@ -328,6 +344,7 @@ struct HtWavefrontResult {
   double propagation_ms{};
   double proof_extract_ms{};
   double proof_verify_ms{};
+  HtShortCircuitTrace short_circuit_trace;
 };
 
 // GPU continuation 层使用的紧凑只读任务；CPU 在接受结果前复算全部状态。
@@ -441,6 +458,11 @@ EvaluateHtEndReplies(const GraphSnapshot& graph, const std::vector<HtEndReplyTas
                                                        NodeEdge target_edge,
                                                        const HtWavefrontOptions& options = {});
 
+// 规范 child 仍按 DFS 次序提交，但同一 AND 窗口的 leaf 可批量预取。
+[[nodiscard]] HtWavefrontResult ProveEdgeByTransposedHt(const GraphSnapshot& graph,
+                                                        NodeEdge target_edge,
+                                                        const HtWavefrontOptions& options = {});
+
 // V1 文本证书嵌入每个 leaf 的 path k-opt V1；读取只做结构校验，授权仍须调用 verifier。
 [[nodiscard]] std::string SerializeHtRecursiveProof(const HtRecursiveProof& proof);
 [[nodiscard]] HtRecursiveProof ParseHtRecursiveProof(std::string_view serialized);
@@ -465,6 +487,12 @@ ProveEdgeByWavefrontHtBoundToSnapshot(const GraphSnapshot& graph, NodeEdge targe
                                       const HtWavefrontOptions& options,
                                       const KOptSnapshotBinding& snapshot_binding,
                                       const HtGraphValidationBinding& graph_validation_binding);
+
+[[nodiscard]] HtWavefrontResult
+ProveEdgeByTransposedHtBoundToSnapshot(const GraphSnapshot& graph, NodeEdge target_edge,
+                                       const HtWavefrontOptions& options,
+                                       const KOptSnapshotBinding& snapshot_binding,
+                                       const HtGraphValidationBinding& graph_validation_binding);
 
 [[nodiscard]] HtCdBatchResult
 EvaluateHtCdCandidatesBoundToValidatedGraph(const GraphSnapshot& graph, NodeEdge target_edge,

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
@@ -556,6 +557,134 @@ std::vector<ExactTourBlock> BuildExactTourBlocks(const TourContext& context,
     blocks.push_back({node, node, false});
   }
   return blocks;
+}
+
+struct ExactTourValueResult {
+  std::int64_t best_cost{std::numeric_limits<std::int64_t>::max()};
+  std::size_t best_state{};
+  std::uint64_t states_tested{};
+};
+
+ExactTourValueResult SolveExactTourValueCompact(const GraphSnapshot& graph,
+                                                const std::vector<ExactTourBlock>& blocks,
+                                                const std::optional<NodeEdge>& forbidden) {
+  const std::size_t block_count = blocks.size();
+  const std::size_t state_count = 2U * block_count;
+  const std::size_t mask_count = std::size_t{1} << block_count;
+  const std::int64_t infinity = std::numeric_limits<std::int64_t>::max();
+  constexpr std::size_t kStartMask = 1U;
+  constexpr std::size_t kStartState = 0U;
+
+  std::vector<std::size_t> current_masks = {kStartMask};
+  std::vector<std::int64_t> current_cost(state_count, infinity);
+  current_cost[kStartState] = 0;
+  ExactTourValueResult result;
+  result.best_state = state_count;
+
+  for (std::size_t layer = 1U; layer < block_count; ++layer) {
+    std::vector<std::size_t> next_masks;
+    next_masks.reserve(current_masks.size() * (block_count - layer));
+    for (std::size_t mask = kStartMask; mask < mask_count; mask += 2U) {
+      if (std::popcount(mask) == static_cast<int>(layer + 1U)) {
+        next_masks.push_back(mask);
+      }
+    }
+    std::vector<std::int32_t> next_rank(mask_count, -1);
+    for (std::size_t rank = 0U; rank < next_masks.size(); ++rank) {
+      next_rank[next_masks[rank]] = static_cast<std::int32_t>(rank);
+    }
+    if (next_masks.size() > std::numeric_limits<std::size_t>::max() / state_count) {
+      throw std::overflow_error("compact exact DP layer 规模溢出");
+    }
+    std::vector<std::int64_t> next_cost(next_masks.size() * state_count, infinity);
+
+    for (std::size_t rank = 0U; rank < current_masks.size(); ++rank) {
+      const std::size_t mask = current_masks[rank];
+      const std::size_t row = rank * state_count;
+      for (std::size_t block_index = 0U; block_index < block_count; ++block_index) {
+        if ((mask & (std::size_t{1} << block_index)) == 0U) {
+          continue;
+        }
+        for (std::uint32_t orientation = 0U;
+             orientation < BlockOrientationCount(blocks[block_index]); ++orientation) {
+          const std::size_t state = 2U * block_index + orientation;
+          const std::int64_t cost = current_cost[row + state];
+          if (cost == infinity) {
+            continue;
+          }
+          if (result.states_tested == std::numeric_limits<std::uint64_t>::max()) {
+            throw std::overflow_error("compact exact DP 状态计数溢出");
+          }
+          ++result.states_tested;
+          const std::int32_t from = BlockExit(blocks[block_index], orientation);
+          for (std::size_t next_block = 0U; next_block < block_count; ++next_block) {
+            const std::size_t next_bit = std::size_t{1} << next_block;
+            if ((mask & next_bit) != 0U) {
+              continue;
+            }
+            const std::size_t next_mask = mask | next_bit;
+            const std::int32_t next_row_rank = next_rank[next_mask];
+            if (next_row_rank < 0) {
+              throw std::logic_error("compact exact DP 子集 rank 缺失");
+            }
+            const std::size_t next_row = static_cast<std::size_t>(next_row_rank) * state_count;
+            for (std::uint32_t next_orientation = 0U;
+                 next_orientation < BlockOrientationCount(blocks[next_block]); ++next_orientation) {
+              const std::int32_t to = BlockEntry(blocks[next_block], next_orientation);
+              if (forbidden.has_value() && CanonicalEdge(from, to) == *forbidden) {
+                continue;
+              }
+              const std::int64_t transition = graph.Distance(from, to);
+              if (transition < 0 || cost > infinity - transition) {
+                continue;
+              }
+              const std::size_t next_state = 2U * next_block + next_orientation;
+              const std::int64_t candidate = cost + transition;
+              if (candidate < next_cost[next_row + next_state]) {
+                next_cost[next_row + next_state] = candidate;
+              }
+            }
+          }
+        }
+      }
+    }
+    current_masks = std::move(next_masks);
+    current_cost = std::move(next_cost);
+  }
+
+  if (current_masks.size() != 1U || current_masks.front() != mask_count - 1U ||
+      current_cost.size() != state_count) {
+    throw std::logic_error("compact exact DP 最终层非法");
+  }
+  const std::int32_t start_entry = BlockEntry(blocks.front(), 0U);
+  for (std::size_t block_index = 1U; block_index < block_count; ++block_index) {
+    for (std::uint32_t orientation = 0U; orientation < BlockOrientationCount(blocks[block_index]);
+         ++orientation) {
+      const std::size_t state = 2U * block_index + orientation;
+      const std::int64_t path_cost = current_cost[state];
+      if (path_cost == infinity) {
+        continue;
+      }
+      if (result.states_tested == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error("compact exact DP 状态计数溢出");
+      }
+      ++result.states_tested;
+      const std::int32_t from = BlockExit(blocks[block_index], orientation);
+      if (forbidden.has_value() && CanonicalEdge(from, start_entry) == *forbidden) {
+        continue;
+      }
+      const std::int64_t closing = graph.Distance(from, start_entry);
+      if (closing < 0 || path_cost > infinity - closing) {
+        continue;
+      }
+      const std::int64_t candidate = path_cost + closing;
+      if (candidate < result.best_cost) {
+        result.best_cost = candidate;
+        result.best_state = state;
+      }
+    }
+  }
+  return result;
 }
 
 KOptCostTask BuildKOptCostTask(const TourContext& context,
@@ -1138,6 +1267,82 @@ std::uint64_t ReadHexHash(std::istream* const input, const std::string_view fiel
   return parsed;
 }
 
+std::vector<ExactTourBlock> ValidateAndConvertExactTask(const GraphSnapshot& graph,
+                                                        const ExactTourCostTask& task) {
+  if (task.block_count < 2U || task.block_count > kExactTourCudaMaxBlocks) {
+    throw std::invalid_argument("exact DP task 的 block_count 必须位于 [2,13]");
+  }
+  std::vector<bool> used(static_cast<std::size_t>(graph.dimension), false);
+  std::vector<ExactTourBlock> blocks;
+  blocks.reserve(task.block_count);
+  for (std::uint32_t block = 0U; block < task.block_count; ++block) {
+    const std::int32_t first = task.first[block];
+    const std::int32_t second = task.second[block];
+    if (first < 0 || second < 0 || first >= graph.dimension || second >= graph.dimension ||
+        task.paired[block] > 1U || (task.paired[block] == 0U && first != second) ||
+        (task.paired[block] != 0U && first == second) || used[static_cast<std::size_t>(first)] ||
+        (first != second && used[static_cast<std::size_t>(second)])) {
+      throw std::invalid_argument("exact DP task 的 block 端点、paired 标记或节点分区非法");
+    }
+    used[static_cast<std::size_t>(first)] = true;
+    used[static_cast<std::size_t>(second)] = true;
+    blocks.push_back({first, second, task.paired[block] != 0U});
+  }
+  if (!((task.forbidden.u == -1 && task.forbidden.v == -1) ||
+        (task.forbidden.u >= 0 && task.forbidden.u < task.forbidden.v &&
+         task.forbidden.v < graph.dimension))) {
+    throw std::invalid_argument("exact DP task 的 forbidden edge 非法");
+  }
+  return blocks;
+}
+
+std::optional<NodeEdge> ExactTaskForbidden(const ExactTourCostTask& task) {
+  return task.forbidden.u < 0 ? std::nullopt : std::optional<NodeEdge>(task.forbidden);
+}
+
+bool ExactTaskFitsCudaUint32(const GraphSnapshot& graph,
+                             const std::vector<ExactTourBlock>& blocks) {
+  if (!graph.integer_coordinates || !graph.integer_distance_safe ||
+      (graph.distance_type != DistanceType::kEuc2D &&
+       graph.distance_type != DistanceType::kCeil2D)) {
+    return false;
+  }
+  const std::uint64_t limit = static_cast<std::uint64_t>(UINT32_MAX) - 1U;
+  const std::uint64_t edge_limit = limit / blocks.size();
+  for (const ExactTourBlock& first : blocks) {
+    for (std::uint32_t first_orientation = 0U; first_orientation < BlockOrientationCount(first);
+         ++first_orientation) {
+      for (const ExactTourBlock& second : blocks) {
+        for (std::uint32_t second_orientation = 0U;
+             second_orientation < BlockOrientationCount(second); ++second_orientation) {
+          const std::int64_t distance = graph.Distance(BlockExit(first, first_orientation),
+                                                       BlockEntry(second, second_orientation));
+          if (distance < 0 || static_cast<std::uint64_t>(distance) > edge_limit) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+  return true;
+}
+
+ExactTourCostTask BuildExactTourCostTask(const std::vector<ExactTourBlock>& blocks,
+                                         const std::optional<NodeEdge>& forbidden) {
+  if (blocks.size() > kExactTourCudaMaxBlocks) {
+    throw std::invalid_argument("无法为超过 13 个 block 构造 CUDA exact DP task");
+  }
+  ExactTourCostTask task;
+  task.block_count = static_cast<std::uint32_t>(blocks.size());
+  for (std::size_t index = 0U; index < blocks.size(); ++index) {
+    task.first[index] = blocks[index].first;
+    task.second[index] = blocks[index].second;
+    task.paired[index] = blocks[index].paired ? 1U : 0U;
+  }
+  task.forbidden = forbidden.value_or(NodeEdge{-1, -1});
+  return task;
+}
+
 } // namespace
 
 KOptReconnectTable BuildKOptReconnectTable(const std::uint32_t k) {
@@ -1673,11 +1878,98 @@ KOptSearchResult FindKOptWitness(const GraphSnapshot& graph, const NormalizedPat
   return FindKOptWitnessImpl(graph, paths, outside, required_edge, options);
 }
 
+ExactTourCostBatchResult EvaluateExactTourCosts(const GraphSnapshot& graph,
+                                                const std::vector<ExactTourCostTask>& tasks,
+                                                const PathCompatibilityBackend backend) {
+  ExactTourCostBatchResult result;
+  if (backend != PathCompatibilityBackend::kAuto && backend != PathCompatibilityBackend::kCpu &&
+      backend != PathCompatibilityBackend::kCuda) {
+    throw std::invalid_argument("未知 exact DP 后端");
+  }
+  if (tasks.empty()) {
+    result.backend = backend == PathCompatibilityBackend::kCuda ? "cuda" : "cpu";
+    result.cpu_verified = true;
+    return result;
+  }
+  const std::uint32_t block_count = tasks.front().block_count;
+  std::vector<std::vector<ExactTourBlock>> blocks;
+  blocks.reserve(tasks.size());
+  std::vector<std::int64_t> cpu_costs;
+  cpu_costs.reserve(tasks.size());
+  std::vector<std::size_t> cuda_indices;
+  std::vector<ExactTourCostTask> cuda_tasks;
+  for (std::size_t index = 0U; index < tasks.size(); ++index) {
+    if (tasks[index].block_count != block_count) {
+      throw std::invalid_argument("exact DP batch 必须按 block_count 分桶");
+    }
+    blocks.push_back(ValidateAndConvertExactTask(graph, tasks[index]));
+    cpu_costs.push_back(
+        SolveExactTourValueCompact(graph, blocks.back(), ExactTaskForbidden(tasks[index]))
+            .best_cost);
+    if (ExactTaskFitsCudaUint32(graph, blocks.back())) {
+      cuda_indices.push_back(index);
+      cuda_tasks.push_back(tasks[index]);
+    } else if (backend == PathCompatibilityBackend::kCuda) {
+      throw std::invalid_argument("显式 CUDA exact DP task 超出 uint32 安全范围");
+    }
+  }
+  result.best_costs = cpu_costs;
+  result.cpu_verified = true;
+  if (backend == PathCompatibilityBackend::kCpu) {
+    result.backend = "cpu";
+    result.cpu_fallback_tasks = tasks.size();
+    return result;
+  }
+
+  std::string reason;
+  if (cuda_tasks.empty() || !detail::ExactTourCostCudaAvailable(&reason)) {
+    if (backend == PathCompatibilityBackend::kCuda) {
+      throw std::runtime_error("CUDA exact DP 后端不可用: " + reason);
+    }
+    result.backend = "cpu-fallback";
+    result.cpu_fallback_tasks = tasks.size();
+    return result;
+  }
+  std::vector<std::int64_t> cuda_costs;
+  try {
+    cuda_costs = detail::EvaluateExactTourCostsCuda(graph, cuda_tasks, &result.selected_device,
+                                                    &result.shared_memory_bytes);
+  } catch (const std::exception&) {
+    if (backend == PathCompatibilityBackend::kCuda) {
+      throw;
+    }
+    result.backend = "cpu-fallback";
+    result.selected_device = -1;
+    result.cpu_fallback_tasks = tasks.size();
+    result.shared_memory_bytes = 0U;
+    return result;
+  }
+  if (cuda_costs.size() != cuda_indices.size()) {
+    throw std::logic_error("CUDA exact DP 返回数量不一致");
+  }
+  for (std::size_t offset = 0U; offset < cuda_indices.size(); ++offset) {
+    if (cuda_costs[offset] != cpu_costs[cuda_indices[offset]]) {
+      throw std::runtime_error("CUDA exact DP 与 CPU compact DP 结果不一致");
+    }
+  }
+  result.tasks_submitted = cuda_tasks.size();
+  result.cpu_fallback_tasks = tasks.size() - cuda_tasks.size();
+  result.backend = cuda_tasks.size() == tasks.size() ? "cuda-cpu-verified" : "mixed-cpu-fallback";
+  return result;
+}
+
 KOptSearchResult FindExactTourWitness(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
                                       const EndpointMatching& outside,
                                       const std::optional<NodeEdge>& required_edge,
-                                      const std::uint32_t max_blocks) {
+                                      const std::uint32_t max_blocks,
+                                      const PathCompatibilityBackend backend) {
   KOptSearchResult result;
+  if (backend != PathCompatibilityBackend::kAuto && backend != PathCompatibilityBackend::kCpu &&
+      backend != PathCompatibilityBackend::kCuda) {
+    result.status = KOptSearchStatus::kInvalid;
+    result.reason = "未知 exact DP 后端";
+    return result;
+  }
   if (max_blocks == 0 || max_blocks > 18) {
     result.status = KOptSearchStatus::kUnresolved;
     result.reason = "exact fallback 的 max_blocks 必须位于 [1,18]";
@@ -1706,6 +1998,94 @@ KOptSearchResult FindExactTourWitness(const GraphSnapshot& graph, const Normaliz
     result.reason = "exact fallback DP 规模溢出";
     return result;
   }
+  const std::optional<NodeEdge> forbidden =
+      required_edge.has_value()
+          ? std::optional<NodeEdge>(CanonicalEdge(required_edge->u, required_edge->v))
+          : std::nullopt;
+  std::vector<NodeEdge> original_path_edges(context.path_edges.begin(), context.path_edges.end());
+  std::int64_t original_path_cost = 0;
+  std::string cost_reason;
+  if (!SumEdgeCosts(graph, original_path_edges, &original_path_cost, &cost_reason)) {
+    result.reason = cost_reason;
+    return result;
+  }
+
+  std::optional<std::int64_t> cuda_candidate_cost;
+  bool run_cpu_compact = backend == PathCompatibilityBackend::kCpu;
+  if (backend != PathCompatibilityBackend::kCpu) {
+    if (block_count > kExactTourCudaMaxBlocks || !ExactTaskFitsCudaUint32(graph, blocks)) {
+      if (backend == PathCompatibilityBackend::kCuda) {
+        result.status = KOptSearchStatus::kUnresolved;
+        result.reason = "显式 CUDA exact DP 不支持该 block 数、距离类型或 uint32 成本范围";
+        return result;
+      }
+      run_cpu_compact = true;
+    }
+  }
+  if (!run_cpu_compact) {
+    try {
+      std::string cuda_reason;
+      if (!detail::ExactTourCostCudaAvailable(&cuda_reason)) {
+        throw std::runtime_error(cuda_reason);
+      }
+      int selected_device = -1;
+      std::uint64_t shared_memory_bytes = 0U;
+      const std::vector<std::int64_t> costs =
+          detail::EvaluateExactTourCostsCuda(graph, {BuildExactTourCostTask(blocks, forbidden)},
+                                             &selected_device, &shared_memory_bytes);
+      static_cast<void>(selected_device);
+      static_cast<void>(shared_memory_bytes);
+      if (costs.size() != 1U || costs.front() < 0) {
+        throw std::runtime_error("CUDA exact DP 返回非法 candidate value");
+      }
+      cuda_candidate_cost = costs.front();
+      if (*cuda_candidate_cost >= original_path_cost) {
+        // GPU 阴性结果不能授权任何删除；直接保留边即可省去昂贵的 CPU exact DP。
+        result.status = KOptSearchStatus::kUnresolved;
+        result.reason = "CUDA exact DP 未产生严格改善候选；按 candidate-only 规则保留边";
+        return result;
+      }
+    } catch (const std::exception& error) {
+      if (backend == PathCompatibilityBackend::kCuda) {
+        result.status = KOptSearchStatus::kUnresolved;
+        result.reason = std::string("CUDA exact DP 失败: ") + error.what();
+        return result;
+      }
+      // auto 后端设备不可用时回到规范 CPU compact；显式 CUDA 则已安全失败。
+      run_cpu_compact = true;
+    }
+  }
+
+  ExactTourValueResult compact;
+  try {
+    compact = SolveExactTourValueCompact(graph, blocks, forbidden);
+  } catch (const std::bad_alloc&) {
+    result.status = KOptSearchStatus::kUnresolved;
+    result.reason = "compact exact DP 内存不足";
+    return result;
+  } catch (const std::overflow_error& error) {
+    result.status = KOptSearchStatus::kUnresolved;
+    result.reason = error.what();
+    return result;
+  }
+  if (cuda_candidate_cost.has_value() && *cuda_candidate_cost != compact.best_cost) {
+    result.status = KOptSearchStatus::kInvalid;
+    result.reason = "CUDA exact DP 改善候选与 CPU compact DP 结果不一致";
+    return result;
+  }
+  result.exact_states_tested = compact.states_tested;
+  if (compact.best_state == state_count) {
+    result.status = KOptSearchStatus::kNoImprovement;
+    result.reason = "不存在满足 required-edge 约束的局部巡回";
+    return result;
+  }
+  if (compact.best_cost >= original_path_cost) {
+    result.status = KOptSearchStatus::kNoImprovement;
+    result.reason = "compact 精确 DP 证明不存在严格更短的受约束局部巡回";
+    return result;
+  }
+
+  // value pass 成功后才分配 predecessor；这条 traceback pass 同时充当旧完整 DP oracle。
   const std::size_t cell_count = state_count * mask_count;
   const std::int64_t infinity = std::numeric_limits<std::int64_t>::max();
   std::vector<std::int64_t> cost;
@@ -1726,10 +2106,6 @@ KOptSearchResult FindExactTourWitness(const GraphSnapshot& graph, const Normaliz
   constexpr std::size_t kStartState = 0;
   constexpr std::size_t kStartMask = 1;
   cost[cell(kStartMask, kStartState)] = 0;
-  const std::optional<NodeEdge> forbidden =
-      required_edge.has_value()
-          ? std::optional<NodeEdge>(CanonicalEdge(required_edge->u, required_edge->v))
-          : std::nullopt;
 
   for (std::size_t mask = 1; mask < mask_count; ++mask) {
     if ((mask & kStartMask) == 0) {
@@ -1746,7 +2122,6 @@ KOptSearchResult FindExactTourWitness(const GraphSnapshot& graph, const Normaliz
         if (current_cost == infinity) {
           continue;
         }
-        ++result.exact_states_tested;
         const std::int32_t from = BlockExit(blocks[block_index], orientation);
         for (std::size_t next_block = 0; next_block < block_count; ++next_block) {
           const std::size_t next_bit = std::size_t{1} << next_block;
@@ -1804,22 +2179,10 @@ KOptSearchResult FindExactTourWitness(const GraphSnapshot& graph, const Normaliz
       }
     }
   }
-  if (best_state == state_count) {
-    result.status = KOptSearchStatus::kNoImprovement;
-    result.reason = "不存在满足 required-edge 约束的局部巡回";
-    return result;
-  }
-
-  std::vector<NodeEdge> original_path_edges(context.path_edges.begin(), context.path_edges.end());
-  std::int64_t original_path_cost = 0;
-  std::string cost_reason;
-  if (!SumEdgeCosts(graph, original_path_edges, &original_path_cost, &cost_reason)) {
-    result.reason = cost_reason;
-    return result;
-  }
-  if (best_cost >= original_path_cost) {
-    result.status = KOptSearchStatus::kNoImprovement;
-    result.reason = "精确 DP 证明不存在严格更短的受约束局部巡回";
+  if (best_state == state_count || best_state != compact.best_state ||
+      best_cost != compact.best_cost) {
+    result.status = KOptSearchStatus::kInvalid;
+    result.reason = "compact exact DP 与完整 traceback DP 结果不一致";
     return result;
   }
 
@@ -1900,6 +2263,14 @@ KOptSearchResult FindExactTourWitness(const GraphSnapshot& graph, const Normaliz
   result.reason = "精确 DP 找到严格改善的局部巡回";
   result.witness = std::move(witness);
   return result;
+}
+
+KOptSearchResult FindExactTourWitness(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
+                                      const EndpointMatching& outside,
+                                      const std::optional<NodeEdge>& required_edge,
+                                      const std::uint32_t max_blocks) {
+  return FindExactTourWitness(graph, paths, outside, required_edge, max_blocks,
+                              PathCompatibilityBackend::kCpu);
 }
 
 bool VerifyKOptWitness(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
@@ -2009,8 +2380,9 @@ PathSystemKOptProof ProvePathSystemByKOpt(const GraphSnapshot& graph,
       return proof;
     }
     if (search.status != KOptSearchStatus::kImproved && options.exact_fallback_max_blocks != 0) {
-      KOptSearchResult exact = FindExactTourWitness(graph, paths, outside[source], required_edge,
-                                                    options.exact_fallback_max_blocks);
+      KOptSearchResult exact =
+          FindExactTourWitness(graph, paths, outside[source], required_edge,
+                               options.exact_fallback_max_blocks, options.exact_backend);
       if (!AddWithoutOverflow(&proof.exact_states_tested, exact.exact_states_tested)) {
         proof.reason = "path-system exact DP 状态计数溢出";
         return proof;
@@ -2379,8 +2751,9 @@ void ApplyBatchedKOptSearch(const GraphSnapshot& graph, const NormalizedPathSyst
     return;
   }
   if (search.status != KOptSearchStatus::kImproved && options.exact_fallback_max_blocks != 0U) {
-    KOptSearchResult exact = FindExactTourWitness(graph, paths, work->catalog->outside[source],
-                                                  required_edge, options.exact_fallback_max_blocks);
+    KOptSearchResult exact =
+        FindExactTourWitness(graph, paths, work->catalog->outside[source], required_edge,
+                             options.exact_fallback_max_blocks, options.exact_backend);
     if (!AddWithoutOverflow(&work->proof.exact_states_tested, exact.exact_states_tested)) {
       work->proof.reason = "path-system exact DP 状态计数溢出";
       work->finished = true;

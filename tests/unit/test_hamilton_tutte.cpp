@@ -482,11 +482,42 @@ void TestDfsWavefrontRandomDifferential() {
          .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
          .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
          .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu});
+    const cudaee::HtWavefrontResult transposed_serial = cudaee::ProveEdgeByTransposedHt(
+        graph, target,
+        {.search_options = options,
+         .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
+         .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+         .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu,
+         .scheduler = cudaee::HtScheduler::kTransposed,
+         .speculation_width = 1U});
+    const cudaee::HtWavefrontResult transposed_window = cudaee::ProveEdgeByTransposedHt(
+        graph, target,
+        {.search_options = options,
+         .propagation_backend = cudaee::PathCompatibilityBackend::kCpu,
+         .path_append_backend = cudaee::PathCompatibilityBackend::kCpu,
+         .hamilton_reply_backend = cudaee::PathCompatibilityBackend::kCpu,
+         .scheduler = cudaee::HtScheduler::kTransposed,
+         .speculation_width = 4U});
     Check(dfs.status == wavefront.status, "random DFS/wavefront truth mismatch");
+    Check(dfs.status == transposed_serial.status && dfs.status == transposed_window.status,
+          "random DFS/transposed truth mismatch");
+    Check(dfs.proof.states_expanded == transposed_serial.proof.states_expanded &&
+              dfs.proof.replies_expanded == transposed_serial.proof.replies_expanded &&
+              dfs.proof.leaf_calls == transposed_serial.proof.leaf_calls &&
+              transposed_serial.proof.states_expanded == transposed_window.proof.states_expanded &&
+              transposed_serial.proof.replies_expanded ==
+                  transposed_window.proof.replies_expanded &&
+              transposed_serial.proof.leaf_calls == transposed_window.proof.leaf_calls,
+          "transposed speculation does not consume the canonical logical budget");
     if (dfs.status == cudaee::HtSearchStatus::kProven) {
       std::string reason;
       Check(cudaee::VerifyHtRecursiveProof(graph, dfs.proof, &reason), reason);
       Check(cudaee::VerifyHtRecursiveProof(graph, wavefront.proof, &reason), reason);
+      Check(cudaee::SerializeHtRecursiveProof(dfs.proof) ==
+                    cudaee::SerializeHtRecursiveProof(transposed_serial.proof) &&
+                cudaee::SerializeHtRecursiveProof(dfs.proof) ==
+                    cudaee::SerializeHtRecursiveProof(transposed_window.proof),
+            "transposed speculation preserves canonical DFS proof bytes");
       CheckTargetIsNotOptimal(graph, target);
     }
   }
@@ -997,6 +1028,52 @@ void TestRecursivePointProof() {
       "HT scan rejects more than 32 target workers");
   Check(excessive_worker_graph.ContentHash() == graph.ContentHash(),
         "excessive target worker configuration leaves the graph unchanged");
+
+  cudaee::HtScanOptions excessive_worker_count_options = scan_options;
+  excessive_worker_count_options.target_workers = 33U;
+  cudaee::GraphSnapshot excessive_worker_count_graph = graph;
+  CheckThrows(
+      [&] {
+        const auto ignored =
+            cudaee::RunHtScanEpoch(&excessive_worker_count_graph, excessive_worker_count_options);
+        static_cast<void>(ignored);
+      },
+      "HT scan rejects an explicit worker count above 32");
+  Check(excessive_worker_count_graph.ContentHash() == graph.ContentHash(),
+        "invalid explicit worker count leaves the graph unchanged");
+
+  cudaee::HtScanOptions serial_cpu_slice_options = scan_options;
+  serial_cpu_slice_options.target_offset = 0U;
+  serial_cpu_slice_options.max_targets = 3U;
+  cudaee::GraphSnapshot serial_cpu_slice_graph = graph;
+  const cudaee::HtScanResult serial_cpu_slice =
+      cudaee::RunHtScanEpoch(&serial_cpu_slice_graph, serial_cpu_slice_options);
+  cudaee::HtScanOptions parallel_cpu_slice_options = serial_cpu_slice_options;
+  parallel_cpu_slice_options.target_workers = 2U;
+  cudaee::GraphSnapshot parallel_cpu_slice_graph = graph;
+  const cudaee::HtScanResult parallel_cpu_slice =
+      cudaee::RunHtScanEpoch(&parallel_cpu_slice_graph, parallel_cpu_slice_options);
+  Check(parallel_cpu_slice.target_workers == 2U && parallel_cpu_slice.target_parallel &&
+            parallel_cpu_slice.attempts.size() == serial_cpu_slice.attempts.size() &&
+            parallel_cpu_slice_graph.ContentHash() == serial_cpu_slice_graph.ContentHash() &&
+            parallel_cpu_slice.elimination.final_hash == serial_cpu_slice.elimination.final_hash &&
+            parallel_cpu_slice.elimination.proof.size() ==
+                serial_cpu_slice.elimination.proof.size() &&
+            parallel_cpu_slice.elimination.ht_proofs.size() ==
+                serial_cpu_slice.elimination.ht_proofs.size(),
+        "CPU target workers preserve deterministic ordered epoch commit");
+  for (std::size_t index = 0U; index < parallel_cpu_slice.attempts.size(); ++index) {
+    Check(parallel_cpu_slice.attempts[index].edge_id == serial_cpu_slice.attempts[index].edge_id &&
+              parallel_cpu_slice.attempts[index].status ==
+                  serial_cpu_slice.attempts[index].status &&
+              parallel_cpu_slice.attempts[index].assigned_device == -1,
+          "CPU target workers preserve target order and per-target truth");
+  }
+  for (std::size_t index = 0U; index < parallel_cpu_slice.elimination.ht_proofs.size(); ++index) {
+    Check(cudaee::SerializeHtRecursiveProof(parallel_cpu_slice.elimination.ht_proofs[index]) ==
+              cudaee::SerializeHtRecursiveProof(serial_cpu_slice.elimination.ht_proofs[index]),
+          "CPU target workers preserve canonical HT proof bytes");
+  }
 
   cudaee::HtScanOptions completed_scan_options = scan_options;
   completed_scan_options.target_offset = weighted_targets.size();
@@ -1550,6 +1627,49 @@ void TestRecursivePointProof() {
                   cudaee::SerializeHtRecursiveProof(cuda_scan.elimination.ht_proofs.front()),
           "single target worker pins every CUDA scan path without changing proof bytes");
 
+    cudaee::HtScanOptions shared_device_serial_options = cuda_scan_options;
+    shared_device_serial_options.target_offset = 0U;
+    shared_device_serial_options.max_targets = 3U;
+    shared_device_serial_options.target_devices = {0};
+    cudaee::GraphSnapshot shared_device_serial_graph = graph;
+    const cudaee::HtScanResult shared_device_serial_scan =
+        cudaee::RunHtScanEpoch(&shared_device_serial_graph, shared_device_serial_options);
+    cudaee::HtScanOptions shared_device_parallel_options = shared_device_serial_options;
+    shared_device_parallel_options.target_workers = 2U;
+    cudaee::GraphSnapshot shared_device_parallel_graph = graph;
+    const cudaee::HtScanResult shared_device_parallel_scan =
+        cudaee::RunHtScanEpoch(&shared_device_parallel_graph, shared_device_parallel_options);
+    Check(shared_device_parallel_scan.target_workers == 2U &&
+              shared_device_parallel_scan.target_parallel &&
+              shared_device_parallel_scan.attempts.size() ==
+                  shared_device_serial_scan.attempts.size() &&
+              shared_device_parallel_graph.ContentHash() ==
+                  shared_device_serial_graph.ContentHash() &&
+              shared_device_parallel_scan.elimination.proof.size() ==
+                  shared_device_serial_scan.elimination.proof.size() &&
+              shared_device_parallel_scan.elimination.ht_proofs.size() ==
+                  shared_device_serial_scan.elimination.ht_proofs.size(),
+          "two target workers may safely share one CUDA device");
+    for (const cudaee::HtScanAttempt& attempt : shared_device_parallel_scan.attempts) {
+      Check(attempt.assigned_device == 0 &&
+                (attempt.selected_device < 0 || attempt.selected_device == 0) &&
+                (attempt.leaf_cost_selected_device < 0 || attempt.leaf_cost_selected_device == 0) &&
+                (attempt.path_append_selected_device < 0 ||
+                 attempt.path_append_selected_device == 0) &&
+                (attempt.hamilton_reply_selected_device < 0 ||
+                 attempt.hamilton_reply_selected_device == 0) &&
+                (attempt.end_reply_selected_device < 0 || attempt.end_reply_selected_device == 0),
+            "shared-device target workers keep all CUDA phases pinned");
+    }
+    for (std::size_t index = 0U; index < shared_device_parallel_scan.elimination.ht_proofs.size();
+         ++index) {
+      Check(cudaee::SerializeHtRecursiveProof(
+                shared_device_parallel_scan.elimination.ht_proofs[index]) ==
+                cudaee::SerializeHtRecursiveProof(
+                    shared_device_serial_scan.elimination.ht_proofs[index]),
+            "shared-device target workers preserve canonical HT proof bytes");
+    }
+
     if (visible_devices >= 2) {
       cudaee::HtScanOptions sequential_slice_options = cuda_scan_options;
       // 三个目标覆盖第二轮静态切片，确认 worker 0 可安全复用线程/设备本地缓存。
@@ -1901,6 +2021,87 @@ void TestPathAppendBatch() {
 #endif
 }
 
+void TestShortCircuitTraceReplayAndRoundTrip() {
+  cudaee::HtShortCircuitTrace trace;
+  trace.snapshot_hash = 12345U;
+  trace.target_edge = {1, 4};
+  trace.root = 0U;
+  trace.complete = true;
+  trace.nodes = {{.kind = cudaee::HtTraceNodeKind::kOr,
+                  .parent = cudaee::kNoHtTraceNode,
+                  .child_ordinal = 0U,
+                  .depth = 0U,
+                  .value = true,
+                  .work_units = 1U,
+                  .children = {1U, 2U, 3U, 4U}},
+                 {.kind = cudaee::HtTraceNodeKind::kLeaf,
+                  .parent = 0U,
+                  .child_ordinal = 0U,
+                  .depth = 1U,
+                  .value = false,
+                  .work_units = 2U,
+                  .children = {}},
+                 {.kind = cudaee::HtTraceNodeKind::kLeaf,
+                  .parent = 0U,
+                  .child_ordinal = 1U,
+                  .depth = 1U,
+                  .value = false,
+                  .work_units = 3U,
+                  .children = {}},
+                 {.kind = cudaee::HtTraceNodeKind::kLeaf,
+                  .parent = 0U,
+                  .child_ordinal = 2U,
+                  .depth = 1U,
+                  .value = true,
+                  .work_units = 5U,
+                  .children = {}},
+                 {.kind = cudaee::HtTraceNodeKind::kLeaf,
+                  .parent = 0U,
+                  .child_ordinal = 3U,
+                  .depth = 1U,
+                  .value = false,
+                  .work_units = 7U,
+                  .children = {}}};
+
+  const cudaee::HtTraceReplayResult serial = cudaee::ReplayHtShortCircuitTrace(trace, 1U);
+  Check(serial.value && serial.scheduled_nodes == 4U && serial.scheduled_work_units == 11U &&
+            serial.canonical_nodes == 4U && serial.speculative_nodes == 0U &&
+            serial.short_circuits == 1U && serial.peak_ready_width == 1U,
+        "serial trace replay stops at the canonical decisive child");
+  const cudaee::HtTraceReplayResult pair = cudaee::ReplayHtShortCircuitTrace(trace, 2U);
+  Check(pair.value && pair.scheduled_nodes == 5U && pair.scheduled_work_units == 18U &&
+            pair.canonical_nodes == 4U && pair.speculative_nodes == 1U &&
+            pair.peak_ready_width == 2U,
+        "width-two trace replay accounts for the in-flight speculative sibling");
+  const cudaee::HtTraceReplayResult all = cudaee::ReplayHtShortCircuitTrace(trace, 0U);
+  Check(all.scheduled_nodes == 5U && all.speculative_nodes == 1U && all.peak_ready_width == 4U,
+        "unbounded trace replay schedules one complete connective window");
+
+  const std::filesystem::path path =
+      std::filesystem::path(CUDAEE_HT_TEST_TMP_DIR) / "short-circuit.trace";
+  cudaee::WriteHtShortCircuitTraceBundle(path, {.traces = {trace}});
+  const cudaee::HtShortCircuitTraceBundle loaded = cudaee::ReadHtShortCircuitTraceBundle(path);
+  Check(loaded == cudaee::HtShortCircuitTraceBundle{.traces = {trace}},
+        "short-circuit trace serialization is deterministic");
+
+  cudaee::HtShortCircuitTrace damaged = trace;
+  damaged.nodes[4].parent = 1U;
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::ReplayHtShortCircuitTrace(damaged, 1U);
+        static_cast<void>(ignored);
+      },
+      "trace replay rejects a child whose parent binding was tampered");
+  damaged = trace;
+  damaged.complete = false;
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::ReplayHtShortCircuitTrace(damaged, 1U);
+        static_cast<void>(ignored);
+      },
+      "trace replay rejects a partial resource-limited trace");
+}
+
 #ifdef CUDAEE_HAS_CUDA
 void TestCudaWavefrontTruthTable() {
   std::string reason;
@@ -2002,6 +2203,7 @@ int main() {
     TestRecursivePointProof();
     TestRecursiveEndProof();
     TestPathAppendBatch();
+    TestShortCircuitTraceReplayAndRoundTrip();
 #ifdef CUDAEE_HAS_CUDA
     TestCudaWavefrontTruthTable();
 #endif

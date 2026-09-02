@@ -1453,6 +1453,73 @@ std::uint32_t CopySuccessfulState(const std::uint32_t source_index,
   return destination_index;
 }
 
+std::uint32_t AddTraceNode(HtShortCircuitTrace* const trace, HtShortCircuitTraceNode node) {
+  if (trace->nodes.size() >= std::numeric_limits<std::uint32_t>::max()) {
+    throw std::overflow_error("HT short-circuit trace 节点索引溢出");
+  }
+  const std::uint32_t node_index = static_cast<std::uint32_t>(trace->nodes.size());
+  if (node.parent != kNoHtTraceNode) {
+    if (node.parent >= trace->nodes.size()) {
+      throw std::logic_error("HT short-circuit trace parent 非法");
+    }
+    node.child_ordinal = static_cast<std::uint32_t>(trace->nodes[node.parent].children.size());
+  }
+  trace->nodes.push_back(std::move(node));
+  const std::uint32_t parent = trace->nodes[node_index].parent;
+  if (parent != kNoHtTraceNode) {
+    trace->nodes[parent].children.push_back(node_index);
+  }
+  return node_index;
+}
+
+std::uint32_t AppendWaveStateTrace(const std::uint32_t source_index,
+                                   const std::vector<WaveState>& states,
+                                   const std::vector<std::uint8_t>& status,
+                                   const std::uint32_t parent, HtShortCircuitTrace* const trace) {
+  if (source_index >= states.size() || source_index >= status.size()) {
+    throw std::logic_error("HT short-circuit trace state 索引非法");
+  }
+  const WaveState& state = states[source_index];
+  const std::uint32_t state_node = AddTraceNode(trace, {.kind = HtTraceNodeKind::kOr,
+                                                        .parent = parent,
+                                                        .depth = state.depth,
+                                                        .value = status[source_index] != 0U,
+                                                        .work_units = 1U,
+                                                        .children = {}});
+
+  // 根状态只承载 c,d move；其余状态的第 0 个规范 OR child 始终是 leaf 尝试。
+  if (source_index != 0U) {
+    AddTraceNode(trace, {.kind = HtTraceNodeKind::kLeaf,
+                         .parent = state_node,
+                         .depth = state.depth,
+                         .value = state.leaf_proof.proven,
+                         .work_units = 1U,
+                         .children = {}});
+  }
+  for (const WaveMove& move : state.moves) {
+    const bool move_value = MoveProven(move, status);
+    const std::uint32_t move_node = AddTraceNode(trace, {.kind = HtTraceNodeKind::kAnd,
+                                                         .parent = state_node,
+                                                         .depth = state.depth,
+                                                         .value = move_value,
+                                                         .work_units = 1U,
+                                                         .children = {}});
+    for (const HtTreeReply& reply : move.replies) {
+      if (reply.path_infeasible) {
+        AddTraceNode(trace, {.kind = HtTraceNodeKind::kLeaf,
+                             .parent = move_node,
+                             .depth = state.depth + 1U,
+                             .value = true,
+                             .work_units = 1U,
+                             .children = {}});
+      } else {
+        AppendWaveStateTrace(reply.child_index, states, status, move_node, trace);
+      }
+    }
+  }
+  return state_node;
+}
+
 } // namespace
 
 namespace {
@@ -1461,7 +1528,8 @@ HtWavefrontResult
 ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target,
                            const HtWavefrontOptions& options,
                            const detail::KOptSnapshotBinding* snapshot_binding,
-                           const detail::HtGraphValidationBinding* graph_validation_binding) {
+                           const detail::HtGraphValidationBinding* graph_validation_binding,
+                           const bool verify_extracted_proof) {
   HtWavefrontResult result;
   HtRecursiveProof& proof = result.proof;
   std::optional<detail::KOptSnapshotBinding> owned_snapshot_binding;
@@ -1567,6 +1635,17 @@ ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target
                            .end_reply_failed = false,
                            .end_reply_invalid = false,
                            .end_reply_reason = {}};
+  if (options.collect_short_circuit_trace) {
+    result.short_circuit_trace.snapshot_hash = proof.snapshot_hash;
+    result.short_circuit_trace.target_edge = proof.target_edge;
+    result.short_circuit_trace.root =
+        AddTraceNode(&result.short_circuit_trace, {.kind = HtTraceNodeKind::kOr,
+                                                   .parent = kNoHtTraceNode,
+                                                   .depth = 0U,
+                                                   .value = false,
+                                                   .work_units = 1U,
+                                                   .children = {}});
+  }
   try {
     for (const HtCdCandidate& candidate : candidates.candidates) {
       ++proof.cd_candidates_tested;
@@ -1651,6 +1730,10 @@ ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target
         proof.reason = propagation_reason;
         return result;
       }
+      if (options.collect_short_circuit_trace) {
+        AppendWaveStateTrace(0U, states, status, result.short_circuit_trace.root,
+                             &result.short_circuit_trace);
+      }
       if (status.empty() || status.front() == 0U) {
         continue;
       }
@@ -1662,20 +1745,26 @@ ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target
       }
       proof.proven = true;
       proof.reason = "HT wavefront 的一个 c,d 根 move 已完成全部 AND replies";
-      std::string verify_reason;
-      bool verified = false;
-      {
-        ScopedPhaseTimer timer(&result.proof_verify_ms);
-        verified = VerifyHtRecursiveProof(graph, proof, &verify_reason);
-      }
-      if (!verified) {
-        proof.proven = false;
-        proof.nodes.clear();
-        proof.reason = "内部 HT wavefront 复核失败: " + verify_reason;
-        result.status = HtSearchStatus::kInvalid;
-        return result;
+      if (verify_extracted_proof) {
+        std::string verify_reason;
+        bool verified = false;
+        {
+          ScopedPhaseTimer timer(&result.proof_verify_ms);
+          verified = VerifyHtRecursiveProof(graph, proof, &verify_reason);
+        }
+        if (!verified) {
+          proof.proven = false;
+          proof.nodes.clear();
+          proof.reason = "内部 HT wavefront 复核失败: " + verify_reason;
+          result.status = HtSearchStatus::kInvalid;
+          return result;
+        }
       }
       result.status = HtSearchStatus::kProven;
+      if (options.collect_short_circuit_trace) {
+        result.short_circuit_trace.nodes[result.short_circuit_trace.root].value = true;
+        result.short_circuit_trace.complete = true;
+      }
       return result;
     }
   } catch (const std::bad_alloc&) {
@@ -1686,6 +1775,9 @@ ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target
   proof.nodes.clear();
   proof.reason = context.budget_exhausted ? "HT wavefront 资源预算耗尽"
                                           : "HT wavefront 的全部根 moves 均未解决";
+  if (options.collect_short_circuit_trace) {
+    result.short_circuit_trace.complete = !context.budget_exhausted;
+  }
   return result;
 }
 
@@ -1693,7 +1785,7 @@ ProveEdgeByWavefrontHtImpl(const GraphSnapshot& graph, const NodeEdge raw_target
 
 HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeEdge raw_target,
                                          const HtWavefrontOptions& options) {
-  return ProveEdgeByWavefrontHtImpl(graph, raw_target, options, nullptr, nullptr);
+  return ProveEdgeByWavefrontHtImpl(graph, raw_target, options, nullptr, nullptr, true);
 }
 
 HtWavefrontResult detail::ProveEdgeByWavefrontHtBoundToSnapshot(
@@ -1703,8 +1795,9 @@ HtWavefrontResult detail::ProveEdgeByWavefrontHtBoundToSnapshot(
   if (!snapshot_binding.Matches(graph) || !graph_validation_binding.Matches(graph)) {
     throw std::invalid_argument("HT wavefront snapshot binding 与图对象不一致");
   }
+  // scan 的唯一授权点是 CommitHtProofEpoch；此处只生成候选 sidecar，避免重复重放。
   return ProveEdgeByWavefrontHtImpl(graph, target_edge, options, &snapshot_binding,
-                                    &graph_validation_binding);
+                                    &graph_validation_binding, false);
 }
 
 } // namespace cudaee

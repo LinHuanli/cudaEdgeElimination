@@ -66,5 +66,11 @@
 62. [M5 HT reply 精确任务去重](research/58_M5_HT_Reply_Task_Deduplication.md)：按首次出现顺序折叠 batch-local Hamilton/end 任务，以完整 CPU 逻辑结果、开关差分和 d15112 七对 A/B 确认收益。
 63. [M5 HT 跨 batch reply 结果缓存排除画像](research/59_M5_HT_Cross_Batch_Reply_Result_Cache_Profile.md)：量化长生命周期精确 key 只能再减少 136 个 tasks、不能消除任何 CUDA batch，因此不引入结果缓存。
 64. [M5 HT 目标级多 GPU 静态切片](research/60_M5_HT_Target_Multi_GPU_Static_Slicing.md)：按可见设备固定 target workers，保持规范 proof/提交顺序，并以双 A4000 七对 A/B 验证正确性与扩展收益。
+65. [GPU-ElimTSP 融合评审与修订方案 v2](design/GPU-ElimTSP-融合评审与修订方案-v2.md)：对原路线的融合评审、硬件假设修订与阶段建议。
+66. [GPU-ElimTSP 设计方案 v3](design/GPU-ElimTSP-设计方案-v3.md)：短路转置执行、精确 leaf、验证边界与论文对齐的新版总设计。
+67. [V3 单 GPU差距分析与决策](design/V3_单GPU差距分析与决策.md)：结合当前代码确定本分支范围、不变量、基线与采用门禁。
+68. [V3 单 GPU实施路线](research/61_V3_单GPU实施路线.md)：A0/A1/C1/C1.5 的实现拆分与提交策略。
+69. [V3 论文对齐与基准协议](research/62_V3_论文对齐与基准协议.md)：比较 scope、七对 A/B、强度门禁与 Table 7 对齐方法。
+70. [V3 单 GPU原型实现与 Pilot](research/63_V3_单GPU原型实现与Pilot.md)：已落地能力、A5000 消融、转置调度限制和下一工作边界。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

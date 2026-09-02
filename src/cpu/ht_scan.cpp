@@ -71,9 +71,21 @@ void ValidateTargetDevices(const std::vector<int>& devices) {
   }
 }
 
+std::size_t ResolveTargetWorkerCount(const HtScanOptions& options,
+                                     const std::uint64_t attempt_count) {
+  if (attempt_count == 0U) {
+    return 0U;
+  }
+  const std::size_t requested = options.target_workers != 0U
+                                    ? static_cast<std::size_t>(options.target_workers)
+                                    : std::max<std::size_t>(1U, options.target_devices.size());
+  return std::min(requested, static_cast<std::size_t>(attempt_count));
+}
+
 struct HtTargetEvaluation {
   HtScanAttempt attempt;
   std::optional<HtRecursiveProof> proven_proof;
+  std::optional<HtShortCircuitTrace> short_circuit_trace;
 };
 
 HtTargetEvaluation
@@ -84,8 +96,12 @@ EvaluateHtTarget(const GraphSnapshot& graph, const std::int32_t edge_id, const i
                  const std::uint64_t snapshot_hash) {
   const Edge& edge = graph.edges[static_cast<std::size_t>(edge_id)];
   const auto search_start = std::chrono::steady_clock::now();
-  HtWavefrontResult wavefront = detail::ProveEdgeByWavefrontHtBoundToSnapshot(
-      graph, {edge.u, edge.v}, options, snapshot_binding, graph_validation_binding);
+  HtWavefrontResult wavefront =
+      options.scheduler == HtScheduler::kTransposed
+          ? detail::ProveEdgeByTransposedHtBoundToSnapshot(
+                graph, {edge.u, edge.v}, options, snapshot_binding, graph_validation_binding)
+          : detail::ProveEdgeByWavefrontHtBoundToSnapshot(
+                graph, {edge.u, edge.v}, options, snapshot_binding, graph_validation_binding);
 
   HtTargetEvaluation evaluation;
   HtScanAttempt& attempt = evaluation.attempt;
@@ -196,6 +212,9 @@ EvaluateHtTarget(const GraphSnapshot& graph, const std::int32_t edge_id, const i
   if (wavefront.status == HtSearchStatus::kProven) {
     evaluation.proven_proof.emplace(std::move(wavefront.proof));
   }
+  if (!wavefront.short_circuit_trace.nodes.empty()) {
+    evaluation.short_circuit_trace.emplace(std::move(wavefront.short_circuit_trace));
+  }
   if (graph.ContentHash() != snapshot_hash) {
     throw std::logic_error("HT scan 搜索阶段修改了不可变快照");
   }
@@ -289,24 +308,19 @@ void AccumulateHtAttempt(HtScanResult* const scan, const HtScanAttempt& attempt)
   scan->proof_verify_ms += attempt.proof_verify_ms;
 }
 
-void ConsumeHtTargetEvaluation(const GraphSnapshot& graph, HtTargetEvaluation evaluation,
-                               HtScanResult* const scan,
+void ConsumeHtTargetEvaluation(HtTargetEvaluation evaluation, HtScanResult* const scan,
                                std::vector<HtRecursiveProof>* const proven) {
   HtScanAttempt& attempt = evaluation.attempt;
   AccumulateHtAttempt(scan, attempt);
   if (evaluation.proven_proof.has_value()) {
-    std::string reason;
-    const auto verify_start = std::chrono::steady_clock::now();
-    const bool verified = VerifyHtRecursiveProof(graph, *evaluation.proven_proof, &reason);
-    attempt.immediate_verify_ms = ElapsedMilliseconds(verify_start);
-    scan->immediate_verify_ms += attempt.immediate_verify_ms;
-    if (!verified) {
-      throw std::runtime_error("HT scan 成功 proof 即时 CPU 复核失败: " + reason);
-    }
+    // 此时仍是候选 sidecar；CommitHtProofEpoch 会在任何图修改前整批精确重放一次。
     ++scan->proven_targets;
     proven->push_back(std::move(*evaluation.proven_proof));
   } else {
     ++scan->unresolved_targets;
+  }
+  if (evaluation.short_circuit_trace.has_value()) {
+    scan->short_circuit_traces.traces.push_back(std::move(*evaluation.short_circuit_trace));
   }
   scan->attempts.push_back(std::move(attempt));
 }
@@ -351,9 +365,16 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
   if (options.max_targets == 0U || options.max_targets > kMaxHtScanTargets) {
     throw std::invalid_argument("HT scan max_targets 必须位于 [1,1000000]");
   }
+  if (options.target_workers > kMaxHtTargetWorkers) {
+    throw std::invalid_argument("HT scan target_workers 最多允许 32 个 worker");
+  }
 
   const auto total_start = std::chrono::steady_clock::now();
   ValidateTargetDevices(options.target_devices);
+  if (options.wavefront_options.scheduler == HtScheduler::kTransposed &&
+      options.target_devices.size() > 1U) {
+    throw std::invalid_argument("转置 HT 当前只支持单 GPU，target_devices 最多一个 ordinal");
+  }
   // 整个 target 切片在 commit 前只读；两个强类型 binding 可被只读 worker 共享。
   const detail::KOptSnapshotBinding snapshot_binding(*graph);
   const detail::HtGraphValidationBinding graph_validation_binding(*graph);
@@ -370,19 +391,20 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
   scan.target_offset = options.target_offset;
   const std::uint64_t remaining = scan.eligible_targets - options.target_offset;
   const std::uint64_t attempt_count = std::min(options.max_targets, remaining);
-  scan.target_workers = attempt_count == 0U ? 0U : 1U;
+  const std::size_t worker_count = ResolveTargetWorkerCount(options, attempt_count);
+  scan.target_workers = static_cast<std::uint32_t>(worker_count);
+  scan.target_parallel = worker_count > 1U;
   scan.attempts.reserve(static_cast<std::size_t>(attempt_count));
   std::vector<HtRecursiveProof> proven;
   proven.reserve(static_cast<std::size_t>(attempt_count));
 
   const auto target_execution_start = std::chrono::steady_clock::now();
-  if (options.target_devices.empty()) {
+  if (worker_count <= 1U && options.target_devices.empty()) {
     // 默认路径保持历史 target 顺序和当前线程 CUDA 驻留缓存语义。
     for (std::uint64_t relative = 0U; relative < attempt_count; ++relative) {
       const std::uint64_t target_index = options.target_offset + relative;
       const std::int32_t edge_id = targets[static_cast<std::size_t>(target_index)];
-      ConsumeHtTargetEvaluation(*graph,
-                                EvaluateHtTarget(*graph, edge_id, -1, options.wavefront_options,
+      ConsumeHtTargetEvaluation(EvaluateHtTarget(*graph, edge_id, -1, options.wavefront_options,
                                                  snapshot_binding, graph_validation_binding,
                                                  snapshot_hash),
                                 &scan, &proven);
@@ -390,11 +412,6 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
   } else if (attempt_count == 0U) {
     scan.target_workers = 0U;
   } else {
-    const std::size_t worker_count =
-        std::min(options.target_devices.size(), static_cast<std::size_t>(attempt_count));
-    scan.target_workers = static_cast<std::uint32_t>(worker_count);
-    scan.target_parallel = worker_count > 1U;
-
     std::vector<std::unique_ptr<HtTargetEvaluation>> evaluations(
         static_cast<std::size_t>(attempt_count));
     std::vector<std::exception_ptr> failures(static_cast<std::size_t>(attempt_count));
@@ -406,11 +423,15 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
         // 连设备绑定和错误消息分配也纳入捕获，线程入口不得让异常逃逸并触发 terminate。
         std::size_t failure_slot = worker;
         try {
-          const int device = options.target_devices[worker];
-          std::string reason;
-          if (!detail::SetCudaDevicePreferenceForCurrentThread(device, &reason)) {
-            throw std::runtime_error("HT target worker 无法绑定 CUDA device " +
-                                     std::to_string(device) + ": " + reason);
+          const int device = options.target_devices.empty()
+                                 ? -1
+                                 : options.target_devices[worker % options.target_devices.size()];
+          if (device >= 0) {
+            std::string reason;
+            if (!detail::SetCudaDevicePreferenceForCurrentThread(device, &reason)) {
+              throw std::runtime_error("HT target worker 无法绑定 CUDA device " +
+                                       std::to_string(device) + ": " + reason);
+            }
           }
           for (std::size_t relative = worker; relative < evaluations.size();
                relative += worker_count) {
@@ -440,7 +461,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
       if (evaluation == nullptr) {
         throw std::logic_error("HT target worker 未返回完整的静态切片结果");
       }
-      ConsumeHtTargetEvaluation(*graph, std::move(*evaluation), &scan, &proven);
+      ConsumeHtTargetEvaluation(std::move(*evaluation), &scan, &proven);
       evaluation.reset();
     }
   }
@@ -452,7 +473,9 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
   const auto commit_start = std::chrono::steady_clock::now();
   scan.elimination = CommitHtProofEpoch(graph, proven);
   scan.commit_ms = ElapsedMilliseconds(commit_start);
-  scan.elimination.backend = "ht-wavefront-scan-cpu-verified";
+  scan.elimination.backend = options.wavefront_options.scheduler == HtScheduler::kTransposed
+                                 ? "ht-transposed-scan-cpu-verified"
+                                 : "ht-wavefront-scan-cpu-verified";
   scan.total_ms = ElapsedMilliseconds(total_start);
   return scan;
 }

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -14,6 +15,7 @@ namespace {
 constexpr std::uint32_t kMaxLocalEpochs = 1000000U;
 constexpr std::size_t kMaxCombinedProofRecords = 1000000U;
 constexpr std::size_t kMaxCombinedHtProofs = 1000000U;
+constexpr std::size_t kMaxCombinedHtTraces = 1000000U;
 
 double ElapsedMilliseconds(const std::chrono::steady_clock::time_point begin) {
   return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin)
@@ -238,6 +240,15 @@ LocalEliminationResult RunLocalElimination(GraphSnapshot* const graph,
     local.stages.push_back(SummarizeHtStage(static_cast<std::uint32_t>(local.stages.size()),
                                             edges_before, working.ActiveEdgeCount(), scan));
     AppendEliminationStage(&local.elimination, scan.elimination);
+    if (scan.short_circuit_traces.traces.size() > kMaxCombinedHtTraces ||
+        local.short_circuit_traces.traces.size() >
+            kMaxCombinedHtTraces - scan.short_circuit_traces.traces.size()) {
+      throw std::overflow_error("Local Elimination 聚合 HT trace 超过安全数量上限");
+    }
+    local.short_circuit_traces.traces.insert(
+        local.short_circuit_traces.traces.end(),
+        std::make_move_iterator(scan.short_circuit_traces.traces.begin()),
+        std::make_move_iterator(scan.short_circuit_traces.traces.end()));
 
     if (committed != 0U) {
       // 新快照可能产生新的 JV 见证；先恢复 JV 固定点，再从权重/端点序列开头重排。

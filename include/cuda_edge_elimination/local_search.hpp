@@ -38,6 +38,8 @@ struct KOptSearchOptions {
   std::uint64_t cuda_min_cost_cells{128};
   // 0 禁用；非零时在 k-opt 未解决后运行收缩 outside matching 的精确 DP（硬上限 18）。
   std::uint32_t exact_fallback_max_blocks{};
+  // CUDA 仅筛选改善 value；阴性结果保留边，阳性结果仍须 CPU compact+traceback 认证。
+  PathCompatibilityBackend exact_backend{PathCompatibilityBackend::kCpu};
 };
 
 struct KOptReconnectTable {
@@ -77,6 +79,32 @@ struct KOptCostBatchResult {
   std::uint64_t cpu_cost_rows_reused{};
   double cpu_certify_ms{};
 };
+
+constexpr std::uint32_t kExactTourCudaMaxBlocks = 13U;
+
+struct ExactTourCostTask {
+  std::uint32_t block_count{};
+  std::array<std::int32_t, kExactTourCudaMaxBlocks> first{};
+  std::array<std::int32_t, kExactTourCudaMaxBlocks> second{};
+  std::array<std::uint8_t, kExactTourCudaMaxBlocks> paired{};
+  // (-1,-1) 表示没有 forbidden edge；否则必须是规范端点。
+  NodeEdge forbidden{-1, -1};
+};
+
+struct ExactTourCostBatchResult {
+  std::vector<std::int64_t> best_costs;
+  std::string backend{"none"};
+  int selected_device{-1};
+  bool cpu_verified{false};
+  std::uint64_t tasks_submitted{};
+  std::uint64_t cpu_fallback_tasks{};
+  std::uint64_t shared_memory_bytes{};
+};
+
+// 输入必须按相同 block_count 分桶。CUDA 仅计算 value，返回前由 CPU compact DP 逐项认证。
+[[nodiscard]] ExactTourCostBatchResult
+EvaluateExactTourCosts(const GraphSnapshot& graph, const std::vector<ExactTourCostTask>& tasks,
+                       PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto);
 
 // 返回 [task][template] 精确成本矩阵；CUDA 结果逐 cell 经独立 CPU 矩阵认证。
 // 成本矩阵仍只筛选 witness，不能脱离完整 path proof 直接授权删除。
@@ -118,6 +146,10 @@ struct KOptSearchResult {
                                                     const EndpointMatching& outside,
                                                     const std::optional<NodeEdge>& required_edge,
                                                     std::uint32_t max_blocks);
+[[nodiscard]] KOptSearchResult
+FindExactTourWitness(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
+                     const EndpointMatching& outside, const std::optional<NodeEdge>& required_edge,
+                     std::uint32_t max_blocks, PathCompatibilityBackend backend);
 
 // 从原路径巡回独立重建删边、加边、严格成本改善和 inside matching。
 [[nodiscard]] bool VerifyKOptWitness(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
@@ -237,6 +269,12 @@ private:
 EvaluateKOptTemplateCostsCuda(const GraphSnapshot& graph, const KOptReconnectTable& table,
                               const std::vector<KOptCostTask>& tasks, int* selected_device,
                               KOptCudaCacheUsage* cache_usage);
+
+[[nodiscard]] bool ExactTourCostCudaAvailable(std::string* reason);
+[[nodiscard]] std::vector<std::int64_t>
+EvaluateExactTourCostsCuda(const GraphSnapshot& graph, const std::vector<ExactTourCostTask>& tasks,
+                           int* selected_device, std::uint64_t* shared_memory_bytes);
+void ClearExactTourCostCudaCache();
 
 // 释放当前主机线程在所有可见设备上的 k-opt 驻留缓存；主要用于 epoch 切换与测试隔离。
 void ClearKOptCostCudaCache();

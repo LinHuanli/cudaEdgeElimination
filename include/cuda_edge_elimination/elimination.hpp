@@ -70,7 +70,10 @@ struct HtScanOptions {
   // 全图搜索必须显式有界；0 非法。
   std::uint64_t max_targets{64U};
   HtTargetOrder target_order{HtTargetOrder::kWeightDescending};
-  // 空列表保持历史顺序执行；非空时每个 ordinal 对应一个固定 target worker。
+  // 0 表示历史默认：无显式设备时单 worker，否则每个设备一个 worker。
+  // 正数允许多个只读 target worker 共享同一张显式 GPU；不改变每个 target 的证明语义。
+  std::uint32_t target_workers{};
+  // 非空时 worker 以 round-robin 绑定设备；一个设备可由 target_workers 个 worker 共享。
   std::vector<int> target_devices;
 };
 
@@ -273,6 +276,7 @@ struct HtScanResult {
   double search_ms{};
   double total_ms{};
   std::vector<HtScanAttempt> attempts;
+  HtShortCircuitTraceBundle short_circuit_traces;
 };
 
 enum class LocalEliminationStage : std::uint8_t {
@@ -324,6 +328,7 @@ struct LocalEliminationResult {
   EliminationResult elimination;
   std::vector<LocalEliminationStageMetrics> stages;
   LocalEliminationTermination termination{LocalEliminationTermination::kHtEpochLimit};
+  HtShortCircuitTraceBundle short_circuit_traces;
 };
 
 [[nodiscard]] std::vector<Candidate> FindJvCandidatesCpu(const GraphSnapshot& graph);

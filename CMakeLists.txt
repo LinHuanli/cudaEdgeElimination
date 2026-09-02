@@ -28,10 +28,12 @@ set(CUDAEE_SOURCES
     src/cpu/elimination_commit.cpp
     src/cpu/hamilton_tutte.cpp
     src/cpu/ht_epoch.cpp
+    src/cpu/ht_trace.cpp
     src/cpu/ht_scan.cpp
     src/cpu/local_elimination.cpp
     src/cpu/hamilton_tutte_proof.cpp
     src/cpu/hamilton_tutte_recursive.cpp
+    src/cpu/hamilton_tutte_transposed.cpp
     src/cpu/hamilton_tutte_wavefront.cpp
     src/cpu/ht_path_append.cpp
     src/cpu/jv_elimination.cpp
@@ -49,6 +51,7 @@ if(CUDAEE_ENABLE_CUDA)
   enable_language(CUDA)
   list(APPEND CUDAEE_SOURCES
       src/cuda/device_affinity.cu
+      src/cuda/exact_tour_dp.cu
       src/cuda/ht_cd.cu
       src/cuda/ht_path_append.cu
       src/cuda/ht_replies.cu
@@ -58,6 +61,7 @@ if(CUDAEE_ENABLE_CUDA)
 else()
   list(APPEND CUDAEE_SOURCES
       src/cuda/device_affinity_stub.cpp
+      src/cuda/exact_tour_dp_stub.cpp
       src/cuda/ht_cd_stub.cpp
       src/cuda/ht_path_append_stub.cpp
       src/cuda/ht_replies_stub.cpp

@@ -12,6 +12,10 @@
 | M4.2a CPU k-opt 叶证明 | 完成 | proper 3/4/5-opt `4/25/208` 模板；ElimTSP oracle 差分；`path-kopt-proof-v1` 独立重放 |
 | M4.2b CUDA k-opt cost | 完成（CPU 认证候选器） | 批量精确成本矩阵；逐 cell CPU/CUDA 一致；改善 witness 完整重建；memcheck 0 error |
 | M4.3a 精确困难叶 | 完成（有界 CPU fallback） | 收缩 forced outside matching；Held–Karp 子集 DP；通用交换 witness 独立重放；block 超限为 unresolved |
+| V3 A0 短路 Trace/replay | 完成 | V1 严格文件格式；AND/OR 规范次序；1/2/4/8/all replay；部分/篡改 Trace 拒绝 |
+| V3 A1 紧凑/CUDA exact DP | 完成（CUDA 候选器） | CPU 相邻 popcount 层；成功才 traceback；CUDA `k<=13`；逐值差分；阳性 CPU witness；阴性 unresolved |
+| V3 C1 转置短路调度 | 原型完成，broker 待实现 | `s=1` 与 DFS proof 一致；d15112 证明 18 条；尚有 19,504 个逐状态 leaf batches |
+| V3 C1.5 验证热路径 | 部分完成 | scan 只在 commit 前完整重放一次；sidecar 并行只读验证；尚未引入显式 token 类型 |
 | M4.3b1 浅层 HS AND–OR | 完成（研究 API） | `c,d` OR；完整邻边对 AND；嵌套 leaf 重放；CUDA flags 经 CPU 全量差分 |
 | M4.3b2 递归 HT 语义与证书 | 完成（CPU 研究 API/CLI） | extra point/end；continuation arena；全局 proof V1；`ht-prove`/`ht-verify` 严格重放 |
 | M4.3b3a 混合 GPU wavefront | 完成（研究 API/CLI） | 主机 BFS；CUDA 原子 continuation counters；single/cooperative persistent queue；CPU 全状态差分 |
@@ -35,6 +39,7 @@
 | M5 HT reply 精确任务去重 | 完成（batch-local） | 物理 tasks `28497 -> 418`；CPU 完整逻辑展开；V16/V19；d15112 七对 A/B 与 14 份 proof/tour 门禁 |
 | M5 HT 跨 batch reply 结果缓存 | 已画像并排除 | 最多 `418 -> 282`，但 23/23 batches 仍含新 key、可消除调用为 0；observer 已移除 |
 | M5 HT 目标级多 GPU | 完成（静态切片基线） | 固定设备 worker；顺序 CPU proof/原子提交；双 A4000 32-target `1.251×` target execution；V17/V20 |
+| V3 单 GPU target workers | 完成 | 多 worker 共享单一显式 ordinal；规范顺序消费；设备 affinity 差分；worker 上限 32 |
 | M5 中大型调优 | 进行中（JV 三轮 + HT host/device/multi-GPU fast paths） | point/path/reply/leaf/scan-binding fast paths；reply 驻留、任务去重与目标级静态多 GPU |
 
 ## 当前基准结果
@@ -58,6 +63,8 @@ M5 HT reply 精确任务去重绑定 `4428aa4`：Hamilton 在固定 target 的 b
 M5 HT 跨 batch reply 结果缓存排除画像基于 `589caf5`：临时 observer 记录完整逻辑 key，计时因同步 stderr 明确作废。Hamilton 按 `(target,center)` 从 242 个 batch-local keys 只能降至 160，end 按 scan 级有向 task 从 176 降至 122，合计再减少 136 个；但 15 个 Hamilton 与 8 个 end batches 全部仍含新 key，无法跳过任何同步 CUDA 调用。画像运行的边、规范 proof、工作签名和 d15112 tour 与正式结果相同，observer 已移除；当前不实现长生命周期结果缓存。
 
 M5 HT 目标级多 GPU 静态切片绑定 `caed660`：显式 `target_devices` 为每个可见 ordinal 创建固定 worker，按相对目标序号轮转搜索；线程完成顺序不参与结果消费，成功 proof 仍按规范 target 顺序即时 CPU 重放并经原 V2 epoch 提交器整批重放。d15112 双空闲 RTX A4000 的 32-target 七对交错 A/B 中，target execution 从 `3208.626` 降至 `2564.352 ms`（`1.251×`），算法 total 从 `3739.995` 降至 `3081.042 ms`（`1.214×`），进程 wall 从 `4043.140` 降至 `3495.274 ms`（`1.157×`）。单/双卡始终为 40,044 states、52,917 replies、4,100 leaf calls 和 11 条提交边；17 次 CPU proof 重放、17 次最优 tour 检查、设备归属审计、CUDA Release 23/23 与 memcheck 0 errors 全部通过。报告/summary 升为 V17/V20，另以 `target_execution_ms` 区分并行墙钟和 `search_ms` 求和。
+
+V3 单 GPU原型基于分支 `research/gpu-elimtsp-v3-single-gpu`：新增短路 Trace/replay、相邻 popcount 层 exact DP、`k<=13` CUDA value 候选器、保持 DFS 规范 proof 的 transposed host-window、单卡多 target workers，以及 commit 前唯一完整 proof 重放。d15112 A5000 32-target pilot 中，transposed 把 wavefront 的 `40,044 states/11 proofs` 降至 `19,498 states/18 proofs`，但产生 19,504 个逐状态 leaf batches，总时间约 24 秒，暂不具备加速价值。最佳候选+leaf CUDA、四 worker 混合路径 wall 约 `1.73 s`，相对旧全 CUDA `2.845 s` 为约 `1.64×`，但仍比当前 CPU `1.57 s` 慢约 10.2%；默认保持 wavefront。该切片并未达到论文 Table 7 的约 73,850 条剩余边强度，不能作同协议论文速度比。
 
 M5 HT scan pilot 绑定 `cd5ec3e`：pcb3038 的 CPU JV 固定点有 6,704 条边和 6,476 个度数安全目标；最高权重 8-target 切片的 CPU/CUDA 工作签名均为 12,383 states、14,285 replies、9,120 leaf calls 和 5,085 moves，证明并提交相同 2 条边。CUDA/CPU search 为 `33.646/34.103 s`，仅 `1.014×`；最终 6,702 条边、哈希 `fe11f98414b04c0e`，两份 V2 均独立重放且 pcb3038 最优 tour 为 0 缺边。这是功能与资源 pilot，不是显著性能结论。
 

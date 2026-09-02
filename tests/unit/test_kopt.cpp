@@ -30,6 +30,15 @@ void Check(const bool condition, const std::string& message) {
   }
 }
 
+template <typename Callback> void CheckThrows(Callback&& callback, const std::string& message) {
+  try {
+    callback();
+  } catch (const std::exception&) {
+    return;
+  }
+  throw std::runtime_error("test failure: " + message);
+}
+
 cudaee::GraphSnapshot MakeGraph(const std::vector<cudaee::Point>& points) {
   cudaee::GraphSnapshot graph;
   graph.dimension = static_cast<std::int32_t>(points.size());
@@ -481,6 +490,17 @@ void TestImprovingWitnessAndProof() {
     Check(cudaee::VerifyKOptWitness(graph, paths, outside, required, cuda_search.witness, &reason),
           reason);
   }
+  std::string exact_cuda_reason;
+  if (cudaee::detail::ExactTourCostCudaAvailable(&exact_cuda_reason)) {
+    const cudaee::KOptSearchResult cuda_exact = cudaee::FindExactTourWitness(
+        graph, paths, outside, required, 10, cudaee::PathCompatibilityBackend::kCuda);
+    Check(cuda_exact.status == cudaee::KOptSearchStatus::kImproved &&
+              cuda_exact.exact_states_tested == exact.exact_states_tested &&
+              cuda_exact.witness.added_cost == exact.witness.added_cost,
+          "CUDA exact DP improvement candidate is certified by the CPU traceback oracle");
+    Check(cudaee::VerifyKOptWitness(graph, paths, outside, required, cuda_exact.witness, &reason),
+          reason);
+  }
 #endif
 
   cudaee::KOptWitness tampered = search.witness;
@@ -557,10 +577,26 @@ void TestNoImprovementAndBudget() {
         "exact fallback proves no strictly shorter constrained tour");
   Check(exact_no_improvement.exact_states_tested > 0, "exact no-improvement visits DP states");
 
+#ifdef CUDAEE_HAS_CUDA
+  std::string exact_cuda_reason;
+  if (cudaee::detail::ExactTourCostCudaAvailable(&exact_cuda_reason)) {
+    const cudaee::KOptSearchResult cuda_no_improvement = cudaee::FindExactTourWitness(
+        graph, paths, outside, cudaee::NodeEdge{0, 1}, 10, cudaee::PathCompatibilityBackend::kCuda);
+    Check(cuda_no_improvement.status == cudaee::KOptSearchStatus::kUnresolved &&
+              cuda_no_improvement.exact_states_tested == 0U,
+          "CUDA exact DP negative screening remains candidate-only and skips CPU DP");
+  }
+#endif
+
   const cudaee::KOptSearchResult exact_too_large =
       cudaee::FindExactTourWitness(graph, paths, outside, cudaee::NodeEdge{0, 1}, 2);
   Check(exact_too_large.status == cudaee::KOptSearchStatus::kUnresolved,
         "exact fallback block cap remains unresolved");
+  const cudaee::KOptSearchResult invalid_exact_backend =
+      cudaee::FindExactTourWitness(graph, paths, outside, cudaee::NodeEdge{0, 1}, 10,
+                                   static_cast<cudaee::PathCompatibilityBackend>(255));
+  Check(invalid_exact_backend.status == cudaee::KOptSearchStatus::kInvalid,
+        "exact fallback rejects an unknown backend");
 
   const cudaee::KOptSearchResult unresolved = cudaee::FindKOptWitness(
       graph, paths, outside, cudaee::NodeEdge{0, 1}, {.max_k = 3, .max_deletion_sets = 1});
@@ -1013,6 +1049,70 @@ void TestTwoPathCoverageProof() {
         "two-path leaf batching preserves outside coverage and proof bytes");
 }
 
+void TestCompactExactTourCostBatch() {
+  std::vector<cudaee::Point> points;
+  points.reserve(cudaee::kExactTourCudaMaxBlocks);
+  for (std::int32_t node = 0; node < static_cast<std::int32_t>(cudaee::kExactTourCudaMaxBlocks);
+       ++node) {
+    const std::int64_t x = 17 * node + (node * node) % 11;
+    const std::int64_t y = 13 * node + (7 * node * node) % 19;
+    points.push_back({static_cast<double>(x), static_cast<double>(y), x, y});
+  }
+  const cudaee::GraphSnapshot graph = MakeGraph(points);
+  cudaee::ExactTourCostTask task;
+  task.block_count = cudaee::kExactTourCudaMaxBlocks;
+  for (std::uint32_t block = 0U; block < task.block_count; ++block) {
+    task.first[block] = static_cast<std::int32_t>(block);
+    task.second[block] = static_cast<std::int32_t>(block);
+    task.paired[block] = 0U;
+  }
+  task.forbidden = {0, 1};
+  cudaee::ExactTourCostTask unrestricted = task;
+  unrestricted.forbidden = {-1, -1};
+
+  const cudaee::ExactTourCostBatchResult cpu = cudaee::EvaluateExactTourCosts(
+      graph, {task, unrestricted}, cudaee::PathCompatibilityBackend::kCpu);
+  Check(cpu.backend == "cpu" && cpu.cpu_verified && cpu.best_costs.size() == 2U &&
+            cpu.best_costs[0] != std::numeric_limits<std::int64_t>::max() &&
+            cpu.best_costs[1] <= cpu.best_costs[0],
+        "compact CPU exact DP handles k=13 and a forbidden edge");
+
+#ifdef CUDAEE_HAS_CUDA
+  std::string reason;
+  if (cudaee::detail::ExactTourCostCudaAvailable(&reason)) {
+    const cudaee::ExactTourCostBatchResult gpu = cudaee::EvaluateExactTourCosts(
+        graph, {task, unrestricted}, cudaee::PathCompatibilityBackend::kCuda);
+    Check(gpu.backend == "cuda-cpu-verified" && gpu.cpu_verified && gpu.selected_device >= 0 &&
+              gpu.tasks_submitted == 2U && gpu.cpu_fallback_tasks == 0U &&
+              gpu.shared_memory_bytes == 88704U && gpu.best_costs == cpu.best_costs,
+          "CUDA rolling exact DP matches compact CPU at the k=13 shared-memory boundary");
+  }
+#else
+  const cudaee::ExactTourCostBatchResult fallback =
+      cudaee::EvaluateExactTourCosts(graph, {task}, cudaee::PathCompatibilityBackend::kAuto);
+  Check(fallback.backend == "cpu-fallback" && fallback.best_costs.front() == cpu.best_costs.front(),
+        "auto exact DP safely falls back in a CPU-only build");
+  CheckThrows(
+      [&] {
+        const auto ignored =
+            cudaee::EvaluateExactTourCosts(graph, {task}, cudaee::PathCompatibilityBackend::kCuda);
+        static_cast<void>(ignored);
+      },
+      "explicit CUDA exact DP remains unavailable in a CPU-only build");
+#endif
+
+  cudaee::ExactTourCostTask damaged = task;
+  damaged.first[1] = damaged.first[0];
+  damaged.second[1] = damaged.second[0];
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::EvaluateExactTourCosts(graph, {damaged},
+                                                            cudaee::PathCompatibilityBackend::kCpu);
+        static_cast<void>(ignored);
+      },
+      "exact DP rejects overlapping contracted blocks");
+}
+
 } // namespace
 
 int main() {
@@ -1029,6 +1129,7 @@ int main() {
     TestExactFallbackAgainstBruteForce();
     TestExactSevenOptProofRoundTrip();
     TestTwoPathCoverageProof();
+    TestCompactExactTourCostBatch();
     std::cout << "k-opt tests passed\n";
     return 0;
   } catch (const std::exception& error) {
