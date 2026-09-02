@@ -35,6 +35,7 @@
 - CPU exact cost 的固定数组 task 验证、缓存端口对计划与 task 内 pair-cost 复用；
 - 有容量与收益门禁的 CPU cost batch 精确距离表，以及超限时的 task-local 安全回退；
 - 融合 leaf cost matrix 按 cursor slice 的生命周期受限只读 view，避免重复分配和复制；
+- cursor deletion work 的固定 5 元位置数组与路径边精确成本缓存，并保留候选通用重算；
 - Hamilton reply 的批内 center 去重、每邻边 quick-filter 缓存与 CPU/CUDA 全数组差分；
 - leaf setup 的 proof/coverage/cursor 画像，以及同一批次只计算一次的不可变快照哈希；
 - 8,192-cell 门槛以上按 task row 静态分片的有界 OpenMP CPU 精确成本矩阵；

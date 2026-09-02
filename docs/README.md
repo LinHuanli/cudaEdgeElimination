@@ -56,5 +56,6 @@
 52. [M5 HT CPU cost 固定验证与重连计划](research/48_M5_HT_CPU_Cost_Fixed_Plans.md)：消除小集合堆分配与逐 cell template 解码，并保持完整 CPU/CUDA 整数矩阵认证。
 53. [M5 HT CPU batch 精确距离表复用](research/49_M5_HT_CPU_Batch_Distance_Cache.md)：在有界同步 batch 内复用跨 task 整数距离，并以容量/收益门禁安全回退。
 54. [M5 HT leaf cost 零复制分发](research/50_M5_HT_Leaf_Cost_Zero_Copy_Scatter.md)：用生命周期受限的只读 view 分发融合矩阵，消除按 cursor slice 的重复分配与复制。
+55. [M5 HT cursor prepare 路径边成本缓存](research/51_M5_HT_Cursor_Prepare_Edge_Cost_Cache.md)：固定化删除位置并在 cursor 内复用路径边精确成本，候选仍由通用路径重新取距复核。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。
