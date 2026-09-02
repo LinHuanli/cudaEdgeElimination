@@ -43,7 +43,7 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CUDAEE_ENABLE_CUDA": "ON",
         "CUDAEE_ENABLE_SANITIZERS": "OFF",
-        "CMAKE_CUDA_ARCHITECTURES": "89"
+        "CUDAEE_CUDA_ARCHITECTURES": "89"
       }
     },
     {
@@ -54,7 +54,7 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CUDAEE_ENABLE_CUDA": "ON",
         "CUDAEE_ENABLE_SANITIZERS": "OFF",
-        "CMAKE_CUDA_ARCHITECTURES": "86"
+        "CUDAEE_CUDA_ARCHITECTURES": "86"
       }
     },
     {
@@ -65,7 +65,7 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CUDAEE_ENABLE_CUDA": "ON",
         "CUDAEE_ENABLE_SANITIZERS": "OFF",
-        "CMAKE_CUDA_ARCHITECTURES": "89"
+        "CUDAEE_CUDA_ARCHITECTURES": "89"
       }
     },
     {
@@ -76,7 +76,7 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CUDAEE_ENABLE_CUDA": "ON",
         "CUDAEE_ENABLE_SANITIZERS": "OFF",
-        "CMAKE_CUDA_ARCHITECTURES": "86"
+        "CUDAEE_CUDA_ARCHITECTURES": "86"
       }
     }
   ],
