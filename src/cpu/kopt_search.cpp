@@ -1903,6 +1903,15 @@ struct KOptCursorConsumeStats {
   double completeness_fallback_ms{};
 };
 
+// 只借用一次融合 cost matrix 的连续子区间；调用方必须保证矩阵覆盖整个消费过程。
+struct KOptCostBlockView {
+  std::uint32_t k{};
+  std::uint32_t template_count{};
+  std::span<const std::int64_t> added_costs;
+  std::string_view backend;
+  bool cpu_verified{false};
+};
+
 class KOptSearchCursor {
 public:
   KOptSearchCursor(const GraphSnapshot& graph, const NormalizedPathSystem& paths,
@@ -1977,7 +1986,7 @@ public:
     }
   }
 
-  KOptCursorConsumeStats ConsumeBlock(const KOptCostBatchResult& costs) {
+  KOptCursorConsumeStats ConsumeBlock(const KOptCostBlockView& costs) {
     KOptCursorConsumeStats stats;
     if (finished_ || !pending_.has_value()) {
       throw std::logic_error("k-opt cost cursor 没有待消费 block");
@@ -2003,8 +2012,8 @@ public:
       }
       ++stats.cost_rows;
       const std::size_t row_offset = work_index * reconnect_table.templates.size();
-      const std::span<const std::int64_t> row(costs.added_costs.data() + row_offset,
-                                              reconnect_table.templates.size());
+      const std::span<const std::int64_t> row =
+          costs.added_costs.subspan(row_offset, reconnect_table.templates.size());
       ReconnectAttempt attempt = TryReconnectFromCostRow(
           *graph_, context_, outside_, block.works[work_index].deleted_positions,
           block.works[work_index].task, reconnect_table.templates, row, costs.backend,
@@ -2501,16 +2510,14 @@ PathSystemKOptBatchResult ProvePathSystemsByKOptImpl(
         for (const CursorSlice& slice : slices_by_k[bucket]) {
           const std::size_t cell_begin = slice.row_begin * costs.template_count;
           const std::size_t cell_count = slice.row_count * costs.template_count;
-          KOptCostBatchResult cursor_costs;
+          KOptCostBlockView cursor_costs;
           {
             ScopedPhaseTimer timer(&result.cost_scatter_ms);
             cursor_costs.k = k;
             cursor_costs.template_count = costs.template_count;
-            cursor_costs.added_costs.assign(
-                costs.added_costs.begin() + static_cast<std::ptrdiff_t>(cell_begin),
-                costs.added_costs.begin() + static_cast<std::ptrdiff_t>(cell_begin + cell_count));
+            cursor_costs.added_costs =
+                std::span<const std::int64_t>(costs.added_costs).subspan(cell_begin, cell_count);
             cursor_costs.backend = costs.backend;
-            cursor_costs.selected_device = costs.selected_device;
             cursor_costs.cpu_verified = costs.cpu_verified;
           }
           {
