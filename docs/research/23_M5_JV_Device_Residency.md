@@ -70,4 +70,4 @@ CUDA 单元测试覆盖四条路径：
 3. 将 JV/HT/LP 放入常驻 orchestrator，避免短任务反复创建 CUDA context；
 4. 保留 exact cache key、owner-device 释放和所有错误 fail-closed 门禁。
 
-第 1 项已由后续的 [动态 CSR edge-id 传输](24_M5_JV_Dynamic_CSR_Edge_Ids.md)完成；本文件继续保留 `25590af` 的驻留权重基线。
+第 1 项已由后续的 [动态 CSR edge-id 传输](24_M5_JV_Dynamic_CSR_Edge_Ids.md)完成；第 2 项已完成实验并因端到端回退而[排除](55_M5_JV_Active_Edge_Compact_Launch_Rejection.md)；第 3 项已由 `local-eliminate` 完成有界 JV—HT 基线，LP 仍等待 M3.1。本文件继续保留 `25590af` 的驻留权重基线。

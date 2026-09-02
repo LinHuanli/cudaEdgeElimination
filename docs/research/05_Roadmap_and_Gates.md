@@ -123,7 +123,9 @@ CPU cost 完全相同 task row 去重已完成：端口互异 fast path 因 temp
 
 JV—HT 多 epoch 编排基线已完成：`local-eliminate` 先达到 JV 固定点，再按有界 HT 切片 sweep；无提交时推进 offset，有提交时在新快照重跑 JV 并从 offset 0 重排。子阶段 records/sidecars 连续重编号为一个可独立重放的 V2 proof，异常在图副本上零发布，JV/HT 预算耗尽返回明确的安全部分结果。8 点完整图收敛测试删除 7 条 JV 和 4 条 HT，11 条均由 7! 巡回穷举确认不属于任何最优巡回。pcb3038 三个 8-target epochs 中，CPU/CUDA 均从 6,883 条边提交 182 条、最终 6,701 条，边和规范 proof 完全相同，两份 proof 独立重放且 137,694 最优 tour 为 0 缺边；该有界运行以 `ht-epoch-limit` 结束，不冒充全图收敛。
 
-M5 仍未完成：跨目标 HT 融合、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
+JV 活动 edge-id 紧凑 launch 已完成排除实验：d15112 三个 JV epochs 的物理行仅从 499,497 减至 484,885（`-2.925%`）。最终原型的 kernel 中位数改善 `1.272%`，但 host compaction/H2D 使 propose 回退 `7.722%`、算法总时间回退 `1.052%`；候选、删除数和最终哈希保持一致。原型已完整撤销，除非 inactive 比例显著提高或设备端能免费维护索引，否则不重新引入。
+
+M5 仍未完成：跨目标 HT 融合、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义
 

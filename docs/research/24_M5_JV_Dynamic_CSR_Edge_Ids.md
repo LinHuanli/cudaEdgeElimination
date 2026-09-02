@@ -82,9 +82,9 @@ pcb3038 继续通过成本 137,694、规范 tour 哈希 `ca0238497c090a3c` 的�
 - `compute-sanitizer --tool memcheck` 0 error，覆盖首轮 miss 与次轮 hit；
 - 正式运行逐份由独立 CPU 进程重放 proof 并逐字节比较 CPU/CUDA 输出。
 
-动态 CSR 传输优化至此完成。下一步优先级为：
+动态 CSR 传输优化至此完成。后续状态为：
 
-1. 对全活动 edge-id 列表做紧凑 launch 试验，比较节省空线程与新增 compaction/传输成本；
-2. 为全图 HT 增加确定性目标选择、批次预算、sidecar 汇集和不可变 epoch 提交；
-3. 让长驻 orchestrator 串联 JV/HT/LP，避免短 CLI 的 context 初始化；
-4. 只有单卡端到端基线稳定后再做多 GPU 分片。
+1. 活动 edge-id 紧凑 launch 已完成试验，并因 d15112 算法总时间回退 `1.052%` 而撤销，详见 [排除实验](55_M5_JV_Active_Edge_Compact_Launch_Rejection.md)；
+2. 全图 HT 的确定性目标选择、批次预算、sidecar 汇集和不可变 epoch 提交已由 `ht-scan` 完成；
+3. 长驻 JV—HT orchestrator 已由 `local-eliminate` 完成有界基线，LP 删除授权仍等待 M3.1；
+4. 后续先做跨目标 HT 工作共享，再在单卡闭环稳定后评估多 GPU 分片。

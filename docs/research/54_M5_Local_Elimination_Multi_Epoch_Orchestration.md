@@ -10,7 +10,7 @@
 4. 无删除时保持同一快照，推进 offset 扫描下一切片；
 5. 把所有 JV records 与 HT sidecars 合并为一个可独立 CPU 重放的 V1/V2 消元证明。
 
-这是**多 epoch 调度与证明组合基线**。它没有实现跨目标 GPU 工作图、活动 edge-id 紧凑 launch、多 GPU，也没有把尚未完成的 M3.1 LP 删除授权接入固定点。
+这是**多 epoch 调度与证明组合基线**。它没有实现跨目标 GPU 工作图或多 GPU，也没有把尚未完成的 M3.1 LP 删除授权接入固定点；活动 edge-id 紧凑 launch 已另行评测并因端到端回退而撤销。
 
 ## 2. 调度状态机
 
@@ -144,7 +144,7 @@ artifact：`artifacts/pcb3038-local-elimination-20260902-OiRUCG`。运行绑定�
 多 epoch 重排已经成为可执行基线，但 pcb3038 的三个 8-target epochs 只覆盖目标序列的一小部分。下一阶段仍需：
 
 1. 在同一不可变快照中跨 target 合并 leaf/reply 工作，保持每目标预算与 proof 顺序；
-2. 为动态活动 edge-id 建立紧凑 launch 索引，仍以稳定原始 edge id 写 proof；
+2. 活动 edge-id 紧凑 launch 已在 d15112 上因端到端回退而排除；只有 inactive 比例显著提高或设备端能免费维护索引时才重新评估；
 3. 单卡闭环稳定后再做多 GPU 静态切片和 CPU 汇总复核；
 4. M3.1 能输出逐边安全 LP 授权后，再评测 LP—JV—HT 交替固定点；
 5. 在 rl5915/d15112 上先跑有界多 epoch 正确性门禁，再决定完整 sweep 的资源预算。
