@@ -1,14 +1,14 @@
 # V3 单 GPU 实施路线
 
-## 当前进度（2026-09-02）
+## 当前进度（2026-09-03）
 
 - A0 已完成：wavefront Trace、严格 reader、文件往返和窗口 replay 均有单元/CLI 门禁。
 - A1 已完成：CPU compact value pass、成功后 traceback oracle、CUDA `k<=13` value 候选器和 candidate-only 集成均已落地。
-- C1 完成 host-window 语义原型：规范短路和 DFS proof 已对齐；跨 target SoA continuation broker、generation token 与 CUDA Graph 批次仍待实现。
+- C1 完成 host-window 语义原型和第一版跨 target heterogeneous leaf broker：单 dispatcher 合并不同 required edge，CUDA 只回传候选位图，CPU 精确重建 witness。SoA continuation ready queue、generation token 与 CUDA Graph 调度仍待实现。
 - C1.5 完成重复重放合并和 sidecar 并行验证；显式 move-only token 尚未实现，因此该阶段只标为部分完成。
 - 单 GPU多 target workers 已完成，可让多个 worker 共享一个显式 ordinal；这不是多 GPU性能主线。
 
-实测与未通过的性能门禁见 [V3 单 GPU原型实现与 Pilot](63_V3_单GPU原型实现与Pilot.md)。
+原型基线见 [V3 单 GPU原型实现与 Pilot](63_V3_单GPU原型实现与Pilot.md)；最新 broker 实现与正式性能门禁见 [V3 单 GPU 跨目标 Leaf Broker](64_V3_单GPU跨目标LeafBroker.md)。
 
 ## A0：短路 Trace 与 replay
 
@@ -25,6 +25,16 @@
 - CUDA 返回最优值和状态，CPU 对成功项重建 witness 并调用既有 verifier。
 
 ## C1：转置短路调度
+
+已落地的中间切片：
+
+- 32 个 target workers 共享一个单 GPU dispatcher，以两请求机会式微批避免全 worker 栅栏。
+- 合批 API 为每个 path system 保留独立 required edge 与 cursor，仅合并同 `k` cost tasks。
+- CUDA 对 `4/25/208` 个 proper k-opt templates 生成每 task `1/1/4` 个 `uint64_t` candidate words，CPU 只对命中位重建 witness。
+- `CUDAEE_HT_SCAN_REPORT_V19` 分开记录逻辑 leaf windows、物理 broker batches/states 和实际 speculation width。
+- d15112 五对 clean A/B 中 target execution 约 `1.009x`，process wall 约 `0.997x`；端到端仍只能判定为持平。
+
+剩余设计目标：
 
 - continuation 使用 SoA：目标、父 continuation、规范 child ordinal、generation、program counter 和状态引用分离存储。
 - 相同 program counter 的 ready work 跨目标合批，复用现有 leaf、reply、path-append 和 propagation kernel。

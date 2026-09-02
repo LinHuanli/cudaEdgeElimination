@@ -14,10 +14,12 @@
 | 3/4/5-opt、matching/coverage CUDA 批处理 | 已实现 | 直接复用 |
 | Hamilton/end reply CUDA 批处理 | 已实现 | 纳入统一调度指标 |
 | 完整 AND/OR wavefront | 已实现，但先生成整棵有界工作树 | 保留为 oracle 与回退 |
-| 严格短路 Trace/replay | 缺失 | 首先实现，作为调度决策依据 |
-| stackless/transposed scheduler | 缺失 | 新增显式 opt-in 后端 |
-| 紧凑滚动 exact DP | 缺失，当前保存完整 cost 与 predecessor | 先做 CPU oracle，再做 CUDA `k<=13` |
-| 单次验证授权 token | 缺失，热路径存在重复 proof 重放 | 在正确性门禁后合并 |
+| 严格短路 Trace/replay | 已实现 | 保留为 speculation 和规范工作量 oracle |
+| stackless/transposed scheduler | 部分实现 | host-window 与跨 target leaf broker 已落地；SoA ready queue/generation 仍待实现 |
+| 紧凑滚动 exact DP | 已实现 | CPU compact oracle 与 CUDA `k<=13` candidate 均有差分门禁 |
+| 跨目标 heterogeneous leaf broker | 已实现（同步微批） | 保留两请求机会式微批，下一步消除 target 同步等待 |
+| CUDA k-opt candidate mask | 已实现 | 仅供 broker 筛选；CPU witness 和 epoch proof 仍是删边授权 |
+| 单次验证授权 token | 部分实现 | commit 前只完整重放一次；尚无显式 move-only token 类型 |
 
 ## 已测基线
 
@@ -28,6 +30,12 @@
 - CPU 递归 DFS：状态数由 wavefront 的 `40,044` 降至 `19,498`，已证明目标由 `11` 增至 `18`，但标量执行约 `285.4 s`。
 
 结论是短路次序确实同时改善工作量和证明强度，但必须保留批处理；仅把 DFS 搬到 GPU 或继续优化完整 wavefront 都不足以达到目标。
+
+## 最新决策依据
+
+`4de281c` 在 d15112 同一 32-target 切片上实现了单 GPU leaf broker、heterogeneous required-edge 批处理、candidate mask 和两请求机会式微批。五对 clean A/B 的 target execution 为 CPU/GPU `14.131/14.001 s`，但 process wall 为 `18.180/18.228 s`，只能判定为持平。GPU leaf cost 求和约快 `10.606x`，但 `s=4` 使物理 leaf states 增加 `23.62%`、cost cells 增加 `75.25%`，且同步 worker 仍在等待 broker。
+
+因此下一投资点不是继续微调 cost kernel，而是 continuation ready queue 与 generation cancellation。在 process wall 稳定达到 `1.25x` 前，不将 transposed 设为默认。完整数据见 [V3 单 GPU 跨目标 Leaf Broker](../research/64_V3_单GPU跨目标LeafBroker.md)。
 
 ## 不变量
 

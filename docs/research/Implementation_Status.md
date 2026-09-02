@@ -1,4 +1,4 @@
-# 实现状态（2026-09-02）
+# 实现状态（2026-09-03）
 
 | 工作包 | 状态 | 已验证证据 |
 |---|---|---|
@@ -10,11 +10,11 @@
 | M3.1 对偶稳定化与边集导出 | 待实现 | pr299 PDLP 完整图界偏弱；尚未导出每边 exact RC/Concorde 消元后边集 |
 | M4.1 path-system 组合层 | 完成 | 路径规范化；固定哈希表；368,047 单元 CPU/CUDA 全量差分；`m=6,7` CPU fallback |
 | M4.2a CPU k-opt 叶证明 | 完成 | proper 3/4/5-opt `4/25/208` 模板；ElimTSP oracle 差分；`path-kopt-proof-v1` 独立重放 |
-| M4.2b CUDA k-opt cost | 完成（CPU 认证候选器） | 批量精确成本矩阵；逐 cell CPU/CUDA 一致；改善 witness 完整重建；memcheck 0 error |
+| M4.2b CUDA k-opt cost | 完成（CPU 认证候选器） | public 完整矩阵逐 cell 差分；broker 使用 `1/1/4` words candidate mask；改善 witness CPU 完整重建；memcheck 0 error |
 | M4.3a 精确困难叶 | 完成（有界 CPU fallback） | 收缩 forced outside matching；Held–Karp 子集 DP；通用交换 witness 独立重放；block 超限为 unresolved |
 | V3 A0 短路 Trace/replay | 完成 | V1 严格文件格式；AND/OR 规范次序；1/2/4/8/all replay；部分/篡改 Trace 拒绝 |
 | V3 A1 紧凑/CUDA exact DP | 完成（CUDA 候选器） | CPU 相邻 popcount 层；成功才 traceback；CUDA `k<=13`；逐值差分；阳性 CPU witness；阴性 unresolved |
-| V3 C1 转置短路调度 | 原型完成，broker 待实现 | `s=1` 与 DFS proof 一致；d15112 证明 18 条；尚有 19,504 个逐状态 leaf batches |
+| V3 C1 转置短路调度 | 部分完成（leaf broker 已落地） | heterogeneous required-edge 合批；单 GPU dispatcher；两请求微批；d15112 18 proofs；SoA continuation/generation 待实现 |
 | V3 C1.5 验证热路径 | 部分完成 | scan 只在 commit 前完整重放一次；sidecar 并行只读验证；尚未引入显式 token 类型 |
 | M4.3b1 浅层 HS AND–OR | 完成（研究 API） | `c,d` OR；完整邻边对 AND；嵌套 leaf 重放；CUDA flags 经 CPU 全量差分 |
 | M4.3b2 递归 HT 语义与证书 | 完成（CPU 研究 API/CLI） | extra point/end；continuation arena；全局 proof V1；`ht-prove`/`ht-verify` 严格重放 |
@@ -65,6 +65,8 @@ M5 HT 跨 batch reply 结果缓存排除画像基于 `589caf5`：临时 observer
 M5 HT 目标级多 GPU 静态切片绑定 `caed660`：显式 `target_devices` 为每个可见 ordinal 创建固定 worker，按相对目标序号轮转搜索；线程完成顺序不参与结果消费，成功 proof 仍按规范 target 顺序即时 CPU 重放并经原 V2 epoch 提交器整批重放。d15112 双空闲 RTX A4000 的 32-target 七对交错 A/B 中，target execution 从 `3208.626` 降至 `2564.352 ms`（`1.251×`），算法 total 从 `3739.995` 降至 `3081.042 ms`（`1.214×`），进程 wall 从 `4043.140` 降至 `3495.274 ms`（`1.157×`）。单/双卡始终为 40,044 states、52,917 replies、4,100 leaf calls 和 11 条提交边；17 次 CPU proof 重放、17 次最优 tour 检查、设备归属审计、CUDA Release 23/23 与 memcheck 0 errors 全部通过。报告/summary 升为 V17/V20，另以 `target_execution_ms` 区分并行墙钟和 `search_ms` 求和。
 
 V3 单 GPU原型绑定 `a8faebb`：新增短路 Trace/replay、相邻 popcount 层 exact DP、`k<=13` CUDA value 候选器、保持 DFS 规范 proof 的 transposed host-window、单卡多 target workers，以及 commit 前唯一完整 proof 重放。d15112 A5000 32-target 中，transposed 把 wavefront 的 `40,044 states/11 proofs` 降至 `19,498 states/18 proofs`，但产生 19,504 个逐状态 leaf batches，总时间约 24 秒，暂不具备加速价值。clean-commit 七对 A/B 的 CPU/hybrid process wall 中位数为 `1,564.663/1,858.134 ms`，混合路径慢 `18.76%`；相对旧全 CUDA `2.845 s` 则改善约 `1.53×`。14 份计时 proof/tour 和两次预热全部通过，边、规范 proof 与工作签名哈希一致；默认保持 wavefront。该切片并未达到论文 Table 7 的约 73,850 条剩余边强度，不能作同协议论文速度比。
+
+V3 单 GPU leaf broker 绑定 `e41c220/4de281c`：专用 dispatcher 将不同 target required edge 的 transposed leaf windows 合批，CUDA 对 proper 3/4/5-opt 只回传候选位图，CPU 重建命中 witness，最终由 `CommitHtProofEpoch` 在修改图前完整重放。两请求机会式微批取代全 active-worker 栅栏。d15112 五对 clean A/B 的 CPU/GPU target execution 为 `14,130.933/14,001.421 ms`（`1.009x`），algorithm total 为 `17,960.265/17,948.009 ms`（`1.001x`），process wall 为 `18,180.282/18,228.316 ms`（`0.997x`），端到端仍判定为持平。leaf cost 求和已达 `10.606x`，但 `s=4` 增加 `23.62%` 物理 leaf states 和 `75.25%` cost cells，同步 continuation 等待成为下一瓶颈。十次计时与两次预热的边集、规范 proof、工作签名和最优 tour 全部一致；CPU `23/23`、CUDA `26/26` 与两组 memcheck 均通过。详见 [V3 单 GPU 跨目标 Leaf Broker](64_V3_单GPU跨目标LeafBroker.md)。
 
 M5 HT scan pilot 绑定 `cd5ec3e`：pcb3038 的 CPU JV 固定点有 6,704 条边和 6,476 个度数安全目标；最高权重 8-target 切片的 CPU/CUDA 工作签名均为 12,383 states、14,285 replies、9,120 leaf calls 和 5,085 moves，证明并提交相同 2 条边。CUDA/CPU search 为 `33.646/34.103 s`，仅 `1.014×`；最终 6,702 条边、哈希 `fe11f98414b04c0e`，两份 V2 均独立重放且 pcb3038 最优 tour 为 0 缺边。这是功能与资源 pilot，不是显著性能结论。
 

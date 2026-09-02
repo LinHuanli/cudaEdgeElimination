@@ -12,7 +12,7 @@
 - Concorde 受限 overlay、列—边映射、`CCbigguy` 对偶注入与完整图精确定价证书；
 - 路径系统规范化、`m<=5` CPU 生成/CUDA 查询兼容表与 `m=6,7` CPU 回退；
 - proper 3/4/5-opt CPU 叶 witness、inside coverage 与 `path-kopt-proof-v1` 重放；
-- 批量 CUDA k-opt 精确成本候选矩阵、逐 cell CPU 整数认证，以及仅对严格改善模板执行的完整 witness 重建；
+- 批量 CUDA k-opt 精确成本矩阵的逐 cell CPU 差分接口，以及 broker 专用的紧凑 candidate mask；严格改善 witness 仍由 CPU 完整重建；
 - 收缩 forced outside matching 的 CPU 精确 Held–Karp 子集 DP 困难叶回退；
 - 相邻 popcount 层的紧凑 exact value DP，以及 `block_count<=13` 的单 CTA CUDA 候选后端；CUDA 阴性保留边，阳性仍由 CPU traceback/witness verifier 认证；
 - 浅层 Hamilton–Tutte `c,d` AND–OR 根证明与 CPU 复核的 CUDA 候选筛选；
@@ -23,8 +23,9 @@
 - `local-eliminate` 的 JV 固定点、HT 无提交 sweep 推进、提交后目标重排、可选目标级多 GPU，以及单一可重放 V2 证明组合；
 - HT scan V2 阶段计时，以及用 `--leaf-backend` 将 CUDA leaf cost 与 CPU 候选器解耦的混合路径；
 - CPU leaf CLI 默认开启、auto/CUDA 默认关闭且可显式 0/1 覆盖的 `--fuse-leaf-buckets` 调度；
-- 版本化短路 AND/OR Trace、`ht-trace-replay` 推测窗口模拟，以及保持 DFS 规范 proof 的 opt-in `transposed` host-window 原型；
-- HT scan V18 leaf/setup/cost/reply/path/root/point-candidate/cache/target-worker/调度子阶段计时及 V20 五路 benchmark summary；
+- 版本化短路 AND/OR Trace、`ht-trace-replay` 推测窗口模拟，以及保持 DFS 规范 proof 的 opt-in `transposed` host-window；
+- 单 GPU 跨 target heterogeneous leaf broker：两请求机会式微批、独立 required edges、candidate masks 与 CPU witness 精确复核；
+- HT scan V19 leaf/setup/cost/reply/path/root/point-candidate/cache/target-worker/broker/调度子阶段计时及 V20 五路 benchmark summary；
 - point-candidate 严格全序的有界 Top-K 选择，并保留无界分支的完整排序语义；
 - target 级 point-candidate 静态次序缓存与逐 state generation-mark 过滤；
 - 同步 leaf batch 内复用 snapshot binding，同时保持公开 proof verifier 独立哈希；
@@ -50,7 +51,7 @@
 - 带锁定来源 SHA-256 和本地精确复核的 pcb3038/rl5915/d15112 最优 tour 获取工具；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 
-尚未完成的研究项（跨 target 的 heterogeneous leaf broker/continuation work graph、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。V3 的 transposed host-window 原型在 d15112 32-target 上把逻辑 states 从 40,044 降到 19,498、提交边从 11 增到 18，但因产生 19,504 个小 leaf batches 而显著慢于 wavefront，所以保持 opt-in；clean-commit 七对 A/B 中，当前最佳单 GPU混合路径相对旧 A5000 GPU 基线约 `1.53×`，但 process wall 仍比当前 CPU 慢约 18.8%。这些结果不是论文 Table 7 的同协议对比，详见 [V3 实现与 Pilot](docs/research/63_V3_单GPU原型实现与Pilot.md)。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。CPU 精确困难叶有 18 blocks 上限，CUDA 候选器上限为 13；任何超限或错误只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
+尚未完成的研究项（跨 target SoA continuation ready queue、generation cancellation、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。V3 的跨目标 leaf broker 在 d15112 32-target 上保持 `19,498 states/18 proofs`，五对 clean A/B 的单 GPU target execution 相对 CPU 为 `1.009x`，algorithm total 为 `1.001x`，process wall 为 `0.997x`，因此端到端只能判定为持平，`transposed` 继续保持 opt-in。这些结果不是论文 Table 7 的同协议对比，详见 [V3 跨目标 Leaf Broker](docs/research/64_V3_单GPU跨目标LeafBroker.md)。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。CPU 精确困难叶有 18 blocks 上限，CUDA 候选器上限为 13；任何超限或错误只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
 
 ## 快速开始
 
@@ -80,10 +81,15 @@ CUDAEE_HT_MAX_TARGETS=32 \
 CUDAEE_BENCHMARK_TOUR=artifacts/lkh-tours/d15112.opt.tour \
 tools/run_ht_target_multigpu_ab.sh d15112 0 1 7
 
-# V3 单 GPU CPU/hybrid 七对 A/B；参数 2 是当前主机的物理 GPU 索引
+# V3 wavefront CPU/hybrid 七对 A/B；参数 2 是当前主机的物理 GPU 索引
 CUDAEE_CUDA_PRESET=cuda-sm86-release \
 CUDAEE_BENCHMARK_TOUR=artifacts/lkh-tours/d15112.opt.tour \
 tools/run_v3_single_gpu_ab.sh d15112 2 7
+
+# V3 transposed 最佳 CPU vs 单 GPU leaf broker 五对 A/B
+CUDAEE_CUDA_PRESET=cuda-sm86-release \
+CUDAEE_BENCHMARK_TOUR=artifacts/lkh-tours/d15112.opt.tour \
+tools/run_v3_transposed_single_gpu_ab.sh d15112 2 5
 
 # 构建受限 Concorde overlay，并验证 cuOpt→完整图精确定价握手
 ./tools/bootstrap_concorde.sh

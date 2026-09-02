@@ -72,5 +72,6 @@
 68. [V3 单 GPU实施路线](research/61_V3_单GPU实施路线.md)：A0/A1/C1/C1.5 的实现拆分与提交策略。
 69. [V3 论文对齐与基准协议](research/62_V3_论文对齐与基准协议.md)：比较 scope、七对 A/B、强度门禁与 Table 7 对齐方法。
 70. [V3 单 GPU原型实现与 Pilot](research/63_V3_单GPU原型实现与Pilot.md)：已落地能力、A5000 消融、转置调度限制和下一工作边界。
+71. [V3 单 GPU 跨目标 Leaf Broker](research/64_V3_单GPU跨目标LeafBroker.md)：异构 required-edge 合批、CUDA 候选位图、机会式微批和 d15112 五对正式 A/B。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

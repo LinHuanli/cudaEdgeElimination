@@ -1,5 +1,7 @@
 # V3 单 GPU 原型实现与 Pilot
 
+> 本文保留 `a8faebb` 时点的 pre-broker 原型与 wavefront 基线。`4de281c` 已实现跨目标 leaf broker 与 candidate mask，最新结果见 [V3 单 GPU 跨目标 Leaf Broker](64_V3_单GPU跨目标LeafBroker.md)。
+
 ## 结论
 
 V3 中可独立验收的 A0、A1 和验证热路径已经落地；C1 完成的是保持 DFS 规范次序的 host-window 转置原型，还不是设计稿要求的跨目标 continuation broker。正式七对 A/B 表明，当前单 GPU 混合 wavefront 相对本分支之前的 A5000 全 CUDA 基线明显改善，但仍未超过当前 8 线程 CPU 基线，因此默认调度继续保持 `wavefront`，`transposed` 仅作为显式研究后端。
@@ -32,7 +34,7 @@ V3 中可独立验收的 A0、A1 和验证热路径已经落地；C1 完成的�
 - `s=1` 在随机小图上与递归 DFS 的结论、状态/reply/leaf 计数和序列化 proof 一致；`s=4` 保持相同规范 proof。
 - 当前 path-append、Hamilton/end reply 和 continuation 控制流仍在 CPU；leaf 与根 `c,d` 可用 CUDA。显式要求 transposed 的 CUDA reply/path 会安全拒绝。
 
-这还不是完整 C1：当前没有跨 target 的 ready queue、SoA continuation arena、generation cancellation token、异构 leaf broker 或 CUDA Graph 调度轮次。每个规范状态仍触发一次 leaf batch，因此只能验证短路语义和工作量，不能提供目标中的 GPU 吞吐。
+该提交在当时还不是完整 C1：它没有跨 target 的 ready queue、SoA continuation arena、generation cancellation token、异构 leaf broker 或 CUDA Graph 调度轮次。每个规范状态仍触发一次 leaf batch，因此只能验证短路语义和工作量，不能提供目标中的 GPU 吞吐。
 
 ### 单 GPU并发与验证热路径
 
@@ -125,4 +127,4 @@ V3 中可独立验收的 A0、A1 和验证热路径已经落地；C1 完成的�
 
 正式单 GPU A/B 入口是 `tools/run_v3_single_gpu_ab.sh INSTANCE PHYSICAL_GPU [PAIRS]`。脚本要求 clean worktree 和最优 tour，固定 GPU UUID，先重建/重放 JV 固定点，再交替执行七对 CPU 与单 GPU混合 wavefront；每次运行都独立验证 proof、tour、边文件和规范工作签名，并输出普通及配对 speedup 的中位数、P25/P75。
 
-下一实现切片只有一个主目标：建立跨 target 的 heterogeneous leaf broker。它必须保留规范 child commit 顺序和逻辑预算，把多个 continuation 的 cost rows 合成少量大 batch，并用 generation token 丢弃短路后的迟到结果。达到 18 条证明且相对 CPU wall 至少 `1.25x` 前，`transposed` 保持 opt-in。
+该文当时定义的 heterogeneous leaf broker 现已落地，但 generation token 和异步 continuation ready queue 仍未完成。最新 clean A/B 只达到端到端持平，因此 `transposed` 仍保持 opt-in，不改变本文的 `1.25x` 采用门槛。
