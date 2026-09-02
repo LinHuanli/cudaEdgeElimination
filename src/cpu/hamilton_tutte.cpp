@@ -331,14 +331,28 @@ std::vector<HtNeighborPair> EnumerateHtHamiltonReplies(const GraphSnapshot& grap
   return replies;
 }
 
-HtHamiltonReplyBatchResult EvaluateHtHamiltonReplies(const GraphSnapshot& graph,
-                                                     const NodeEdge raw_target,
-                                                     const std::vector<std::int32_t>& centers,
-                                                     const PathCompatibilityBackend backend) {
+detail::HtGraphValidationBinding::HtGraphValidationBinding(const GraphSnapshot& graph)
+    : graph_(&graph) {
+  std::string reason;
+  if (!ValidateHtGraph(graph, &reason)) {
+    throw std::invalid_argument(reason);
+  }
+}
+
+namespace {
+
+enum class GraphValidationMode : std::uint8_t {
+  kValidate,
+  kAlreadyValidated,
+};
+
+HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesImpl(
+    const GraphSnapshot& graph, const NodeEdge raw_target, const std::vector<std::int32_t>& centers,
+    const PathCompatibilityBackend backend, const GraphValidationMode validation_mode) {
   HtHamiltonReplyBatchResult result;
   const SteadyClock::time_point validation_begin = SteadyClock::now();
   std::string reason;
-  if (!ValidateHtGraph(graph, &reason)) {
+  if (validation_mode == GraphValidationMode::kValidate && !ValidateHtGraph(graph, &reason)) {
     throw std::invalid_argument(reason);
   }
   const NodeEdge target = CanonicalEdge(raw_target.u, raw_target.v);
@@ -428,11 +442,12 @@ HtHamiltonReplyBatchResult EvaluateHtHamiltonReplies(const GraphSnapshot& graph,
   return result;
 }
 
-HtEndReplyBatchResult EvaluateHtEndReplies(const GraphSnapshot& graph,
-                                           const std::vector<HtEndReplyTask>& tasks,
-                                           const PathCompatibilityBackend backend) {
+HtEndReplyBatchResult EvaluateHtEndRepliesImpl(const GraphSnapshot& graph,
+                                               const std::vector<HtEndReplyTask>& tasks,
+                                               const PathCompatibilityBackend backend,
+                                               const GraphValidationMode validation_mode) {
   std::string reason;
-  if (!ValidateHtGraph(graph, &reason)) {
+  if (validation_mode == GraphValidationMode::kValidate && !ValidateHtGraph(graph, &reason)) {
     throw std::invalid_argument(reason);
   }
   if (backend != PathCompatibilityBackend::kAuto && backend != PathCompatibilityBackend::kCpu &&
@@ -495,6 +510,42 @@ HtEndReplyBatchResult EvaluateHtEndReplies(const GraphSnapshot& graph,
   return result;
 }
 
+} // namespace
+
+HtHamiltonReplyBatchResult EvaluateHtHamiltonReplies(const GraphSnapshot& graph,
+                                                     const NodeEdge raw_target,
+                                                     const std::vector<std::int32_t>& centers,
+                                                     const PathCompatibilityBackend backend) {
+  return EvaluateHtHamiltonRepliesImpl(graph, raw_target, centers, backend,
+                                       GraphValidationMode::kValidate);
+}
+
+HtHamiltonReplyBatchResult detail::EvaluateHtHamiltonRepliesBoundToValidatedGraph(
+    const GraphSnapshot& graph, const NodeEdge target_edge,
+    const std::vector<std::int32_t>& centers, const HtGraphValidationBinding& binding,
+    const PathCompatibilityBackend backend) {
+  if (!binding.Matches(graph)) {
+    throw std::invalid_argument("HT graph validation binding 与图对象不一致");
+  }
+  return EvaluateHtHamiltonRepliesImpl(graph, target_edge, centers, backend,
+                                       GraphValidationMode::kAlreadyValidated);
+}
+
+HtEndReplyBatchResult EvaluateHtEndReplies(const GraphSnapshot& graph,
+                                           const std::vector<HtEndReplyTask>& tasks,
+                                           const PathCompatibilityBackend backend) {
+  return EvaluateHtEndRepliesImpl(graph, tasks, backend, GraphValidationMode::kValidate);
+}
+
+HtEndReplyBatchResult detail::EvaluateHtEndRepliesBoundToValidatedGraph(
+    const GraphSnapshot& graph, const std::vector<HtEndReplyTask>& tasks,
+    const HtGraphValidationBinding& binding, const PathCompatibilityBackend backend) {
+  if (!binding.Matches(graph)) {
+    throw std::invalid_argument("HT graph validation binding 与图对象不一致");
+  }
+  return EvaluateHtEndRepliesImpl(graph, tasks, backend, GraphValidationMode::kAlreadyValidated);
+}
+
 std::vector<HtCdCandidate> GenerateHtCdCandidates(const GraphSnapshot& graph,
                                                   const NodeEdge raw_target,
                                                   const HtShallowOptions& options) {
@@ -511,10 +562,13 @@ std::vector<HtCdCandidate> GenerateHtCdCandidates(const GraphSnapshot& graph,
                               ScreenCdTasksCpu(graph, target, tasks, options.cd_mode));
 }
 
-HtCdBatchResult EvaluateHtCdCandidates(const GraphSnapshot& graph, const NodeEdge raw_target,
-                                       const HtShallowOptions& options) {
+namespace {
+
+HtCdBatchResult EvaluateHtCdCandidatesImpl(const GraphSnapshot& graph, const NodeEdge raw_target,
+                                           const HtShallowOptions& options,
+                                           const GraphValidationMode validation_mode) {
   std::string reason;
-  if (!ValidateHtGraph(graph, &reason)) {
+  if (validation_mode == GraphValidationMode::kValidate && !ValidateHtGraph(graph, &reason)) {
     throw std::invalid_argument(reason);
   }
   const NodeEdge target = CanonicalEdge(raw_target.u, raw_target.v);
@@ -552,6 +606,23 @@ HtCdBatchResult EvaluateHtCdCandidates(const GraphSnapshot& graph, const NodeEdg
   }
   result.candidates = FinalizeCdCandidates(graph, target, options, tasks, cpu_flags);
   return result;
+}
+
+} // namespace
+
+HtCdBatchResult EvaluateHtCdCandidates(const GraphSnapshot& graph, const NodeEdge raw_target,
+                                       const HtShallowOptions& options) {
+  return EvaluateHtCdCandidatesImpl(graph, raw_target, options, GraphValidationMode::kValidate);
+}
+
+HtCdBatchResult detail::EvaluateHtCdCandidatesBoundToValidatedGraph(
+    const GraphSnapshot& graph, const NodeEdge target_edge, const HtShallowOptions& options,
+    const HtGraphValidationBinding& binding) {
+  if (!binding.Matches(graph)) {
+    throw std::invalid_argument("HT graph validation binding 与图对象不一致");
+  }
+  return EvaluateHtCdCandidatesImpl(graph, target_edge, options,
+                                    GraphValidationMode::kAlreadyValidated);
 }
 
 HtShallowResult ProveEdgeByShallowHt(const GraphSnapshot& graph, const NodeEdge raw_target,

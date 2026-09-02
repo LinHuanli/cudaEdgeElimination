@@ -243,6 +243,7 @@ struct WaveBuildContext {
   bool fuse_leaf_buckets{false};
   PointCandidateOrderCache point_candidate_order;
   const detail::KOptSnapshotBinding* leaf_snapshot_binding{};
+  const detail::HtGraphValidationBinding* graph_validation_binding{};
   HtWavefrontResult* result{};
   bool budget_exhausted{false};
   bool path_append_failed{false};
@@ -401,8 +402,12 @@ EvaluateHamiltonReplyBatch(WaveBuildContext* const context,
                            const std::vector<std::int32_t>& centers) {
   ScopedPhaseTimer timer(&context->result->hamilton_reply_ms);
   try {
-    HtHamiltonReplyBatchResult batch = EvaluateHtHamiltonReplies(
-        *context->graph, context->target, centers, context->hamilton_reply_backend);
+    if (context->graph_validation_binding == nullptr) {
+      throw std::logic_error("HT wavefront 缺少 graph validation binding");
+    }
+    HtHamiltonReplyBatchResult batch = detail::EvaluateHtHamiltonRepliesBoundToValidatedGraph(
+        *context->graph, context->target, centers, *context->graph_validation_binding,
+        context->hamilton_reply_backend);
     RecordHamiltonReplyBatch(context, batch, centers.size());
     return batch;
   } catch (const std::bad_alloc&) {
@@ -463,8 +468,12 @@ std::optional<HtEndReplyBatchResult>
 EvaluateEndReplyBatch(WaveBuildContext* const context, const std::vector<HtEndReplyTask>& tasks) {
   ScopedPhaseTimer timer(&context->result->end_reply_ms);
   try {
-    HtEndReplyBatchResult batch =
-        EvaluateHtEndReplies(*context->graph, tasks, context->hamilton_reply_backend);
+    if (context->graph_validation_binding == nullptr) {
+      throw std::logic_error("HT wavefront 缺少 graph validation binding");
+    }
+    HtEndReplyBatchResult batch = detail::EvaluateHtEndRepliesBoundToValidatedGraph(
+        *context->graph, tasks, *context->graph_validation_binding,
+        context->hamilton_reply_backend);
     RecordEndReplyBatch(context, batch, tasks.size());
     return batch;
   } catch (const std::bad_alloc&) {
@@ -1391,17 +1400,23 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
     return result;
   }
 
+  std::optional<detail::HtGraphValidationBinding> graph_validation_binding;
   HtCdBatchResult candidates;
   const SteadyClock::time_point candidate_begin = SteadyClock::now();
   try {
-    candidates =
-        EvaluateHtCdCandidates(graph, proof.target_edge, options.search_options.root_options);
+    graph_validation_binding.emplace(graph);
+    candidates = detail::EvaluateHtCdCandidatesBoundToValidatedGraph(
+        graph, proof.target_edge, options.search_options.root_options, *graph_validation_binding);
   } catch (const std::exception& error) {
     if (options.search_options.root_options.candidate_backend == PathCompatibilityBackend::kAuto) {
       try {
         HtShallowOptions cpu_options = options.search_options.root_options;
         cpu_options.candidate_backend = PathCompatibilityBackend::kCpu;
-        candidates = EvaluateHtCdCandidates(graph, proof.target_edge, cpu_options);
+        if (!graph_validation_binding.has_value()) {
+          graph_validation_binding.emplace(graph);
+        }
+        candidates = detail::EvaluateHtCdCandidatesBoundToValidatedGraph(
+            graph, proof.target_edge, cpu_options, *graph_validation_binding);
       } catch (const std::exception& cpu_error) {
         result.candidate_ms += ElapsedMilliseconds(candidate_begin);
         proof.reason = cpu_error.what();
@@ -1443,6 +1458,7 @@ HtWavefrontResult ProveEdgeByWavefrontHt(const GraphSnapshot& graph, const NodeE
                            .fuse_leaf_buckets = options.fuse_leaf_buckets,
                            .point_candidate_order = {},
                            .leaf_snapshot_binding = &leaf_snapshot_binding,
+                           .graph_validation_binding = &*graph_validation_binding,
                            .result = &result,
                            .budget_exhausted = false,
                            .path_append_failed = false,

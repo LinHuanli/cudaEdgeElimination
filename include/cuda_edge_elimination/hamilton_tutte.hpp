@@ -421,6 +421,32 @@ void WriteHtRecursiveProof(const std::filesystem::path& path, const HtRecursiveP
 
 namespace detail {
 
+// 构造时完整验证 HT graph；仅供同一同步只读作用域内的内部 batch API 复用。
+class HtGraphValidationBinding {
+public:
+  explicit HtGraphValidationBinding(const GraphSnapshot& graph);
+
+  [[nodiscard]] bool Matches(const GraphSnapshot& graph) const noexcept { return graph_ == &graph; }
+
+private:
+  const GraphSnapshot* graph_{};
+};
+
+[[nodiscard]] HtCdBatchResult
+EvaluateHtCdCandidatesBoundToValidatedGraph(const GraphSnapshot& graph, NodeEdge target_edge,
+                                            const HtShallowOptions& options,
+                                            const HtGraphValidationBinding& binding);
+
+[[nodiscard]] HtHamiltonReplyBatchResult EvaluateHtHamiltonRepliesBoundToValidatedGraph(
+    const GraphSnapshot& graph, NodeEdge target_edge, const std::vector<std::int32_t>& centers,
+    const HtGraphValidationBinding& binding,
+    PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto);
+
+[[nodiscard]] HtEndReplyBatchResult EvaluateHtEndRepliesBoundToValidatedGraph(
+    const GraphSnapshot& graph, const std::vector<HtEndReplyTask>& tasks,
+    const HtGraphValidationBinding& binding,
+    PathCompatibilityBackend backend = PathCompatibilityBackend::kAuto);
+
 struct HtPathStateSpan {
   std::uint32_t node_begin{};
   std::uint32_t node_count{};

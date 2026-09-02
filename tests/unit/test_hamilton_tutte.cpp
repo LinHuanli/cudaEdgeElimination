@@ -182,12 +182,44 @@ void TestHamiltonReplyBatch() {
     graph.distance_type = distance_type;
     const cudaee::HtHamiltonReplyBatchResult cpu = cudaee::EvaluateHtHamiltonReplies(
         graph, {0, 1}, centers, cudaee::PathCompatibilityBackend::kCpu);
+    const cudaee::detail::HtGraphValidationBinding binding(graph);
+    const cudaee::HtHamiltonReplyBatchResult bound =
+        cudaee::detail::EvaluateHtHamiltonRepliesBoundToValidatedGraph(
+            graph, {0, 1}, centers, binding, cudaee::PathCompatibilityBackend::kCpu);
+    const cudaee::HtShallowOptions candidate_options = {
+        .max_neighborhood = 0,
+        .max_cd_candidates = 0,
+        .max_candidate_degree = 0,
+        .cd_mode = cudaee::HtCdMode::kMissingOrIncompatible,
+        .candidate_backend = cudaee::PathCompatibilityBackend::kCpu};
+    const cudaee::HtCdBatchResult public_candidates =
+        cudaee::EvaluateHtCdCandidates(graph, {0, 1}, candidate_options);
+    const cudaee::HtCdBatchResult bound_candidates =
+        cudaee::detail::EvaluateHtCdCandidatesBoundToValidatedGraph(graph, {0, 1},
+                                                                    candidate_options, binding);
     Check(cpu.backend == "cpu" && cpu.cpu_verified && cpu.offsets.size() == centers.size() + 1U &&
               cpu.offsets.front() == 0U && cpu.offsets.back() == cpu.replies.size() &&
               cpu.unique_centers == 10U && cpu.neighbor_pairs_tested == 550U &&
               cpu.validation_ms >= 0.0 && cpu.cpu_enumerate_ms >= 0.0 &&
               cpu.cuda_evaluate_ms == 0.0 && cpu.cuda_compare_ms == 0.0,
           "CPU Hamilton reply batch metadata and offsets are complete");
+    Check(bound.backend == cpu.backend && bound.cpu_verified == cpu.cpu_verified &&
+              bound.offsets == cpu.offsets && bound.replies == cpu.replies &&
+              bound.unique_centers == cpu.unique_centers &&
+              bound.neighbor_pairs_tested == cpu.neighbor_pairs_tested,
+          "validated graph binding preserves every Hamilton reply result");
+    Check(bound_candidates.backend == public_candidates.backend &&
+              bound_candidates.cpu_verified == public_candidates.cpu_verified &&
+              bound_candidates.candidates == public_candidates.candidates,
+          "validated graph binding preserves every c,d candidate result");
+    const cudaee::GraphSnapshot graph_copy = graph;
+    CheckThrows(
+        [&] {
+          const auto ignored = cudaee::detail::EvaluateHtHamiltonRepliesBoundToValidatedGraph(
+              graph_copy, {0, 1}, centers, binding, cudaee::PathCompatibilityBackend::kCpu);
+          static_cast<void>(ignored);
+        },
+        "Hamilton reply binding rejects an equal graph copy");
     for (std::size_t index = 0; index < centers.size(); ++index) {
       const std::vector<cudaee::HtNeighborPair> expected =
           ReferenceReplies(graph, {0, 1}, centers[index]);
@@ -245,9 +277,24 @@ void TestEndReplyBatch() {
   const std::vector<cudaee::HtEndReplyTask> tasks = {{0, 1}, {1, 0}, {8, 3}, {0, 1}};
   const cudaee::HtEndReplyBatchResult cpu =
       cudaee::EvaluateHtEndReplies(graph, tasks, cudaee::PathCompatibilityBackend::kCpu);
+  const cudaee::detail::HtGraphValidationBinding binding(graph);
+  const cudaee::HtEndReplyBatchResult bound =
+      cudaee::detail::EvaluateHtEndRepliesBoundToValidatedGraph(
+          graph, tasks, binding, cudaee::PathCompatibilityBackend::kCpu);
   Check(cpu.backend == "cpu" && cpu.cpu_verified && cpu.offsets.size() == tasks.size() + 1U &&
             cpu.offsets.front() == 0U && cpu.offsets.back() == cpu.replies.size(),
         "CPU end reply batch metadata and offsets are complete");
+  Check(bound.backend == cpu.backend && bound.cpu_verified == cpu.cpu_verified &&
+            bound.offsets == cpu.offsets && bound.replies == cpu.replies,
+        "validated graph binding preserves every end reply result");
+  const cudaee::GraphSnapshot graph_copy = graph;
+  CheckThrows(
+      [&] {
+        const auto ignored = cudaee::detail::EvaluateHtEndRepliesBoundToValidatedGraph(
+            graph_copy, tasks, binding, cudaee::PathCompatibilityBackend::kCpu);
+        static_cast<void>(ignored);
+      },
+      "end reply binding rejects an equal graph copy");
   for (std::size_t index = 0; index < tasks.size(); ++index) {
     std::vector<cudaee::NodeEdge> expected;
     for (std::int32_t neighbor = 0; neighbor < graph.dimension; ++neighbor) {
@@ -1351,26 +1398,26 @@ void TestPathAppendBatch() {
         for (std::size_t parent_index = 0U; parent_index < differential_parents.size();
              ++parent_index) {
           const auto contains = [&](const std::int32_t needle) {
-            return std::any_of(
-                differential_parents[parent_index].paths.begin(),
-                differential_parents[parent_index].paths.end(), [&](const cudaee::Path& path) {
-                  return std::find(path.begin(), path.end(), needle) != path.end();
-                });
+            return std::any_of(differential_parents[parent_index].paths.begin(),
+                               differential_parents[parent_index].paths.end(),
+                               [&](const cudaee::Path& path) {
+                                 return std::find(path.begin(), path.end(), needle) != path.end();
+                               });
           };
           const auto endpoint = [&](const std::int32_t needle) {
-            return std::any_of(
-                differential_parents[parent_index].paths.begin(),
-                differential_parents[parent_index].paths.end(), [&](const cudaee::Path& path) {
-                  return path.front() == needle || path.back() == needle;
-                });
+            return std::any_of(differential_parents[parent_index].paths.begin(),
+                               differential_parents[parent_index].paths.end(),
+                               [&](const cudaee::Path& path) {
+                                 return path.front() == needle || path.back() == needle;
+                               });
           };
           for (std::int32_t first = 0; first < dimension; ++first) {
             for (std::int32_t center = 0; center < dimension; ++center) {
               for (std::int32_t second = 0; second < dimension; ++second) {
                 if (first != second && center != first && center != second && !contains(center)) {
-                  differential_tasks.push_back(
-                      {static_cast<std::uint32_t>(parent_index),
-                       cudaee::HtPathAppendKind::kPoint, first, center, second});
+                  differential_tasks.push_back({static_cast<std::uint32_t>(parent_index),
+                                                cudaee::HtPathAppendKind::kPoint, first, center,
+                                                second});
                 }
               }
             }
@@ -1379,22 +1426,20 @@ void TestPathAppendBatch() {
             }
             for (std::int32_t second = 0; second < dimension; ++second) {
               if (first != second) {
-                differential_tasks.push_back(
-                    {static_cast<std::uint32_t>(parent_index), cudaee::HtPathAppendKind::kEnd,
-                     first, -1, second});
+                differential_tasks.push_back({static_cast<std::uint32_t>(parent_index),
+                                              cudaee::HtPathAppendKind::kEnd, first, -1, second});
               }
             }
           }
         }
-        const cudaee::HtPathAppendBatchResult differential = cudaee::EvaluateHtPathAppends(
-            dimension, differential_parents, differential_tasks,
-            cudaee::PathCompatibilityBackend::kCpu);
+        const cudaee::HtPathAppendBatchResult differential =
+            cudaee::EvaluateHtPathAppends(dimension, differential_parents, differential_tasks,
+                                          cudaee::PathCompatibilityBackend::kCpu);
         Check(differential.children.size() == differential_tasks.size(),
               "incremental path-append keeps every differential task aligned");
         for (std::size_t index = 0U; index < differential_tasks.size(); ++index) {
           const cudaee::HtPathAppendTask& task = differential_tasks[index];
-          std::vector<cudaee::Path> dense_input =
-              differential_parents[task.parent_index].paths;
+          std::vector<cudaee::Path> dense_input = differential_parents[task.parent_index].paths;
           if (task.kind == cudaee::HtPathAppendKind::kPoint) {
             dense_input.push_back({task.first, task.center, task.second});
           } else {
