@@ -57,11 +57,12 @@ void PrintHelp() {
       << "  ht-verify     --tsp FILE --edges FILE --proof FILE\n"
       << "  ht-scan       --tsp FILE --edges FILE --output FILE --proof FILE --report FILE\n"
       << "                --max-targets N [--target-offset N]\n"
-      << "                [--target-order weight-desc|canonical]\n"
+      << "                [--target-order weight-desc|canonical] [--target-devices D[,D...]]\n"
       << "                [--protected-tour FILE --expected-cost COST] [HT wavefront options]\n"
       << "  local-eliminate --tsp FILE --edges FILE --output FILE --proof FILE --report FILE\n"
       << "                --max-targets N [--max-ht-epochs N] [--max-jv-rounds N]\n"
       << "                [--target-order weight-desc|canonical] [--backend auto|cpu|cuda]\n"
+      << "                [--target-devices D[,D...]]\n"
       << "                [--protected-tour FILE --expected-cost COST] [HT wavefront options]\n"
       << "  pipeline      与 gpu-eliminate 相同，可附加 --lp-epoch FILE\n"
       << "                --lp-solution FILE [--cuopt-library FILE]\n\n"
@@ -498,6 +499,53 @@ cudaee::HtTargetOrder ParseHtTargetOrder(const std::string& value) {
   throw std::invalid_argument("--target-order 必须是 weight-desc 或 canonical");
 }
 
+std::vector<int> ParseTargetDevices(const Arguments& arguments) {
+  if (!arguments.contains("target-devices")) {
+    return {};
+  }
+  const std::string value = Required(arguments, "target-devices");
+  std::vector<int> devices;
+  std::size_t begin = 0U;
+  while (begin < value.size()) {
+    const std::size_t comma = value.find(',', begin);
+    const std::size_t end = comma == std::string::npos ? value.size() : comma;
+    if (end == begin) {
+      throw std::invalid_argument("--target-devices 不得包含空 ordinal");
+    }
+    const int device =
+        ParseIntegerValue<int>(value.substr(begin, end - begin), "--target-devices 中的 ordinal");
+    if (device < 0) {
+      throw std::invalid_argument("--target-devices 中的 ordinal 不得为负数");
+    }
+    if (std::find(devices.begin(), devices.end(), device) != devices.end()) {
+      throw std::invalid_argument("--target-devices 不得包含重复 ordinal");
+    }
+    devices.push_back(device);
+    if (comma == std::string::npos) {
+      break;
+    }
+    begin = comma + 1U;
+    if (begin == value.size()) {
+      throw std::invalid_argument("--target-devices 不得以逗号结尾");
+    }
+  }
+  return devices;
+}
+
+std::string TargetDevicesName(const std::vector<int>& devices) {
+  if (devices.empty()) {
+    return "auto";
+  }
+  std::string name;
+  for (const int device : devices) {
+    if (!name.empty()) {
+      name.push_back(',');
+    }
+    name += std::to_string(device);
+  }
+  return name;
+}
+
 const char* HtTargetOrderName(const cudaee::HtTargetOrder order) {
   return order == cudaee::HtTargetOrder::kCanonical ? "canonical" : "weight-desc";
 }
@@ -869,7 +917,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   if (!output) {
     throw std::runtime_error("无法创建 HT scan 报告: " + path.string());
   }
-  output << "CUDAEE_HT_SCAN_REPORT_V16\n";
+  output << "CUDAEE_HT_SCAN_REPORT_V17\n";
   output << "initial_hash " << cudaee::HexHash(scan.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(scan.elimination.final_hash) << '\n';
   output << "target_order " << HtTargetOrderName(options.target_order) << '\n';
@@ -877,6 +925,9 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "target_offset " << scan.target_offset << '\n';
   output << "target_end_offset " << scan.target_offset + scan.attempts.size() << '\n';
   output << "max_targets " << options.max_targets << '\n';
+  output << "target_devices " << TargetDevicesName(options.target_devices) << '\n';
+  output << "target_workers " << scan.target_workers << '\n';
+  output << "target_parallel " << (scan.target_parallel ? 1 : 0) << '\n';
   output << "fuse_leaf_buckets " << (options.wavefront_options.fuse_leaf_buckets ? 1 : 0) << '\n';
   output << "reuse_reply_cuda_cache " << (options.wavefront_options.reuse_reply_cuda_cache ? 1 : 0)
          << '\n';
@@ -939,6 +990,7 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   }
   output << std::fixed << std::setprecision(6);
   output << "target_selection_ms " << scan.target_selection_ms << '\n';
+  output << "target_execution_ms " << scan.target_execution_ms << '\n';
   output << "candidate_ms " << scan.candidate_ms << '\n';
   output << "work_graph_ms " << scan.work_graph_ms << '\n';
   output << "root_child_normalize_ms " << scan.root_child_normalize_ms << '\n';
@@ -979,7 +1031,8 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
   output << "search_ms " << scan.search_ms << '\n';
   output << "total_ms " << scan.total_ms << '\n';
   output << "attempt_fields index edge_id u v status states replies leaf_calls moves "
-            "peak_frontier propagation_backend device blocks cooperative propagation_verified "
+            "peak_frontier assigned_device propagation_backend device blocks cooperative "
+            "propagation_verified "
             "leaf_backend leaf_device leaf_verified leaf_frontier_batches leaf_frontier_states "
             "leaf_buckets peak_leaf_frontier_batch leaf_cost_batches leaf_cost_tasks leaf_cells "
             "leaf_cursor_searches leaf_cuda_batches "
@@ -987,13 +1040,14 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
             "leaf_completeness_rows leaf_completeness_templates leaf_cpu_certified_cells "
             "leaf_cpu_cost_rows_scored leaf_cpu_cost_rows_reused "
             "leaf_cpu_parallel_batches leaf_cpu_parallel_cells peak_leaf_cpu_threads "
-            "peak_leaf_cache_bytes path_append_tasks root_child_normalizations "
+            "peak_leaf_cache_bytes path_append_device path_append_tasks root_child_normalizations "
             "point_candidate_scans point_candidate_nodes_checked point_candidate_nodes_ranked "
-            "point_candidate_nodes_selected "
+            "point_candidate_nodes_selected hamilton_reply_device "
             "hamilton_reply_batches hamilton_reply_centers "
             "hamilton_reply_unique_centers hamilton_reply_neighbor_pairs hamilton_replies "
             "reply_cuda_batches reply_cuda_tasks_submitted reply_graph_cache_hits "
-            "reply_workspace_cache_hits peak_reply_cache_bytes end_reply_batches end_reply_tasks "
+            "reply_workspace_cache_hits peak_reply_cache_bytes end_reply_device end_reply_batches "
+            "end_reply_tasks "
             "end_reply_unique_tasks end_replies candidate_ms work_graph_ms root_child_normalize_ms "
             "point_candidate_scan_ms point_candidate_sort_ms leaf_ms leaf_setup_ms "
             "leaf_proof_initialize_ms leaf_coverage_scan_ms leaf_cursor_construct_ms "
@@ -1015,8 +1069,9 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << attempt.target_edge.v << ' ' << HtSearchStatusName(attempt.status) << ' '
            << attempt.states_expanded << ' ' << attempt.replies_expanded << ' '
            << attempt.leaf_calls << ' ' << attempt.moves_generated << ' ' << attempt.peak_frontier
-           << ' ' << attempt.propagation_backend << ' ' << attempt.selected_device << ' '
-           << attempt.propagation_blocks << ' ' << (attempt.propagation_cooperative ? 1 : 0) << ' '
+           << ' ' << attempt.assigned_device << ' ' << attempt.propagation_backend << ' '
+           << attempt.selected_device << ' ' << attempt.propagation_blocks << ' '
+           << (attempt.propagation_cooperative ? 1 : 0) << ' '
            << (attempt.propagation_cpu_verified ? 1 : 0) << ' ' << attempt.leaf_cost_backend << ' '
            << attempt.leaf_cost_selected_device << ' ' << (attempt.leaf_cpu_verified ? 1 : 0) << ' '
            << attempt.leaf_frontier_batches << ' ' << attempt.leaf_frontier_states << ' '
@@ -1031,34 +1086,35 @@ void WriteHtScanReport(const std::filesystem::path& path, const cudaee::HtScanRe
            << ' ' << attempt.leaf_cpu_cost_rows_reused << ' '
            << attempt.leaf_cpu_parallel_cost_batches << ' ' << attempt.leaf_cpu_parallel_cost_cells
            << ' ' << attempt.peak_leaf_cpu_cost_threads << ' '
-           << attempt.peak_leaf_device_cache_bytes << ' ' << attempt.path_append_tasks << ' '
-           << attempt.root_child_normalizations << ' ' << attempt.point_candidate_scans << ' '
-           << attempt.point_candidate_nodes_checked << ' ' << attempt.point_candidate_nodes_ranked
-           << ' ' << attempt.point_candidate_nodes_selected << ' ' << attempt.hamilton_reply_batches
+           << attempt.peak_leaf_device_cache_bytes << ' ' << attempt.path_append_selected_device
+           << ' ' << attempt.path_append_tasks << ' ' << attempt.root_child_normalizations << ' '
+           << attempt.point_candidate_scans << ' ' << attempt.point_candidate_nodes_checked << ' '
+           << attempt.point_candidate_nodes_ranked << ' ' << attempt.point_candidate_nodes_selected
+           << ' ' << attempt.hamilton_reply_selected_device << ' ' << attempt.hamilton_reply_batches
            << ' ' << attempt.hamilton_reply_centers << ' ' << attempt.hamilton_reply_unique_centers
            << ' ' << attempt.hamilton_reply_neighbor_pairs_tested << ' '
            << attempt.hamilton_replies_generated << ' ' << attempt.reply_cuda_batches << ' '
            << attempt.reply_cuda_tasks_submitted << ' ' << attempt.reply_cuda_graph_cache_hits
            << ' ' << attempt.reply_cuda_workspace_cache_hits << ' '
-           << attempt.peak_reply_device_cache_bytes << ' ' << attempt.end_reply_batches << ' '
-           << attempt.end_reply_tasks << ' ' << attempt.end_reply_unique_tasks << ' '
-           << attempt.end_replies_generated << ' ' << attempt.candidate_ms << ' '
-           << attempt.work_graph_ms << ' ' << attempt.root_child_normalize_ms << ' '
-           << attempt.point_candidate_scan_ms << ' ' << attempt.point_candidate_sort_ms << ' '
-           << attempt.leaf_ms << ' ' << attempt.leaf_setup_ms << ' '
-           << attempt.leaf_proof_initialize_ms << ' ' << attempt.leaf_coverage_scan_ms << ' '
-           << attempt.leaf_cursor_construct_ms << ' ' << attempt.leaf_cursor_prepare_ms << ' '
-           << attempt.leaf_cost_evaluate_ms << ' ' << attempt.leaf_cost_cpu_certify_ms << ' '
-           << attempt.leaf_cost_scatter_ms << ' ' << attempt.leaf_cursor_consume_ms << ' '
-           << attempt.leaf_candidate_recheck_ms << ' ' << attempt.leaf_completeness_fallback_ms
-           << ' ' << attempt.leaf_scalar_search_ms << ' ' << attempt.leaf_apply_ms << ' '
-           << attempt.leaf_proof_verify_ms << ' ' << attempt.path_append_ms << ' '
-           << attempt.path_append_parent_prepare_ms << ' ' << attempt.path_append_child_normalize_ms
-           << ' ' << attempt.path_append_child_edges_ms << ' '
-           << attempt.path_append_cuda_evaluate_ms << ' ' << attempt.path_append_cuda_compare_ms
-           << ' ' << attempt.hamilton_reply_ms << ' ' << attempt.hamilton_reply_validation_ms << ' '
-           << attempt.hamilton_reply_cpu_enumerate_ms << ' '
-           << attempt.hamilton_reply_cuda_evaluate_ms << ' '
+           << attempt.peak_reply_device_cache_bytes << ' ' << attempt.end_reply_selected_device
+           << ' ' << attempt.end_reply_batches << ' ' << attempt.end_reply_tasks << ' '
+           << attempt.end_reply_unique_tasks << ' ' << attempt.end_replies_generated << ' '
+           << attempt.candidate_ms << ' ' << attempt.work_graph_ms << ' '
+           << attempt.root_child_normalize_ms << ' ' << attempt.point_candidate_scan_ms << ' '
+           << attempt.point_candidate_sort_ms << ' ' << attempt.leaf_ms << ' '
+           << attempt.leaf_setup_ms << ' ' << attempt.leaf_proof_initialize_ms << ' '
+           << attempt.leaf_coverage_scan_ms << ' ' << attempt.leaf_cursor_construct_ms << ' '
+           << attempt.leaf_cursor_prepare_ms << ' ' << attempt.leaf_cost_evaluate_ms << ' '
+           << attempt.leaf_cost_cpu_certify_ms << ' ' << attempt.leaf_cost_scatter_ms << ' '
+           << attempt.leaf_cursor_consume_ms << ' ' << attempt.leaf_candidate_recheck_ms << ' '
+           << attempt.leaf_completeness_fallback_ms << ' ' << attempt.leaf_scalar_search_ms << ' '
+           << attempt.leaf_apply_ms << ' ' << attempt.leaf_proof_verify_ms << ' '
+           << attempt.path_append_ms << ' ' << attempt.path_append_parent_prepare_ms << ' '
+           << attempt.path_append_child_normalize_ms << ' ' << attempt.path_append_child_edges_ms
+           << ' ' << attempt.path_append_cuda_evaluate_ms << ' '
+           << attempt.path_append_cuda_compare_ms << ' ' << attempt.hamilton_reply_ms << ' '
+           << attempt.hamilton_reply_validation_ms << ' ' << attempt.hamilton_reply_cpu_enumerate_ms
+           << ' ' << attempt.hamilton_reply_cuda_evaluate_ms << ' '
            << attempt.hamilton_reply_cuda_compare_ms << ' ' << attempt.end_reply_ms << ' '
            << attempt.propagation_ms << ' ' << attempt.proof_extract_ms << ' '
            << attempt.proof_verify_ms << ' ' << attempt.immediate_verify_ms << ' '
@@ -1078,7 +1134,7 @@ void WriteLocalEliminationReport(const std::filesystem::path& path,
   if (!output) {
     throw std::runtime_error("无法创建 Local Elimination 报告: " + path.string());
   }
-  output << "CUDAEE_LOCAL_ELIMINATION_REPORT_V1\n";
+  output << "CUDAEE_LOCAL_ELIMINATION_REPORT_V2\n";
   output << "initial_hash " << cudaee::HexHash(local.elimination.initial_hash) << '\n';
   output << "final_hash " << cudaee::HexHash(local.elimination.final_hash) << '\n';
   output << "termination " << cudaee::ToString(local.termination) << '\n';
@@ -1088,6 +1144,7 @@ void WriteLocalEliminationReport(const std::filesystem::path& path,
   output << "max_ht_epochs " << options.max_ht_epochs << '\n';
   output << "max_targets_per_ht_epoch " << options.ht_scan_options.max_targets << '\n';
   output << "target_order " << HtTargetOrderName(options.ht_scan_options.target_order) << '\n';
+  output << "target_devices " << TargetDevicesName(options.ht_scan_options.target_devices) << '\n';
   output << "proof_records " << local.elimination.proof.size() << '\n';
   output << "ht_sidecars " << local.elimination.ht_proofs.size() << '\n';
   output << "stage_count " << local.stages.size() << '\n';
@@ -1098,7 +1155,8 @@ void WriteLocalEliminationReport(const std::filesystem::path& path,
   }
   output << "stage_fields index kind backend initial_hash final_hash edges_before edges_after "
             "proposed verified rejected committed jv_rounds eligible_targets target_offset "
-            "attempted_targets proven_targets unresolved_targets elapsed_ms\n";
+            "attempted_targets proven_targets unresolved_targets target_workers target_parallel "
+            "target_execution_ms elapsed_ms\n";
   output << std::fixed << std::setprecision(6);
   for (const cudaee::LocalEliminationStageMetrics& stage : local.stages) {
     output << "stage " << stage.stage << ' ' << cudaee::ToString(stage.kind) << ' ' << stage.backend
@@ -1107,7 +1165,9 @@ void WriteLocalEliminationReport(const std::filesystem::path& path,
            << stage.verified << ' ' << stage.rejected << ' ' << stage.committed << ' '
            << stage.jv_rounds << ' ' << stage.eligible_targets << ' ' << stage.target_offset << ' '
            << stage.attempted_targets << ' ' << stage.proven_targets << ' '
-           << stage.unresolved_targets << ' ' << stage.elapsed_ms << '\n';
+           << stage.unresolved_targets << ' ' << stage.target_workers << ' '
+           << (stage.target_parallel ? 1 : 0) << ' ' << stage.target_execution_ms << ' '
+           << stage.elapsed_ms << '\n';
   }
   output << "END\n";
   if (!output) {
@@ -1128,6 +1188,7 @@ void HtScanCommand(const Arguments& arguments) {
   options.target_offset = OptionalInteger<std::uint64_t>(arguments, "target-offset", 0U);
   options.max_targets = RequiredInteger<std::uint64_t>(arguments, "max-targets");
   options.target_order = ParseHtTargetOrder(Optional(arguments, "target-order", "weight-desc"));
+  options.target_devices = ParseTargetDevices(arguments);
   if (arguments.contains("scheduler") && Optional(arguments, "scheduler") != "wavefront") {
     throw std::invalid_argument("ht-scan 只支持 wavefront scheduler");
   }
@@ -1180,9 +1241,14 @@ void HtScanCommand(const Arguments& arguments) {
               << " status=" << HtSearchStatusName(attempt.status)
               << " states=" << attempt.states_expanded << " replies=" << attempt.replies_expanded
               << " leaf_calls=" << attempt.leaf_calls
+              << " assigned_device=" << attempt.assigned_device
               << " propagation_backend=" << attempt.propagation_backend
               << " selected_device=" << attempt.selected_device
               << " leaf_cost_backend=" << attempt.leaf_cost_backend
+              << " leaf_cost_device=" << attempt.leaf_cost_selected_device
+              << " path_append_device=" << attempt.path_append_selected_device
+              << " hamilton_reply_device=" << attempt.hamilton_reply_selected_device
+              << " end_reply_device=" << attempt.end_reply_selected_device
               << " leaf_frontier_batches=" << attempt.leaf_frontier_batches
               << " leaf_cost_batches=" << attempt.leaf_cost_batches
               << " leaf_cost_cells=" << attempt.leaf_cost_cells << " work_graph_ms=" << std::fixed
@@ -1219,6 +1285,9 @@ void HtScanCommand(const Arguments& arguments) {
             << (options.wavefront_options.reuse_reply_cuda_cache ? 1 : 0)
             << " deduplicate_reply_tasks="
             << (options.wavefront_options.deduplicate_reply_tasks ? 1 : 0)
+            << " target_devices=" << TargetDevicesName(options.target_devices)
+            << " target_workers=" << scan.target_workers
+            << " target_parallel=" << (scan.target_parallel ? 1 : 0)
             << " reply_cuda_batches=" << scan.reply_cuda_batches
             << " reply_cuda_tasks_submitted=" << scan.reply_cuda_tasks_submitted
             << " reply_graph_cache_hits=" << scan.reply_cuda_graph_cache_hits
@@ -1227,6 +1296,7 @@ void HtScanCommand(const Arguments& arguments) {
             << " end_reply_batches=" << scan.end_reply_batches
             << " end_reply_tasks=" << scan.end_reply_tasks
             << " end_reply_unique_tasks=" << scan.end_reply_unique_tasks
+            << " target_execution_ms=" << scan.target_execution_ms
             << " search_ms=" << scan.search_ms << " work_graph_ms=" << scan.work_graph_ms
             << " leaf_ms=" << scan.leaf_ms << " hamilton_reply_ms=" << scan.hamilton_reply_ms
             << " propagation_ms=" << scan.propagation_ms << " commit_ms=" << scan.commit_ms
@@ -1259,6 +1329,7 @@ void LocalEliminationCommand(const Arguments& arguments) {
   options.ht_scan_options.max_targets = RequiredInteger<std::uint64_t>(arguments, "max-targets");
   options.ht_scan_options.target_order =
       ParseHtTargetOrder(Optional(arguments, "target-order", "weight-desc"));
+  options.ht_scan_options.target_devices = ParseTargetDevices(arguments);
 
   const std::string protected_tour_path = Optional(arguments, "protected-tour");
   const bool has_protected_tour = !protected_tour_path.empty();
@@ -1309,8 +1380,11 @@ void LocalEliminationCommand(const Arguments& arguments) {
               << " jv_rounds=" << stage.jv_rounds << " eligible=" << stage.eligible_targets
               << " target_offset=" << stage.target_offset
               << " attempted=" << stage.attempted_targets << " proven=" << stage.proven_targets
-              << " unresolved=" << stage.unresolved_targets << " elapsed_ms=" << std::fixed
-              << std::setprecision(3) << stage.elapsed_ms << '\n';
+              << " unresolved=" << stage.unresolved_targets
+              << " target_workers=" << stage.target_workers
+              << " target_parallel=" << (stage.target_parallel ? 1 : 0)
+              << " target_execution_ms=" << stage.target_execution_ms
+              << " elapsed_ms=" << std::fixed << std::setprecision(3) << stage.elapsed_ms << '\n';
   }
   std::cout << "local_status=OK termination=" << cudaee::ToString(local.termination)
             << " stages=" << local.stages.size() << " committed=" << local.elimination.proof.size()

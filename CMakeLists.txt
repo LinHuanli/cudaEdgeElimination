@@ -14,6 +14,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(ZLIB QUIET)
+find_package(Threads REQUIRED)
 if(CUDAEE_ENABLE_OPENMP)
   find_package(OpenMP QUIET COMPONENTS CXX)
 endif()
@@ -46,6 +47,7 @@ if(CUDAEE_ENABLE_CUDA)
   endif()
   enable_language(CUDA)
   list(APPEND CUDAEE_SOURCES
+      src/cuda/device_affinity.cu
       src/cuda/ht_cd.cu
       src/cuda/ht_path_append.cu
       src/cuda/ht_replies.cu
@@ -54,6 +56,7 @@ if(CUDAEE_ENABLE_CUDA)
       src/cuda/path_compatibility.cu)
 else()
   list(APPEND CUDAEE_SOURCES
+      src/cuda/device_affinity_stub.cpp
       src/cuda/ht_cd_stub.cpp
       src/cuda/ht_path_append_stub.cpp
       src/cuda/ht_replies_stub.cpp
@@ -66,7 +69,7 @@ add_library(cudaee_core STATIC ${CUDAEE_SOURCES})
 target_include_directories(cudaee_core PUBLIC include)
 target_compile_features(cudaee_core PUBLIC cxx_std_20)
 target_compile_definitions(cudaee_core PUBLIC CUDAEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-target_link_libraries(cudaee_core PUBLIC ${CMAKE_DL_LIBS})
+target_link_libraries(cudaee_core PUBLIC ${CMAKE_DL_LIBS} PRIVATE Threads::Threads)
 
 if(CUDAEE_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
   target_link_libraries(cudaee_core PRIVATE OpenMP::OpenMP_CXX)

@@ -1,3 +1,4 @@
+#include "cuda_edge_elimination/cuda_device_affinity.hpp"
 #include "cuda_edge_elimination/path_system.hpp"
 
 #include <cuda_runtime.h>
@@ -65,6 +66,25 @@ int SelectDevice(std::string* const reason) {
           count_status == cudaSuccess ? "没有可见 CUDA 设备" : cudaGetErrorString(count_status);
     }
     return -1;
+  }
+
+  const int forced_device = CudaDevicePreferenceForCurrentThread();
+  if (forced_device >= 0) {
+    if (forced_device >= device_count) {
+      if (reason != nullptr) {
+        *reason = "path compatibility 强制 CUDA device ordinal 超出当前可见范围";
+      }
+      return -1;
+    }
+    const cudaError_t select_status = cudaSetDevice(forced_device);
+    if (select_status != cudaSuccess) {
+      if (reason != nullptr) {
+        *reason = std::string("cudaSetDevice(path compatibility forced): ") +
+                  cudaGetErrorString(select_status);
+      }
+      return -1;
+    }
+    return forced_device;
   }
 
   int best_device = -1;

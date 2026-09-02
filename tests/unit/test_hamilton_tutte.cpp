@@ -1,3 +1,4 @@
+#include "cuda_edge_elimination/cuda_device_affinity.hpp"
 #include "cuda_edge_elimination/elimination.hpp"
 #include "cuda_edge_elimination/hamilton_tutte.hpp"
 
@@ -850,6 +851,8 @@ void TestRecursivePointProof() {
             scan.proven_targets == 1U && scan.unresolved_targets == 0U &&
             scan.attempts.front().target_edge == cudaee::NodeEdge{2, 4} &&
             scan.attempts.front().status == cudaee::HtSearchStatus::kProven &&
+            scan.attempts.front().assigned_device == -1 && scan.target_workers == 1U &&
+            !scan.target_parallel && scan.target_execution_ms >= 0.0 &&
             scan.attempts.front().propagation_backend == "cpu" &&
             scan.attempts.front().propagation_cpu_verified &&
             scan.attempts.front().leaf_cpu_verified && scan.states_expanded > 0U &&
@@ -954,12 +957,26 @@ void TestRecursivePointProof() {
   Check(rejected_scan_graph.ContentHash() == graph.ContentHash(),
         "invalid HT scan options leave the graph unchanged");
 
+  cudaee::HtScanOptions duplicate_device_options = scan_options;
+  duplicate_device_options.target_devices = {0, 0};
+  cudaee::GraphSnapshot duplicate_device_graph = graph;
+  CheckThrows(
+      [&] {
+        const auto ignored =
+            cudaee::RunHtScanEpoch(&duplicate_device_graph, duplicate_device_options);
+        static_cast<void>(ignored);
+      },
+      "HT scan rejects duplicate target worker devices");
+  Check(duplicate_device_graph.ContentHash() == graph.ContentHash(),
+        "invalid target worker configuration leaves the graph unchanged");
+
   cudaee::HtScanOptions completed_scan_options = scan_options;
   completed_scan_options.target_offset = weighted_targets.size();
   cudaee::GraphSnapshot completed_scan_graph = graph;
   const cudaee::HtScanResult completed_scan =
       cudaee::RunHtScanEpoch(&completed_scan_graph, completed_scan_options);
   Check(completed_scan.attempts.empty() && completed_scan.proven_targets == 0U &&
+            completed_scan.target_workers == 0U && !completed_scan.target_parallel &&
             completed_scan.elimination.proof.empty() &&
             completed_scan.elimination.final_hash == graph.ContentHash() &&
             completed_scan_graph.ContentHash() == graph.ContentHash(),
@@ -998,6 +1015,8 @@ void TestRecursivePointProof() {
             local.stages[1].kind == cudaee::LocalEliminationStage::kHamiltonTutte &&
             local.stages[1].target_offset == 0U && local.stages[1].attempted_targets == 1U &&
             local.stages[1].proven_targets == 1U && local.stages[1].committed == 1U &&
+            local.stages[1].target_workers == 1U && !local.stages[1].target_parallel &&
+            local.stages[1].target_execution_ms >= 0.0 &&
             local.stages[2].kind == cudaee::LocalEliminationStage::kJv &&
             local.stages[2].committed == 0U && local.elimination.proof.size() == 8U &&
             local.elimination.ht_proofs.size() == 1U && local.elimination.epochs.size() == 2U &&
@@ -1115,6 +1134,19 @@ void TestRecursivePointProof() {
         "fusing leaf complexity buckets preserves proof bytes and complete leaf work");
 
 #ifndef CUDAEE_HAS_CUDA
+  cudaee::HtScanOptions unavailable_worker_options = scan_options;
+  unavailable_worker_options.target_devices = {0};
+  cudaee::GraphSnapshot unavailable_worker_graph = graph;
+  CheckThrows(
+      [&] {
+        const auto ignored =
+            cudaee::RunHtScanEpoch(&unavailable_worker_graph, unavailable_worker_options);
+        static_cast<void>(ignored);
+      },
+      "CPU-only build rejects explicit CUDA target workers");
+  Check(unavailable_worker_graph.ContentHash() == graph.ContentHash(),
+        "unavailable target worker leaves the graph unchanged");
+
   const cudaee::HtWavefrontResult auto_fallback = cudaee::ProveEdgeByWavefrontHt(
       graph, {2, 4},
       {.search_options = options,
@@ -1456,6 +1488,98 @@ void TestRecursivePointProof() {
               cudaee::SerializeHtRecursiveProof(cuda_scan.elimination.ht_proofs.front()) ==
                   cudaee::SerializeHtRecursiveProof(scan.elimination.ht_proofs.front()),
           "CUDA HT scan keeps CPU target order, proof bytes and committed graph");
+
+    std::string device_count_reason;
+    const int visible_devices = cudaee::detail::VisibleCudaDeviceCount(&device_count_reason);
+    Check(visible_devices > 0, device_count_reason);
+    cudaee::HtScanOptions pinned_device_options = cuda_scan_options;
+    pinned_device_options.target_devices = {0};
+    cudaee::GraphSnapshot pinned_device_graph = graph;
+    const cudaee::HtScanResult pinned_device_scan =
+        cudaee::RunHtScanEpoch(&pinned_device_graph, pinned_device_options);
+    Check(pinned_device_scan.target_workers == 1U && !pinned_device_scan.target_parallel &&
+              pinned_device_scan.attempts.front().assigned_device == 0 &&
+              pinned_device_scan.attempts.front().selected_device == 0 &&
+              pinned_device_scan.attempts.front().leaf_cost_selected_device == 0 &&
+              pinned_device_scan.attempts.front().path_append_selected_device == 0 &&
+              pinned_device_scan.attempts.front().hamilton_reply_selected_device == 0 &&
+              pinned_device_scan.attempts.front().end_reply_selected_device == 0 &&
+              pinned_device_graph.ContentHash() == cuda_scanned_graph.ContentHash() &&
+              cudaee::SerializeHtRecursiveProof(pinned_device_scan.elimination.ht_proofs.front()) ==
+                  cudaee::SerializeHtRecursiveProof(cuda_scan.elimination.ht_proofs.front()),
+          "single target worker pins every CUDA scan path without changing proof bytes");
+
+    if (visible_devices >= 2) {
+      cudaee::HtScanOptions sequential_slice_options = cuda_scan_options;
+      // 三个目标覆盖第二轮静态切片，确认 worker 0 可安全复用线程/设备本地缓存。
+      sequential_slice_options.max_targets = 3U;
+      cudaee::GraphSnapshot sequential_slice_graph = graph;
+      const cudaee::HtScanResult sequential_slice_scan =
+          cudaee::RunHtScanEpoch(&sequential_slice_graph, sequential_slice_options);
+
+      cudaee::HtScanOptions parallel_slice_options = sequential_slice_options;
+      parallel_slice_options.target_devices = {0, 1};
+      cudaee::GraphSnapshot parallel_slice_graph = graph;
+      const cudaee::HtScanResult parallel_slice_scan =
+          cudaee::RunHtScanEpoch(&parallel_slice_graph, parallel_slice_options);
+      Check(parallel_slice_scan.target_workers == 2U && parallel_slice_scan.target_parallel &&
+                parallel_slice_scan.attempts.size() == sequential_slice_scan.attempts.size() &&
+                parallel_slice_graph.ContentHash() == sequential_slice_graph.ContentHash() &&
+                parallel_slice_scan.elimination.final_hash ==
+                    sequential_slice_scan.elimination.final_hash &&
+                parallel_slice_scan.elimination.proof.size() ==
+                    sequential_slice_scan.elimination.proof.size() &&
+                parallel_slice_scan.elimination.ht_proofs.size() ==
+                    sequential_slice_scan.elimination.ht_proofs.size(),
+            "two target workers preserve the ordered atomic HT epoch");
+      for (std::size_t index = 0U; index < parallel_slice_scan.attempts.size(); ++index) {
+        const cudaee::HtScanAttempt& parallel_attempt = parallel_slice_scan.attempts[index];
+        const cudaee::HtScanAttempt& sequential_attempt = sequential_slice_scan.attempts[index];
+        Check(
+            parallel_attempt.assigned_device == static_cast<int>(index % 2U) &&
+                (parallel_attempt.selected_device < 0 ||
+                 parallel_attempt.selected_device == parallel_attempt.assigned_device) &&
+                (parallel_attempt.leaf_cost_selected_device < 0 ||
+                 parallel_attempt.leaf_cost_selected_device == parallel_attempt.assigned_device) &&
+                (parallel_attempt.path_append_selected_device < 0 ||
+                 parallel_attempt.path_append_selected_device ==
+                     parallel_attempt.assigned_device) &&
+                (parallel_attempt.hamilton_reply_selected_device < 0 ||
+                 parallel_attempt.hamilton_reply_selected_device ==
+                     parallel_attempt.assigned_device) &&
+                (parallel_attempt.end_reply_selected_device < 0 ||
+                 parallel_attempt.end_reply_selected_device == parallel_attempt.assigned_device) &&
+                parallel_attempt.edge_id == sequential_attempt.edge_id &&
+                parallel_attempt.target_edge == sequential_attempt.target_edge &&
+                parallel_attempt.status == sequential_attempt.status &&
+                parallel_attempt.states_expanded == sequential_attempt.states_expanded &&
+                parallel_attempt.replies_expanded == sequential_attempt.replies_expanded &&
+                parallel_attempt.leaf_calls == sequential_attempt.leaf_calls &&
+                parallel_attempt.moves_generated == sequential_attempt.moves_generated &&
+                parallel_attempt.peak_frontier == sequential_attempt.peak_frontier,
+            "static multi-GPU slice preserves canonical target work");
+      }
+      for (std::size_t index = 0U; index < parallel_slice_scan.elimination.ht_proofs.size();
+           ++index) {
+        Check(cudaee::SerializeHtRecursiveProof(parallel_slice_scan.elimination.ht_proofs[index]) ==
+                  cudaee::SerializeHtRecursiveProof(
+                      sequential_slice_scan.elimination.ht_proofs[index]),
+              "multi-GPU target workers preserve canonical HT proof bytes");
+      }
+    }
+  } else {
+    cudaee::HtScanOptions unavailable_worker_options = scan_options;
+    unavailable_worker_options.target_devices = {0};
+    cudaee::GraphSnapshot unavailable_worker_graph = graph;
+    CheckThrows(
+        [&] {
+          const auto ignored =
+              cudaee::RunHtScanEpoch(&unavailable_worker_graph, unavailable_worker_options);
+          static_cast<void>(ignored);
+        },
+        "CUDA build without a visible device rejects explicit target workers");
+    Check(unavailable_worker_graph.ContentHash() == graph.ContentHash(),
+          "runtime-unavailable target worker leaves the graph unchanged");
   }
 #endif
 }

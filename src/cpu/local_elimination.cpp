@@ -153,6 +153,9 @@ LocalEliminationStageMetrics SummarizeHtStage(const std::uint32_t stage_index,
           .attempted_targets = scan.attempts.size(),
           .proven_targets = scan.proven_targets,
           .unresolved_targets = scan.unresolved_targets,
+          .target_workers = scan.target_workers,
+          .target_parallel = scan.target_parallel,
+          .target_execution_ms = scan.target_execution_ms,
           .elapsed_ms = scan.total_ms};
 }
 

@@ -70,6 +70,8 @@ struct HtScanOptions {
   // 全图搜索必须显式有界；0 非法。
   std::uint64_t max_targets{64U};
   HtTargetOrder target_order{HtTargetOrder::kWeightDescending};
+  // 空列表保持历史顺序执行；非空时每个 ordinal 对应一个固定 target worker。
+  std::vector<int> target_devices;
 };
 
 struct HtScanAttempt {
@@ -81,6 +83,8 @@ struct HtScanAttempt {
   std::uint64_t leaf_calls{};
   std::uint64_t moves_generated{};
   std::uint64_t peak_frontier{};
+  // -1 表示顺序执行并由各 CUDA 后端自动选卡。
+  int assigned_device{-1};
   std::string propagation_backend{"none"};
   int selected_device{-1};
   std::uint32_t propagation_blocks{};
@@ -110,12 +114,14 @@ struct HtScanAttempt {
   std::uint64_t leaf_cpu_parallel_cost_cells{};
   std::uint32_t peak_leaf_cpu_cost_threads{1U};
   std::uint64_t peak_leaf_device_cache_bytes{};
+  int path_append_selected_device{-1};
   std::uint64_t path_append_tasks{};
   std::uint64_t root_child_normalizations{};
   std::uint64_t point_candidate_scans{};
   std::uint64_t point_candidate_nodes_checked{};
   std::uint64_t point_candidate_nodes_ranked{};
   std::uint64_t point_candidate_nodes_selected{};
+  int hamilton_reply_selected_device{-1};
   std::uint64_t hamilton_reply_batches{};
   std::uint64_t hamilton_reply_centers{};
   std::uint64_t hamilton_reply_unique_centers{};
@@ -126,6 +132,7 @@ struct HtScanAttempt {
   std::uint64_t reply_cuda_graph_cache_hits{};
   std::uint64_t reply_cuda_workspace_cache_hits{};
   std::uint64_t peak_reply_device_cache_bytes{};
+  int end_reply_selected_device{-1};
   std::uint64_t end_reply_batches{};
   std::uint64_t end_reply_tasks{};
   std::uint64_t end_reply_unique_tasks{};
@@ -221,7 +228,11 @@ struct HtScanResult {
   std::uint64_t end_reply_tasks{};
   std::uint64_t end_reply_unique_tasks{};
   std::uint64_t end_replies_generated{};
+  std::uint32_t target_workers{};
+  bool target_parallel{false};
   double target_selection_ms{};
+  // target 搜索与即时 CPU proof 复核的 wall time；并行时不同于 search_ms 求和。
+  double target_execution_ms{};
   double candidate_ms{};
   double work_graph_ms{};
   double root_child_normalize_ms{};
@@ -303,6 +314,9 @@ struct LocalEliminationStageMetrics {
   std::uint64_t attempted_targets{};
   std::uint64_t proven_targets{};
   std::uint64_t unresolved_targets{};
+  std::uint32_t target_workers{};
+  bool target_parallel{false};
+  double target_execution_ms{};
   double elapsed_ms{};
 };
 
@@ -329,7 +343,7 @@ EliminationResult RunJvElimination(GraphSnapshot* graph, Backend backend, std::u
 [[nodiscard]] std::vector<std::int32_t> SelectHtTargetEdgeIds(const GraphSnapshot& graph,
                                                               HtTargetOrder order);
 
-// 在一个不可变快照上顺序搜索有界目标，最后通过 CommitHtProofEpoch 原子发布一次。
+// 在一个不可变快照上搜索有界目标；可按固定 GPU 静态切片，仍按目标规范序原子提交。
 [[nodiscard]] HtScanResult RunHtScanEpoch(GraphSnapshot* graph, const HtScanOptions& options);
 
 // 先把 JV 跑到固定点，再按稳定切片扫描 HT；任一 HT 提交后从新快照重跑 JV 并重排目标。
