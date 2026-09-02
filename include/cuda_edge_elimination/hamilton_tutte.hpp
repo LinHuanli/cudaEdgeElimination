@@ -342,7 +342,7 @@ struct HtPathAppendTask {
 
 struct HtPathAppendBatchResult {
   std::vector<std::uint8_t> feasible;
-  // 与 task 一一对应；不可行项保留 NormalizePathSystem 给出的失败原因。
+  // 与 task 一一对应；不可行项保留与 NormalizePathSystem 一致的失败原因。
   std::vector<NormalizedPathSystem> children;
   // 第 i 个 task 的规范 child 边集为 [offsets[i], offsets[i+1])；不可行项为空。
   std::vector<std::uint64_t> child_edge_offsets;

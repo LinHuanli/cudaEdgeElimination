@@ -32,6 +32,25 @@ NormalizedPathSystem InvalidPathSystem(std::string reason) {
   return result;
 }
 
+struct ParentNodeLocation {
+  std::int32_t node{-1};
+  std::size_t component{};
+  std::size_t offset{};
+  bool endpoint{false};
+};
+
+using ParentNodeIndex = std::vector<ParentNodeLocation>;
+
+const ParentNodeLocation* FindParentNode(const ParentNodeIndex& index,
+                                         const std::int32_t node) {
+  const auto found = std::lower_bound(
+      index.begin(), index.end(), node,
+      [](const ParentNodeLocation& location, const std::int32_t value) {
+        return location.node < value;
+      });
+  return found != index.end() && found->node == node ? &*found : nullptr;
+}
+
 // HT 每个 child 只含少量实际节点。这里保持 dense 规范化器的全部规则和确定顺序，
 // 但不再按完整 TSP 维度分配邻接表；最终 proof 仍由 dense 实现独立重放。
 NormalizedPathSystem NormalizeSparsePathSystem(const std::vector<Path>& paths,
@@ -136,27 +155,6 @@ NormalizedPathSystem NormalizeSparsePathSystem(const std::vector<Path>& paths,
   return result;
 }
 
-bool ContainsNode(const NormalizedPathSystem& paths, const std::int32_t node) {
-  return std::any_of(paths.paths.begin(), paths.paths.end(), [&](const Path& path) {
-    return std::find(path.begin(), path.end(), node) != path.end();
-  });
-}
-
-bool IsEndpoint(const NormalizedPathSystem& paths, const std::int32_t node) {
-  return std::any_of(paths.paths.begin(), paths.paths.end(),
-                     [&](const Path& path) { return path.front() == node || path.back() == node; });
-}
-
-std::vector<Path> BuildRawChild(const NormalizedPathSystem& parent, const HtPathAppendTask& task) {
-  std::vector<Path> raw = parent.paths;
-  if (task.kind == HtPathAppendKind::kPoint) {
-    raw.push_back({task.first, task.center, task.second});
-  } else {
-    raw.push_back({task.first, task.second});
-  }
-  return raw;
-}
-
 std::vector<NodeEdge> BuildCanonicalEdges(const NormalizedPathSystem& paths) {
   std::vector<NodeEdge> edges;
   edges.reserve(paths.edge_count);
@@ -175,23 +173,126 @@ std::vector<NodeEdge> BuildCanonicalEdges(const NormalizedPathSystem& paths) {
   return edges;
 }
 
-void ValidateTask(const std::int32_t dimension, const std::vector<NormalizedPathSystem>& parents,
-                  const HtPathAppendTask& task) {
+struct ResolvedAppendTask {
+  const ParentNodeLocation* first{};
+  const ParentNodeLocation* second{};
+};
+
+ResolvedAppendTask ValidateTask(const std::int32_t dimension,
+                                const std::vector<NormalizedPathSystem>& parents,
+                                const std::vector<ParentNodeIndex>& parent_indices,
+                                const HtPathAppendTask& task) {
   if (task.parent_index >= parents.size() || task.first < 0 || task.first >= dimension ||
       task.second < 0 || task.second >= dimension || task.first == task.second) {
     throw std::invalid_argument("HT path-append task 的父状态或端点非法");
   }
-  const NormalizedPathSystem& parent = parents[task.parent_index];
+  const ParentNodeIndex& index = parent_indices.at(task.parent_index);
+  const ParentNodeLocation* const first = FindParentNode(index, task.first);
+  const ParentNodeLocation* const second = FindParentNode(index, task.second);
   if (task.kind == HtPathAppendKind::kPoint) {
     if (task.center < 0 || task.center >= dimension || task.center == task.first ||
-        task.center == task.second || ContainsNode(parent, task.center)) {
+        task.center == task.second || FindParentNode(index, task.center) != nullptr) {
       throw std::invalid_argument("HT point append 的中心点必须合法且尚未出现在父状态中");
     }
-    return;
+    return {first, second};
   }
-  if (task.kind != HtPathAppendKind::kEnd || task.center != -1 || !IsEndpoint(parent, task.first)) {
+  if (task.kind != HtPathAppendKind::kEnd || task.center != -1 || first == nullptr ||
+      !first->endpoint) {
     throw std::invalid_argument("HT end append 必须从父状态的路径端点出发");
   }
+  return {first, second};
+}
+
+bool LocationsShareEdge(const ParentNodeLocation& first, const ParentNodeLocation& second) {
+  return first.component == second.component &&
+         (first.offset + 1U == second.offset || second.offset + 1U == first.offset);
+}
+
+void AppendOrientedComponent(Path* const merged, const NormalizedPathSystem& parent,
+                             const ParentNodeLocation* const location,
+                             const std::int32_t absent_node, const bool node_at_back) {
+  if (location == nullptr) {
+    merged->push_back(absent_node);
+    return;
+  }
+  const Path& component = parent.paths.at(location->component);
+  if (!location->endpoint) {
+    throw std::logic_error("HT path-append 尝试连接父路径内部节点");
+  }
+  const bool forward = node_at_back ? location->offset + 1U == component.size()
+                                    : location->offset == 0U;
+  if (forward) {
+    merged->insert(merged->end(), component.begin(), component.end());
+  } else {
+    merged->insert(merged->end(), component.rbegin(), component.rend());
+  }
+}
+
+// parent 已在 batch 入口通过通用 sparse 规范器认证。每个 task 只增加一条或两条边，
+// 因此直接合并至多两个规范链，避免为每个 child 重建 map/set 邻接；失败原因顺序
+// 仍与 NormalizePathSystem 完全一致，并由单元测试中的独立 dense 规范器逐项差分。
+NormalizedPathSystem AppendToNormalizedPathSystem(const NormalizedPathSystem& parent,
+                                                  const HtPathAppendTask& task,
+                                                  const ResolvedAppendTask& resolved) {
+  if (task.kind == HtPathAppendKind::kPoint) {
+    if ((resolved.first != nullptr && !resolved.first->endpoint) ||
+        (resolved.second != nullptr && !resolved.second->endpoint)) {
+      return InvalidPathSystem("路径并集存在度数大于 2 的节点");
+    }
+  } else {
+    if (resolved.second != nullptr &&
+        LocationsShareEdge(*resolved.first, *resolved.second)) {
+      return InvalidPathSystem("路径系统包含重复边");
+    }
+    if (resolved.second != nullptr && !resolved.second->endpoint) {
+      return InvalidPathSystem("路径并集存在度数大于 2 的节点");
+    }
+  }
+
+  if (resolved.first != nullptr && resolved.second != nullptr &&
+      resolved.first->component == resolved.second->component) {
+    return InvalidPathSystem("路径并集包含回路");
+  }
+
+  const std::size_t first_size =
+      resolved.first == nullptr ? 1U : parent.paths.at(resolved.first->component).size();
+  const std::size_t second_size =
+      resolved.second == nullptr ? 1U : parent.paths.at(resolved.second->component).size();
+  const std::size_t center_size = task.kind == HtPathAppendKind::kPoint ? 1U : 0U;
+  if (first_size > std::numeric_limits<std::size_t>::max() - second_size ||
+      first_size + second_size > std::numeric_limits<std::size_t>::max() - center_size) {
+    throw std::overflow_error("HT path-append 合并路径长度溢出");
+  }
+
+  Path merged;
+  merged.reserve(first_size + second_size + center_size);
+  AppendOrientedComponent(&merged, parent, resolved.first, task.first, true);
+  if (task.kind == HtPathAppendKind::kPoint) {
+    merged.push_back(task.center);
+  }
+  AppendOrientedComponent(&merged, parent, resolved.second, task.second, false);
+  if (merged.front() > merged.back()) {
+    std::reverse(merged.begin(), merged.end());
+  }
+
+  const std::size_t added_edges = task.kind == HtPathAppendKind::kPoint ? 2U : 1U;
+  if (parent.edge_count > std::numeric_limits<std::size_t>::max() - added_edges) {
+    throw std::overflow_error("HT path-append child 边数溢出");
+  }
+  NormalizedPathSystem child;
+  child.valid = true;
+  child.edge_count = parent.edge_count + added_edges;
+  child.paths.reserve(parent.paths.size() + 1U);
+  for (std::size_t component = 0U; component < parent.paths.size(); ++component) {
+    if ((resolved.first != nullptr && component == resolved.first->component) ||
+        (resolved.second != nullptr && component == resolved.second->component)) {
+      continue;
+    }
+    child.paths.push_back(parent.paths[component]);
+  }
+  child.paths.push_back(std::move(merged));
+  std::sort(child.paths.begin(), child.paths.end());
+  return child;
 }
 
 } // namespace
@@ -211,7 +312,9 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
   std::vector<detail::HtPathStateSpan> state_spans;
   std::vector<detail::HtPathNodeRecord> node_records;
   std::vector<NodeEdge> parent_edges;
+  std::vector<ParentNodeIndex> parent_indices;
   state_spans.reserve(parents.size());
+  parent_indices.reserve(parents.size());
   const auto parent_prepare_begin = std::chrono::steady_clock::now();
   for (const NormalizedPathSystem& parent : parents) {
     const NormalizedPathSystem canonical = NormalizeSparsePathSystem(parent.paths, dimension);
@@ -237,6 +340,8 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
     detail::HtPathStateSpan span;
     span.node_begin = static_cast<std::uint32_t>(node_records.size());
     span.edge_begin = static_cast<std::uint32_t>(parent_edges.size());
+    ParentNodeIndex parent_index;
+    parent_index.reserve(parent_node_count);
     for (std::size_t component = 0; component < parent.paths.size(); ++component) {
       const Path& path = parent.paths[component];
       if (component > std::numeric_limits<std::uint32_t>::max()) {
@@ -246,12 +351,25 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
         const bool endpoint = offset == 0U || offset + 1U == path.size();
         node_records.push_back({path[offset], static_cast<std::uint32_t>(component),
                                 static_cast<std::uint8_t>(endpoint ? 1U : 2U)});
+        parent_index.push_back({path[offset], component, offset, endpoint});
       }
+    }
+    std::sort(parent_index.begin(), parent_index.end(),
+              [](const ParentNodeLocation& first, const ParentNodeLocation& second) {
+                return first.node < second.node;
+              });
+    if (std::adjacent_find(parent_index.begin(), parent_index.end(),
+                           [](const ParentNodeLocation& first,
+                              const ParentNodeLocation& second) {
+                             return first.node == second.node;
+                           }) != parent_index.end()) {
+      throw std::logic_error("HT path-append 规范父状态含重复节点");
     }
     span.node_count = static_cast<std::uint32_t>(parent_node_count);
     span.edge_count = static_cast<std::uint32_t>(canonical_edges.size());
     parent_edges.insert(parent_edges.end(), canonical_edges.begin(), canonical_edges.end());
     state_spans.push_back(span);
+    parent_indices.push_back(std::move(parent_index));
   }
 
   HtPathAppendBatchResult result;
@@ -262,9 +380,9 @@ HtPathAppendBatchResult EvaluateHtPathAppends(const std::int32_t dimension,
   result.child_edge_offsets.push_back(0U);
   for (const HtPathAppendTask& task : tasks) {
     const auto child_normalize_begin = std::chrono::steady_clock::now();
-    ValidateTask(dimension, parents, task);
+    const ResolvedAppendTask resolved = ValidateTask(dimension, parents, parent_indices, task);
     result.children.push_back(
-        NormalizeSparsePathSystem(BuildRawChild(parents[task.parent_index], task), dimension));
+        AppendToNormalizedPathSystem(parents[task.parent_index], task, resolved));
     result.child_normalize_ms += ElapsedMilliseconds(child_normalize_begin);
 
     const auto child_edges_begin = std::chrono::steady_clock::now();

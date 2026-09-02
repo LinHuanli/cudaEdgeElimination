@@ -1344,58 +1344,85 @@ void TestPathAppendBatch() {
             cpu.cuda_evaluate_ms == 0.0 && cpu.cuda_compare_ms == 0.0,
         "CPU path-append exposes aligned canonical child edge SoA");
 
-  std::vector<cudaee::HtPathAppendTask> differential_tasks;
-  for (std::size_t parent_index = 0U; parent_index < parents.size(); ++parent_index) {
-    const auto contains = [&](const std::int32_t needle) {
-      return std::any_of(parents[parent_index].paths.begin(), parents[parent_index].paths.end(),
-                         [&](const cudaee::Path& path) {
-                           return std::find(path.begin(), path.end(), needle) != path.end();
-                         });
-    };
-    const auto endpoint = [&](const std::int32_t needle) {
-      return std::any_of(parents[parent_index].paths.begin(), parents[parent_index].paths.end(),
-                         [&](const cudaee::Path& path) {
-                           return path.front() == needle || path.back() == needle;
-                         });
-    };
-    for (std::int32_t first = 0; first < 8; ++first) {
-      for (std::int32_t center = 0; center < 8; ++center) {
-        for (std::int32_t second = 0; second < 8; ++second) {
-          if (first != second && center != first && center != second && !contains(center)) {
-            differential_tasks.push_back({static_cast<std::uint32_t>(parent_index),
-                                          cudaee::HtPathAppendKind::kPoint, first, center, second});
+  const auto check_dense_differential =
+      [](const std::vector<cudaee::NormalizedPathSystem>& differential_parents,
+         const std::int32_t dimension) {
+        std::vector<cudaee::HtPathAppendTask> differential_tasks;
+        for (std::size_t parent_index = 0U; parent_index < differential_parents.size();
+             ++parent_index) {
+          const auto contains = [&](const std::int32_t needle) {
+            return std::any_of(
+                differential_parents[parent_index].paths.begin(),
+                differential_parents[parent_index].paths.end(), [&](const cudaee::Path& path) {
+                  return std::find(path.begin(), path.end(), needle) != path.end();
+                });
+          };
+          const auto endpoint = [&](const std::int32_t needle) {
+            return std::any_of(
+                differential_parents[parent_index].paths.begin(),
+                differential_parents[parent_index].paths.end(), [&](const cudaee::Path& path) {
+                  return path.front() == needle || path.back() == needle;
+                });
+          };
+          for (std::int32_t first = 0; first < dimension; ++first) {
+            for (std::int32_t center = 0; center < dimension; ++center) {
+              for (std::int32_t second = 0; second < dimension; ++second) {
+                if (first != second && center != first && center != second && !contains(center)) {
+                  differential_tasks.push_back(
+                      {static_cast<std::uint32_t>(parent_index),
+                       cudaee::HtPathAppendKind::kPoint, first, center, second});
+                }
+              }
+            }
+            if (!endpoint(first)) {
+              continue;
+            }
+            for (std::int32_t second = 0; second < dimension; ++second) {
+              if (first != second) {
+                differential_tasks.push_back(
+                    {static_cast<std::uint32_t>(parent_index), cudaee::HtPathAppendKind::kEnd,
+                     first, -1, second});
+              }
+            }
           }
         }
-      }
-      if (!endpoint(first)) {
-        continue;
-      }
-      for (std::int32_t second = 0; second < 8; ++second) {
-        if (first != second) {
-          differential_tasks.push_back({static_cast<std::uint32_t>(parent_index),
-                                        cudaee::HtPathAppendKind::kEnd, first, -1, second});
+        const cudaee::HtPathAppendBatchResult differential = cudaee::EvaluateHtPathAppends(
+            dimension, differential_parents, differential_tasks,
+            cudaee::PathCompatibilityBackend::kCpu);
+        Check(differential.children.size() == differential_tasks.size(),
+              "incremental path-append keeps every differential task aligned");
+        for (std::size_t index = 0U; index < differential_tasks.size(); ++index) {
+          const cudaee::HtPathAppendTask& task = differential_tasks[index];
+          std::vector<cudaee::Path> dense_input =
+              differential_parents[task.parent_index].paths;
+          if (task.kind == cudaee::HtPathAppendKind::kPoint) {
+            dense_input.push_back({task.first, task.center, task.second});
+          } else {
+            dense_input.push_back({task.first, task.second});
+          }
+          const cudaee::NormalizedPathSystem dense =
+              cudaee::NormalizePathSystem(dense_input, dimension);
+          const cudaee::NormalizedPathSystem& incremental = differential.children[index];
+          Check(incremental.valid == dense.valid && incremental.reason == dense.reason &&
+                    incremental.edge_count == dense.edge_count && incremental.paths == dense.paths,
+                "incremental path-append exactly matches the independent dense normalizer");
         }
-      }
-    }
-  }
-  const cudaee::HtPathAppendBatchResult differential = cudaee::EvaluateHtPathAppends(
-      8, parents, differential_tasks, cudaee::PathCompatibilityBackend::kCpu);
-  Check(differential.children.size() == differential_tasks.size(),
-        "sparse path-append keeps every differential task aligned");
-  for (std::size_t index = 0U; index < differential_tasks.size(); ++index) {
-    const cudaee::HtPathAppendTask& task = differential_tasks[index];
-    std::vector<cudaee::Path> dense_input = parents[task.parent_index].paths;
-    if (task.kind == cudaee::HtPathAppendKind::kPoint) {
-      dense_input.push_back({task.first, task.center, task.second});
-    } else {
-      dense_input.push_back({task.first, task.second});
-    }
-    const cudaee::NormalizedPathSystem dense = cudaee::NormalizePathSystem(dense_input, 8);
-    const cudaee::NormalizedPathSystem& sparse = differential.children[index];
-    Check(sparse.valid == dense.valid && sparse.reason == dense.reason &&
-              sparse.edge_count == dense.edge_count && sparse.paths == dense.paths,
-          "sparse path-append exactly matches the independent dense normalizer");
-  }
+        return differential_tasks.size();
+      };
+  Check(check_dense_differential(parents, 8) == 308U,
+        "pinned path-append differential task count stays stable");
+
+  // 长链、多分量、空闲节点和全覆盖父状态共同覆盖方向翻转、字典序插入及全部冲突类型。
+  const std::vector<cudaee::NormalizedPathSystem> stress_parents = {
+      cudaee::NormalizePathSystem({{9, 8, 7, 6, 5, 4, 3, 2}}, 10),
+      cudaee::NormalizePathSystem({{0, 9}, {1, 8, 2}, {3, 7, 4}}, 10),
+      cudaee::NormalizePathSystem({{0, 4, 8}, {2, 6}, {1, 9, 5, 3, 7}}, 10),
+      cudaee::NormalizePathSystem({{5, 2}, {7, 4, 1}, {8, 3}}, 10)};
+  Check(std::all_of(stress_parents.begin(), stress_parents.end(),
+                    [](const cudaee::NormalizedPathSystem& paths) { return paths.valid; }),
+        "path-append stress parents are canonical");
+  Check(check_dense_differential(stress_parents, 10) == 684U,
+        "path-append stress differential task count stays stable");
 
   std::vector<cudaee::HtPathAppendTask> bad_point = tasks;
   bad_point.front().center = 1;
