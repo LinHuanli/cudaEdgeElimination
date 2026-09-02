@@ -107,6 +107,8 @@ wavefront 图验证绑定复用已完成：强类型 binding 构造时完整验�
 
 scan 跨目标快照绑定复用已完成：`RunHtScanEpoch` 在只读 target 切片入口完整构造一次 graph/hash bindings，内部 wavefront 检查对象身份后复用；每个 target 后的独立 `ContentHash()` 变更守卫、即时 proof 重放和最终 V2 原子提交均保留。三实例 CPU-fused candidate 加速 `1.674×/3.162×/7.355×`，search 加速 `1.007×/1.135×/1.246×`，d15112 wall 加速 `1.123×`；54 项跨提交精确比较全部通过。下一切片审计 d15112 leaf cursor construct 的 `69.004 ms`。
 
+leaf path 稀疏验证绑定复用已完成：batch 内每个 path 对象只执行一次实际节点规模的规范认证，多个 outside cursor 复用强类型 binding；公开 scalar/dense verifier、成功 proof 重放和所有 HT/V2 授权边界不变。三实例 leaf setup 加速 `2.487×/4.641×/6.814×`，CPU-fused search 加速 `1.051×/1.105×/1.196×`；2,000 组 sparse/dense 差分及 54 项正式跨提交比较全部通过。下一切片审计 CPU exact cost matrix 的数据布局和重复距离读取。
+
 M5 仍未完成：跨目标 HT 融合与多 epoch 重新排序、活动 edge-id 紧凑 launch、多 GPU，以及 M3.1 完成后的 LP—组合消元固定点评测仍为 pending。
 
 ## 当前完成定义

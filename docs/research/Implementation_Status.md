@@ -28,7 +28,7 @@
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
 | M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
-| M5 中大型调优 | 进行中（JV 三轮 + HT host fast paths） | point/path/reply/leaf/scan-binding fast paths；d15112 CPU-fused search `0.374 s` |
+| M5 中大型调优 | 进行中（JV 三轮 + HT host fast paths） | point/path/reply/leaf/scan-binding fast paths；d15112 CPU-fused search `0.312 s` |
 
 ## 当前基准结果
 
@@ -79,6 +79,8 @@ M5 HT path-append child 增量规范化绑定 `236022c`：已认证 parent 建�
 M5 HT wavefront 图验证绑定复用绑定 `fb772f8`：binding 构造时完整验证一次 CSR，c,d/Hamilton/end 内部 APIs 检查同一 graph 对象后复用；公开 APIs 和所有独立 verifier 仍完整验证。三实例 Hamilton validation 加速 `305.600×/583.206×/3388.723×`，CPU-fused search 加速 `1.017×/1.146×/1.411×`。三实例五路规范工作、边、proof 和 tour 全部不变；下一步在同一不可变 scan 的 targets 间复用 graph/hash bindings。
 
 M5 HT scan 跨目标快照绑定复用绑定 `649f3f4`：同一只读 scan 只完整构造一次 graph/hash bindings，内部 wavefront 逐次检查对象身份；每 target 的内容哈希变更守卫、即时公开 verifier 和最终 V2 重放均保留。三实例 CPU-fused candidate 加速 `1.674×/3.162×/7.355×`，search 加速 `1.007×/1.135×/1.246×`，d15112 total/wall 加速 `1.154×/1.123×`。三实例五路规范工作、边、proof、JV 固定点和 tour 均经 54 项跨提交精确比较确认不变；下一热点是 d15112 leaf cursor construct 的 `69.004 ms`。
+
+M5 HT leaf path 稀疏验证绑定复用绑定 `8c19740`：batch 内每个 path 以实际节点规模认证一次，后续 outside cursors 只检查 graph/path 对象身份；公开 scalar 与成功 proof 的 dense verifier 完全不变。2,000 组随机 sparse/dense 规范结果和失败原因一致，篡改 path 的 batch/scalar proof 字节一致。三实例 leaf setup 加速 `2.487×/4.641×/6.814×`，CPU-fused search 加速 `1.051×/1.105×/1.196×`；d15112 search/total/wall 降至 `312.481/478.235/627.747 ms`。三实例五路规范工作、边、proof、JV 固定点和 tour 均经 54 项跨提交精确比较确认不变。
 
 cuOpt 手算 LP：状态 `OPTIMAL`，objective/dual objective 均为 `1`，primal violation 与 reduced-cost residual 均为 `0`，定点模型下界为 `16777216/16777216`。
 
