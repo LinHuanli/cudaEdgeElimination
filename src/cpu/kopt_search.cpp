@@ -128,6 +128,8 @@ struct TourContext {
   EdgeSet outside_edges;
   EdgeSet all_edges;
   std::vector<std::size_t> selectable_positions;
+  // 非路径边保持 -1；cost task 只读取 selectable positions 对应的精确整数成本。
+  std::vector<std::int64_t> path_edge_costs_by_tour_position;
 };
 
 // batch 生成器只需为同一个 path 对象认证一次；公开 verifier 仍独立走 dense 规范化。
@@ -278,6 +280,7 @@ bool BuildTourContext(const GraphSnapshot& graph, const NormalizedPathSystem& pa
   context->outside_edges.clear();
   context->all_edges.clear();
   context->selectable_positions.clear();
+  context->path_edge_costs_by_tour_position.clear();
   for (std::uint32_t path_index = 0; path_index < path_count; ++path_index) {
     const Path& path = paths.paths[path_index];
     const std::size_t first_endpoint = std::size_t{2} * path_index;
@@ -308,10 +311,17 @@ bool BuildTourContext(const GraphSnapshot& graph, const NormalizedPathSystem& pa
     return false;
   }
 
+  context->path_edge_costs_by_tour_position.assign(context->tour.size(), -1);
   for (std::size_t position = 0; position < context->tour.size(); ++position) {
     const NodeEdge edge = CanonicalEdge(context->tour[position],
                                         context->tour[(position + 1) % context->tour.size()]);
     if (context->path_edges.contains(edge)) {
+      const std::int64_t distance = graph.Distance(edge.u, edge.v);
+      if (distance < 0) {
+        SetReason(reason, "路径边距离出现负值");
+        return false;
+      }
+      context->path_edge_costs_by_tour_position[position] = distance;
       context->selectable_positions.push_back(position);
     }
   }
@@ -357,7 +367,7 @@ bool PairEndpoints(EndpointMatching* const matching, const std::uint32_t first,
 }
 
 bool BuildComponentMatching(const TourContext& context,
-                            const std::vector<std::size_t>& deleted_positions,
+                            const std::span<const std::size_t> deleted_positions,
                             std::vector<std::int32_t>* const port_nodes,
                             EndpointMatching* const components, EdgeSet* const remaining_edges,
                             std::string* const reason) {
@@ -546,28 +556,35 @@ std::vector<ExactTourBlock> BuildExactTourBlocks(const TourContext& context,
   return blocks;
 }
 
-KOptCostTask BuildKOptCostTask(const GraphSnapshot& graph, const TourContext& context,
-                               const std::vector<std::size_t>& deleted_positions) {
+KOptCostTask BuildKOptCostTask(const TourContext& context,
+                               const std::span<const std::size_t> deleted_positions) {
   KOptCostTask task;
-  std::vector<NodeEdge> deleted_edges;
-  deleted_edges.reserve(deleted_positions.size());
+  if (deleted_positions.size() < 3U ||
+      deleted_positions.size() > task.port_nodes.size() / 2U) {
+    throw std::runtime_error("无法构造 k-opt cost task: 删除位置数量非法");
+  }
+  __int128 deleted_cost = 0;
   for (std::size_t edge = 0; edge < deleted_positions.size(); ++edge) {
     const std::size_t position = deleted_positions[edge];
+    if (position >= context.tour.size() ||
+        position >= context.path_edge_costs_by_tour_position.size() ||
+        context.path_edge_costs_by_tour_position[position] < 0) {
+      throw std::runtime_error("无法构造 k-opt cost task: 删除位置或缓存成本非法");
+    }
     task.port_nodes[2U * edge] = context.tour[position];
     task.port_nodes[2U * edge + 1U] = context.tour[(position + 1) % context.tour.size()];
-    deleted_edges.push_back(
-        CanonicalEdge(task.port_nodes[2U * edge], task.port_nodes[2U * edge + 1U]));
+    deleted_cost += context.path_edge_costs_by_tour_position[position];
   }
-  std::string reason;
-  if (!SumEdgeCosts(graph, deleted_edges, &task.deleted_cost, &reason)) {
-    throw std::runtime_error("无法构造 k-opt cost task: " + reason);
+  if (deleted_cost > std::numeric_limits<std::int64_t>::max()) {
+    throw std::runtime_error("无法构造 k-opt cost task: k-opt 成本求和溢出 int64_t");
   }
+  task.deleted_cost = static_cast<std::int64_t>(deleted_cost);
   return task;
 }
 
 ReconnectAttempt TryReconnect(const GraphSnapshot& graph, const TourContext& context,
                               const EndpointMatching& outside,
-                              const std::vector<std::size_t>& deleted_positions,
+                              const std::span<const std::size_t> deleted_positions,
                               const std::vector<EndpointMatching>& reconnect_matchings) {
   ReconnectAttempt attempt;
   std::vector<std::int32_t> port_nodes;
@@ -658,7 +675,7 @@ ReconnectAttempt TryReconnect(const GraphSnapshot& graph, const TourContext& con
 
 ReconnectAttempt TryReconnectFromCostRow(const GraphSnapshot& graph, const TourContext& context,
                                          const EndpointMatching& outside,
-                                         const std::vector<std::size_t>& deleted_positions,
+                                         const std::span<const std::size_t> deleted_positions,
                                          const KOptCostTask& task,
                                          const std::vector<EndpointMatching>& reconnect_templates,
                                          const std::span<const std::int64_t> added_costs,
@@ -1425,7 +1442,7 @@ KOptSearchResult FindKOptWitnessImpl(const GraphSnapshot& graph, const Normalize
           work.deleted_positions.push_back(context.selectable_positions[selected]);
         }
         std::sort(work.deleted_positions.begin(), work.deleted_positions.end());
-        work.task = BuildKOptCostTask(graph, context, work.deleted_positions);
+        work.task = BuildKOptCostTask(context, work.deleted_positions);
         works.push_back(std::move(work));
         has_combination = AdvanceCombination(&combination, selectable_count);
       }
@@ -1884,7 +1901,7 @@ PathSystemKOptProof ProvePathSystemByKOpt(const GraphSnapshot& graph,
 namespace {
 
 struct KOptCursorWork {
-  std::vector<std::size_t> deleted_positions;
+  std::array<std::size_t, 5U> deleted_positions{};
   KOptCostTask task;
 };
 
@@ -1963,12 +1980,12 @@ public:
           break;
         }
         KOptCursorWork work;
-        work.deleted_positions.reserve(current_k_);
-        for (const std::size_t selected : combination_) {
-          work.deleted_positions.push_back(context_.selectable_positions[selected]);
+        for (std::size_t index = 0U; index < combination_.size(); ++index) {
+          work.deleted_positions[index] = context_.selectable_positions[combination_[index]];
         }
-        std::sort(work.deleted_positions.begin(), work.deleted_positions.end());
-        work.task = BuildKOptCostTask(*graph_, context_, work.deleted_positions);
+        const std::span<std::size_t> deleted_positions(work.deleted_positions.data(), current_k_);
+        std::sort(deleted_positions.begin(), deleted_positions.end());
+        work.task = BuildKOptCostTask(context_, deleted_positions);
         block.works.push_back(std::move(work));
         has_combination_ = AdvanceCombination(&combination_, context_.selectable_positions.size());
       }
@@ -2014,10 +2031,11 @@ public:
       const std::size_t row_offset = work_index * reconnect_table.templates.size();
       const std::span<const std::int64_t> row =
           costs.added_costs.subspan(row_offset, reconnect_table.templates.size());
+      const std::span<const std::size_t> deleted_positions(
+          block.works[work_index].deleted_positions.data(), block.k);
       ReconnectAttempt attempt = TryReconnectFromCostRow(
-          *graph_, context_, outside_, block.works[work_index].deleted_positions,
-          block.works[work_index].task, reconnect_table.templates, row, costs.backend,
-          costs.cpu_verified);
+          *graph_, context_, outside_, deleted_positions, block.works[work_index].task,
+          reconnect_table.templates, row, costs.backend, costs.cpu_verified);
       stats.candidate_templates_rechecked += attempt.candidate_templates_rechecked;
       stats.candidate_recheck_ms += attempt.candidate_recheck_ms;
       stats.completeness_fallback_ms += attempt.completeness_fallback_ms;
