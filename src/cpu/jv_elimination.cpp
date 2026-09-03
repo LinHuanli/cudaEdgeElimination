@@ -35,13 +35,15 @@ namespace cudaee {
 namespace {
 
 constexpr std::size_t kMaxCandidateNodes = 10;
-constexpr std::uintmax_t kMaxEliminationProofBytes = 512U * 1024U * 1024U;
+constexpr std::uintmax_t kMaxEliminationProofBytes =
+    std::uintmax_t{1024} * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtProofBytes = 256U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtAggregateBytes = 256U * 1024U * 1024U;
-// pcb442 的完整深扫已实测超过 2 GiB 原文；V5 逐份流式压缩/解压，
-// 因此提高累计原文预算而不放宽单份、压缩 payload 或文件上限。
+// pcb442 的完整深扫已实测超过 2 GiB 原文；从完全图开始的单份
+// one-shot 证书又实测超过 384 MiB 压缩 payload。V5 仍对原文、
+// 压缩数据、单份 sidecar 和最终文件分别设置硬上限，不接受无界输入。
 constexpr std::size_t kMaxEmbeddedHtRawAggregateBytes = std::size_t{8} * 1024U * 1024U * 1024U;
-constexpr std::size_t kMaxEmbeddedHtCompressedAggregateBytes = 384U * 1024U * 1024U;
+constexpr std::size_t kMaxEmbeddedHtCompressedAggregateBytes = 768U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtProofs = 1000000U;
 constexpr std::size_t kMaxEmbeddedLpProofs = 1000000U;
 constexpr std::size_t kMaxEliminationRecords = 1000000U;
@@ -136,9 +138,15 @@ std::vector<EncodedHtProof> PrepareHtProofs(const std::vector<HtRecursiveProof>&
     }
     const std::size_t payload_limit =
         compressed ? kMaxEmbeddedHtCompressedAggregateBytes : kMaxEmbeddedHtAggregateBytes;
-    if (encoded.payload.empty() || encoded.payload.size() > kMaxEmbeddedHtProofBytes ||
-        total_payload > payload_limit - encoded.payload.size()) {
-      throw std::runtime_error("消元证明的内嵌 HT sidecar 超出大小上限");
+    if (encoded.payload.empty() || encoded.payload.size() > kMaxEmbeddedHtProofBytes) {
+      throw std::runtime_error("消元证明的单份内嵌 HT sidecar 超出大小上限: payload=" +
+                               std::to_string(encoded.payload.size()) +
+                               ", limit=" + std::to_string(kMaxEmbeddedHtProofBytes));
+    }
+    if (total_payload > payload_limit - encoded.payload.size()) {
+      throw std::runtime_error("消元证明的内嵌 HT sidecar 累计 payload 超出大小上限: " +
+                               std::to_string(total_payload + encoded.payload.size()) +
+                               " > " + std::to_string(payload_limit));
     }
     total_raw += raw.size();
     total_payload += encoded.payload.size();
