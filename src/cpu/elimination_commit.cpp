@@ -22,7 +22,9 @@ std::vector<Candidate> CommitVerifiedCandidates(GraphSnapshot* const graph,
       throw std::runtime_error("epoch 候选边编号越界");
     }
     if (candidate.method != EliminationMethod::kJv &&
-        candidate.method != EliminationMethod::kHamiltonTutte) {
+        candidate.method != EliminationMethod::kHamiltonTutte &&
+        candidate.method != EliminationMethod::kGeometryMain &&
+        candidate.method != EliminationMethod::kLpBox) {
       throw std::runtime_error("epoch 候选方法不受支持");
     }
     if (!graph->edges[static_cast<std::size_t>(candidate.edge_id)].active) {
@@ -33,10 +35,10 @@ std::vector<Candidate> CommitVerifiedCandidates(GraphSnapshot* const graph,
   std::sort(candidates.begin(), candidates.end(), [&](const Candidate& lhs, const Candidate& rhs) {
     const Edge& lhs_edge = graph->edges[static_cast<std::size_t>(lhs.edge_id)];
     const Edge& rhs_edge = graph->edges[static_cast<std::size_t>(rhs.edge_id)];
-    return std::tuple{lhs_edge.u, lhs_edge.v, static_cast<std::uint8_t>(lhs.method), lhs.witness,
-                      lhs.edge_id} < std::tuple{rhs_edge.u, rhs_edge.v,
-                                                static_cast<std::uint8_t>(rhs.method), rhs.witness,
-                                                rhs.edge_id};
+    return std::tuple{lhs_edge.u,  lhs_edge.v,         static_cast<std::uint8_t>(lhs.method),
+                      lhs.witness, lhs.second_witness, lhs.edge_id} <
+           std::tuple{rhs_edge.u,  rhs_edge.v,         static_cast<std::uint8_t>(rhs.method),
+                      rhs.witness, rhs.second_witness, rhs.edge_id};
   });
   candidates.erase(std::unique(candidates.begin(), candidates.end(),
                                [](const Candidate& lhs, const Candidate& rhs) {

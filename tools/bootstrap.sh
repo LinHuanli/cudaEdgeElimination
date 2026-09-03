@@ -4,12 +4,17 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "${repo_root}"
 
+if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists mpfr; then
+  echo "错误：缺少 MPFR 开发包（需要 pkg-config 能找到 mpfr）；几何区间证书无法构建。" >&2
+  exit 2
+fi
+
 mkdir -p .deps/pip-cache .tmp
 free_kib="$(df -Pk "${repo_root}" | awk 'NR==2 {print $4}')"
 required_kib=$((8 * 1024 * 1024))
 if (( free_kib < required_kib )); then
   echo "错误：仓库所在文件系统可用空间不足 8 GiB，拒绝安装依赖。" >&2
-  exit 2
+  exit 3
 fi
 
 if [[ ! -x .venv/bin/python ]]; then
@@ -26,7 +31,7 @@ export PIP_CACHE_DIR="${repo_root}/.deps/pip-cache"
 library="$(find .venv -type f -name 'libcuopt.so*' -print -quit)"
 if [[ -z "${library}" ]]; then
   echo "错误：安装完成但没有找到 libcuopt.so。" >&2
-  exit 3
+  exit 4
 fi
 
 echo "cuOpt 已安装：${library}"

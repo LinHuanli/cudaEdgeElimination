@@ -1,3 +1,18 @@
+find_package(Python3 COMPONENTS Interpreter QUIET)
+
+if(Python3_Interpreter_FOUND)
+  add_test(
+    NAME negative.fgpu_output_boundary
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/differential/reject_fgpu_output_escape.py"
+      --exe "$<TARGET_FILE:fgpu-elim>"
+      --instance "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+      --tmp "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-output-boundary")
+  set_tests_properties(negative.fgpu_output_boundary PROPERTIES
+    PASS_REGULAR_EXPRESSION "FGPU output boundary violations rejected"
+    LABELS "negative;fgpu;filesystem;correctness")
+endif()
+
 add_executable(cudaee_unit unit/test_core.cpp)
 target_link_libraries(cudaee_unit PRIVATE cudaee_core)
 target_compile_definitions(cudaee_unit PRIVATE CUDAEE_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}/tmp")
@@ -39,6 +54,138 @@ add_test(
 set_tests_properties(integration.complete_graph_tour PROPERTIES
   DEPENDS integration.complete_graph
   LABELS "integration;correctness;graph")
+
+if(CUDAEE_ENABLE_CUDA)
+  set(FGPU_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu")
+  set(FGPU_TEST_EDGES "${FGPU_TEST_DIR}/recursive-point.edg")
+  set(FGPU_TEST_CERT "${FGPU_TEST_DIR}/recursive-point.fgcert")
+  add_test(
+    NAME integration.fgpu_geometry_run
+    COMMAND fgpu-elim run
+      --instance "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+      --tour "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.opt.tour"
+      --tour-role known-optimum
+      --expected-cost 251
+      --device 0
+      --numeric mixed-safe
+      --verification epoch
+      --pdlp off
+      --potential-candidates 6
+      --geometry-witnesses 4
+      --enable-jv 0
+      --enable-ht 0
+      --output-edges "${FGPU_TEST_EDGES}"
+      --fixed "${FGPU_TEST_DIR}/recursive-point.fix"
+      --nonpairs "${FGPU_TEST_DIR}/recursive-point.nonpairs"
+      --certificate "${FGPU_TEST_CERT}"
+      --manifest "${FGPU_TEST_DIR}/recursive-point.manifest")
+  set_tests_properties(integration.fgpu_geometry_run PROPERTIES
+    PASS_REGULAR_EXPRESSION "status=OK.*geometry_deleted=[1-9]"
+    LABELS "integration;fgpu;geometry;gpu;correctness")
+
+  add_test(
+    NAME integration.fgpu_geometry_verify
+    COMMAND fgpu-elim verify
+      --instance "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+      --tour "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.opt.tour"
+      --tour-role known-optimum
+      --expected-cost 251
+      --output-edges "${FGPU_TEST_EDGES}"
+      --fixed "${FGPU_TEST_DIR}/recursive-point.fix"
+      --nonpairs "${FGPU_TEST_DIR}/recursive-point.nonpairs"
+      --certificate "${FGPU_TEST_CERT}")
+  set_tests_properties(integration.fgpu_geometry_verify PROPERTIES
+    DEPENDS integration.fgpu_geometry_run
+    PASS_REGULAR_EXPRESSION "status=VERIFIED.*geometry=[1-9]"
+    LABELS "integration;fgpu;geometry;certificate;correctness")
+
+  add_test(
+    NAME negative.fgpu_geometry_tamper
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/differential/tamper_fgpu_certificate.py"
+      --exe "$<TARGET_FILE:fgpu-elim>"
+      --instance "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+      --edges "${FGPU_TEST_EDGES}"
+      --certificate "${FGPU_TEST_CERT}"
+      --output "${FGPU_TEST_DIR}/recursive-point.tampered.fgcert")
+  set_tests_properties(negative.fgpu_geometry_tamper PROPERTIES
+    DEPENDS integration.fgpu_geometry_run
+    PASS_REGULAR_EXPRESSION "tampered FGPU geometry certificate rejected"
+    LABELS "negative;fgpu;geometry;certificate;correctness")
+
+  set(FGPU_PDLP_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-pdlp")
+  set(FGPU_PDLP_TEST_EDGES "${FGPU_PDLP_TEST_DIR}/recursive-point.edg")
+  set(FGPU_PDLP_TEST_CERT "${FGPU_PDLP_TEST_DIR}/recursive-point.fgcert")
+  add_test(
+    NAME integration.fgpu_pdlp_run
+    COMMAND fgpu-elim run
+      --instance "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+      --tour "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.opt.tour"
+      --tour-role known-optimum
+      --expected-cost 251
+      --device 0
+      --numeric mixed-safe
+      --verification epoch
+      --pdlp native
+      --pdlp-iterations 2000
+      --enable-geometry 0
+      --enable-jv 0
+      --enable-ht 0
+      --output-edges "${FGPU_PDLP_TEST_EDGES}"
+      --fixed "${FGPU_PDLP_TEST_DIR}/recursive-point.fix"
+      --nonpairs "${FGPU_PDLP_TEST_DIR}/recursive-point.nonpairs"
+      --certificate "${FGPU_PDLP_TEST_CERT}"
+      --manifest "${FGPU_PDLP_TEST_DIR}/recursive-point.manifest")
+  set_tests_properties(integration.fgpu_pdlp_run PROPERTIES
+    PASS_REGULAR_EXPRESSION "status=OK.*lp_deleted=[1-9]"
+    LABELS "integration;fgpu;pdlp;gpu;correctness")
+
+  add_test(
+    NAME integration.fgpu_pdlp_verify
+    COMMAND fgpu-elim verify
+      --instance "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+      --tour "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.opt.tour"
+      --tour-role known-optimum
+      --expected-cost 251
+      --output-edges "${FGPU_PDLP_TEST_EDGES}"
+      --fixed "${FGPU_PDLP_TEST_DIR}/recursive-point.fix"
+      --nonpairs "${FGPU_PDLP_TEST_DIR}/recursive-point.nonpairs"
+      --certificate "${FGPU_PDLP_TEST_CERT}")
+  set_tests_properties(integration.fgpu_pdlp_verify PROPERTIES
+    DEPENDS integration.fgpu_pdlp_run
+    PASS_REGULAR_EXPRESSION "status=VERIFIED.*lp=[1-9]"
+    LABELS "integration;fgpu;pdlp;certificate;correctness")
+
+  add_test(
+    NAME negative.fgpu_pdlp_tamper
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/differential/tamper_fgpu_lp_certificate.py"
+      --exe "$<TARGET_FILE:fgpu-elim>"
+      --instance "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+      --edges "${FGPU_PDLP_TEST_EDGES}"
+      --certificate "${FGPU_PDLP_TEST_CERT}"
+      --output "${FGPU_PDLP_TEST_DIR}/recursive-point.tampered.fgcert")
+  set_tests_properties(negative.fgpu_pdlp_tamper PROPERTIES
+    DEPENDS integration.fgpu_pdlp_run
+    PASS_REGULAR_EXPRESSION "tampered FGPU LP certificate rejected"
+    LABELS "negative;fgpu;pdlp;certificate;correctness")
+
+  add_test(
+    NAME negative.fgpu_fixed_tamper
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/differential/tamper_fgpu_fixed_output.py"
+      --exe "$<TARGET_FILE:fgpu-elim>"
+      --instance "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+      --edges "${FGPU_PDLP_TEST_EDGES}"
+      --fixed "${FGPU_PDLP_TEST_DIR}/recursive-point.fix"
+      --nonpairs "${FGPU_PDLP_TEST_DIR}/recursive-point.nonpairs"
+      --certificate "${FGPU_PDLP_TEST_CERT}"
+      --output "${FGPU_PDLP_TEST_DIR}/recursive-point.tampered.fix")
+  set_tests_properties(negative.fgpu_fixed_tamper PROPERTIES
+    DEPENDS integration.fgpu_pdlp_run
+    PASS_REGULAR_EXPRESSION "tampered FGPU fixed output rejected"
+    LABELS "negative;fgpu;fixed;certificate;correctness")
+endif()
 
 if(TARGET cudaee_kh_elim)
   add_test(

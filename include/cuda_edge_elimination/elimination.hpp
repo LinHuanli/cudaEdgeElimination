@@ -18,6 +18,13 @@ enum class Backend {
   kCuda,
 };
 
+enum class JvCandidateMode : std::uint8_t {
+  // KH -q 风格，只尝试按端点邻域得分排序的 10 个中心。
+  kQuick,
+  // 对每条边扫描全部中心；GPU 负责筛选，CPU 仍逐候选精确认证。
+  kExhaustive,
+};
+
 struct EpochMetrics {
   std::uint32_t epoch{};
   std::size_t edges_before{};
@@ -38,6 +45,21 @@ struct EpochMetrics {
   double jv_d2h_ms{};
 };
 
+struct LpBoxProof {
+  std::uint64_t snapshot_hash{};
+  std::uint32_t fractional_bits{24U};
+  std::int64_t incumbent_cost{-1};
+  // degree equality 每个顶点一个 unrestricted multiplier，已量化到公共分母。
+  std::vector<std::int64_t> vertex_dual_numerator;
+};
+
+struct LpBoxVerificationData {
+  bool certified{false};
+  std::string reason;
+  __int128 lower_bound_numerator{};
+  std::vector<__int128> reduced_cost_numerator;
+};
+
 struct JvCudaCacheUsage {
   bool static_hit{false};
   bool workspace_hit{false};
@@ -55,12 +77,15 @@ struct EliminationResult {
   std::vector<ProofRecord> proof;
   // 只有 HT record 可以引用这里的 V1 continuation arena；JV V1 输出保持不变。
   std::vector<HtRecursiveProof> ht_proofs;
+  // LP sidecar 可由同一 epoch 的多个 record 共享。
+  std::vector<LpBoxProof> lp_box_proofs;
   std::vector<EpochMetrics> epochs;
 };
 
 enum class HtTargetOrder : std::uint8_t {
   kCanonical,
   kWeightDescending,
+  kExternalScoreDescending,
 };
 
 struct HtScanOptions {
@@ -70,6 +95,8 @@ struct HtScanOptions {
   // 全图搜索必须显式有界；0 非法。
   std::uint64_t max_targets{64U};
   HtTargetOrder target_order{HtTargetOrder::kWeightDescending};
+  // kExternalScoreDescending 时按 stable edge id 索引；图删边不会改变该向量。
+  std::vector<double> target_scores;
   // 0 表示历史默认：无显式设备时单 worker，否则每个设备一个 worker。
   // 正数允许多个只读 target worker 共享同一张显式 GPU；不改变每个 target 的证明语义。
   std::uint32_t target_workers{};
@@ -304,6 +331,7 @@ enum class LocalEliminationTermination : std::uint8_t {
 
 struct LocalEliminationOptions {
   Backend jv_backend{Backend::kAuto};
+  JvCandidateMode jv_candidate_mode{JvCandidateMode::kQuick};
   // 每次 HT 提交后，JV 必须先重新达到固定点；预算耗尽时不进入下一次 HT scan。
   std::uint32_t max_jv_rounds{100U};
   // 只计算实际执行的 HT 不可变快照 epoch；0 非法。
@@ -343,22 +371,31 @@ struct LocalEliminationResult {
   HtShortCircuitTraceBundle short_circuit_traces;
 };
 
-[[nodiscard]] std::vector<Candidate> FindJvCandidatesCpu(const GraphSnapshot& graph);
+[[nodiscard]] std::vector<Candidate>
+FindJvCandidatesCpu(const GraphSnapshot& graph, JvCandidateMode mode = JvCandidateMode::kQuick);
 [[nodiscard]] bool VerifyJvCandidate(const GraphSnapshot& graph, const Candidate& candidate,
                                      std::string* reason);
+[[nodiscard]] LpBoxVerificationData BuildLpBoxVerificationData(const GraphSnapshot& graph,
+                                                               const LpBoxProof& proof);
+[[nodiscard]] bool VerifyLpBoxCandidate(const GraphSnapshot& graph, const LpBoxProof& proof,
+                                        const LpBoxVerificationData& verification_data,
+                                        const Candidate& candidate, std::string* reason);
 
 [[nodiscard]] bool CudaBackendAvailable(std::string* reason);
-[[nodiscard]] std::vector<Candidate> FindJvCandidatesCuda(const GraphSnapshot& graph,
-                                                          int* selected_device,
-                                                          JvCudaCacheUsage* cache_usage = nullptr);
+[[nodiscard]] std::vector<Candidate>
+FindJvCandidatesCuda(const GraphSnapshot& graph, int* selected_device,
+                     JvCudaCacheUsage* cache_usage = nullptr,
+                     JvCandidateMode mode = JvCandidateMode::kQuick);
 // 释放当前主机线程在所有设备上的 JV 驻留缓存；测试隔离和显式 teardown 使用。
 void ClearJvCudaCache();
 
-EliminationResult RunJvElimination(GraphSnapshot* graph, Backend backend, std::uint32_t max_rounds);
+EliminationResult RunJvElimination(GraphSnapshot* graph, Backend backend, std::uint32_t max_rounds,
+                                   JvCandidateMode mode = JvCandidateMode::kQuick);
 
 // 返回稳定 edge id；排序不依赖输入边数组的原始排列。
-[[nodiscard]] std::vector<std::int32_t> SelectHtTargetEdgeIds(const GraphSnapshot& graph,
-                                                              HtTargetOrder order);
+[[nodiscard]] std::vector<std::int32_t>
+SelectHtTargetEdgeIds(const GraphSnapshot& graph, HtTargetOrder order,
+                      const std::vector<double>& scores = {});
 
 // 在一个不可变快照上搜索有界目标；可按固定 GPU 静态切片，仍按目标规范序原子提交。
 [[nodiscard]] HtScanResult RunHtScanEpoch(GraphSnapshot* graph, const HtScanOptions& options);

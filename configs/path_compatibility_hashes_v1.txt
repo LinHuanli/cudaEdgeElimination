@@ -5,4 +5,5 @@ record 2 2 3 1 24 5fcd7fdac93b4fe9
 record 3 8 15 1 120 9642d8a1cb6bf1ee
 record 4 48 105 1 840 1853eb4cc99dd217
 record 5 384 945 6 45360 f6bccacc5c1fa84f
+record 6 3840 10395 60 4989600 750842211d2a93e7
 END

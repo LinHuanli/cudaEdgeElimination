@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -360,9 +361,20 @@ void ConsumeHtTargetEvaluation(HtTargetEvaluation evaluation, HtScanResult* cons
 } // namespace
 
 std::vector<std::int32_t> SelectHtTargetEdgeIds(const GraphSnapshot& graph,
-                                                const HtTargetOrder order) {
-  if (order != HtTargetOrder::kCanonical && order != HtTargetOrder::kWeightDescending) {
+                                                const HtTargetOrder order,
+                                                const std::vector<double>& scores) {
+  if (order != HtTargetOrder::kCanonical && order != HtTargetOrder::kWeightDescending &&
+      order != HtTargetOrder::kExternalScoreDescending) {
     throw std::invalid_argument("未知 HT 目标排序策略");
+  }
+  if (order == HtTargetOrder::kExternalScoreDescending) {
+    if (scores.size() != graph.edges.size() ||
+        std::any_of(scores.begin(), scores.end(),
+                    [](const double score) { return std::isnan(score); })) {
+      throw std::invalid_argument("HT 外部 target score 必须按 stable edge id 完整给出且不含 NaN");
+    }
+  } else if (!scores.empty()) {
+    throw std::invalid_argument("只有 external-score 排序可以携带 target_scores");
   }
   if (graph.edges.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
     throw std::overflow_error("HT scan 边数超过稳定 edge id 范围");
@@ -378,15 +390,20 @@ std::vector<std::int32_t> SelectHtTargetEdgeIds(const GraphSnapshot& graph,
     }
   }
 
-  std::sort(targets.begin(), targets.end(),
-            [&](const std::int32_t lhs_id, const std::int32_t rhs_id) {
-              const Edge& lhs = graph.edges[static_cast<std::size_t>(lhs_id)];
-              const Edge& rhs = graph.edges[static_cast<std::size_t>(rhs_id)];
-              if (order == HtTargetOrder::kWeightDescending && lhs.weight != rhs.weight) {
-                return lhs.weight > rhs.weight;
-              }
-              return std::tie(lhs.u, lhs.v, lhs_id) < std::tie(rhs.u, rhs.v, rhs_id);
-            });
+  std::sort(
+      targets.begin(), targets.end(), [&](const std::int32_t lhs_id, const std::int32_t rhs_id) {
+        const Edge& lhs = graph.edges[static_cast<std::size_t>(lhs_id)];
+        const Edge& rhs = graph.edges[static_cast<std::size_t>(rhs_id)];
+        if (order == HtTargetOrder::kExternalScoreDescending &&
+            scores[static_cast<std::size_t>(lhs_id)] != scores[static_cast<std::size_t>(rhs_id)]) {
+          return scores[static_cast<std::size_t>(lhs_id)] >
+                 scores[static_cast<std::size_t>(rhs_id)];
+        }
+        if (order == HtTargetOrder::kWeightDescending && lhs.weight != rhs.weight) {
+          return lhs.weight > rhs.weight;
+        }
+        return std::tie(lhs.u, lhs.v, lhs_id) < std::tie(rhs.u, rhs.v, rhs_id);
+      });
   return targets;
 }
 
@@ -412,7 +429,8 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
   const detail::HtGraphValidationBinding graph_validation_binding(*graph);
   const std::uint64_t snapshot_hash = snapshot_binding.snapshot_hash();
   const auto selection_start = std::chrono::steady_clock::now();
-  const std::vector<std::int32_t> targets = SelectHtTargetEdgeIds(*graph, options.target_order);
+  const std::vector<std::int32_t> targets =
+      SelectHtTargetEdgeIds(*graph, options.target_order, options.target_scores);
   if (options.target_offset > targets.size()) {
     throw std::invalid_argument("HT scan target_offset 超过 eligible target 数量");
   }

@@ -11,7 +11,8 @@ bool CudaBackendAvailable(std::string* const reason) {
   return false;
 }
 
-std::vector<Candidate> FindJvCandidatesCuda(const GraphSnapshot&, int*, JvCudaCacheUsage*) {
+std::vector<Candidate> FindJvCandidatesCuda(const GraphSnapshot&, int*, JvCudaCacheUsage*,
+                                            JvCandidateMode) {
   throw std::runtime_error("当前二进制未编译 CUDA 后端");
 }
 

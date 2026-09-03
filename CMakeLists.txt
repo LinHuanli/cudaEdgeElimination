@@ -17,6 +17,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(ZLIB QUIET)
 find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MPFR REQUIRED IMPORTED_TARGET mpfr)
 if(CUDAEE_ENABLE_OPENMP)
   find_package(OpenMP QUIET COMPONENTS C CXX)
 endif()
@@ -41,6 +43,9 @@ set(CUDAEE_SOURCES
     src/cpu/jv_elimination.cpp
     src/cpu/kopt_search.cpp
     src/cpu/path_system.cpp
+    src/fgpu/geometry.cpp
+    src/fgpu/pdlp.cpp
+    src/fgpu/pipeline.cpp
     src/lp/lp_epoch.cpp
     src/lp/cuopt_sidecar.cpp)
 
@@ -58,6 +63,8 @@ if(CUDAEE_ENABLE_CUDA)
       src/cuda/ht_path_append.cu
       src/cuda/ht_replies.cu
       src/cuda/jv_cuda.cu
+      src/cuda/fgpu_geometry.cu
+      src/cuda/fgpu_pdlp.cu
       src/cuda/kopt_cost.cu
       src/cuda/path_compatibility.cu)
 else()
@@ -68,6 +75,8 @@ else()
       src/cuda/ht_path_append_stub.cpp
       src/cuda/ht_replies_stub.cpp
       src/cuda/jv_cuda_stub.cpp
+      src/cuda/fgpu_geometry_stub.cpp
+      src/cuda/fgpu_pdlp_stub.cpp
       src/cuda/kopt_cost_stub.cpp
       src/cuda/path_compatibility_stub.cpp)
 endif()
@@ -76,7 +85,7 @@ add_library(cudaee_core STATIC ${CUDAEE_SOURCES})
 target_include_directories(cudaee_core PUBLIC include)
 target_compile_features(cudaee_core PUBLIC cxx_std_20)
 target_compile_definitions(cudaee_core PUBLIC CUDAEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-target_link_libraries(cudaee_core PUBLIC ${CMAKE_DL_LIBS} PRIVATE Threads::Threads)
+target_link_libraries(cudaee_core PUBLIC ${CMAKE_DL_LIBS} PRIVATE Threads::Threads PkgConfig::MPFR)
 
 if(CUDAEE_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
   target_link_libraries(cudaee_core PRIVATE OpenMP::OpenMP_CXX)
@@ -115,6 +124,10 @@ add_executable(cudaee src/cli/main.cpp)
 target_link_libraries(cudaee PRIVATE cudaee_core)
 target_compile_options(cudaee PRIVATE -Wall -Wextra -Wconversion -Wshadow -Wformat=2)
 
+add_executable(fgpu-elim src/cli/fgpu_main.cpp)
+target_link_libraries(fgpu-elim PRIVATE cudaee_core)
+target_compile_options(fgpu-elim PRIVATE -Wall -Wextra -Wconversion -Wshadow -Wformat=2)
+
 set(CUDAEE_KH_ELIM_DIR "${CMAKE_SOURCE_DIR}/third_party/ElimTSP/KH-elim")
 if(CUDAEE_BUILD_AUTHOR_TOOLS AND EXISTS "${CUDAEE_KH_ELIM_DIR}/kh-elim.c")
   # 保持作者算法为隔离的对照可执行文件；GPU 代码不直接取得其删除授权。
@@ -133,7 +146,7 @@ if(CUDAEE_BUILD_AUTHOR_TOOLS AND EXISTS "${CUDAEE_KH_ELIM_DIR}/kh-elim.c")
 endif()
 
 include(GNUInstallDirs)
-install(TARGETS cudaee RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS cudaee fgpu-elim RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(CUDAEE_BUILD_TESTS)
   enable_testing()

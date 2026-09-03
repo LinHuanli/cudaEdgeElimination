@@ -3,7 +3,7 @@
 ## 固定环境
 
 - Linux x86_64，NVIDIA 驱动支持所选 CUDA toolkit；
-- CMake >= 3.27、Ninja、C++20 编译器，以及可选的 OpenMP C++ runtime；
+- CMake >= 3.27、Ninja、C++20 编译器、`pkg-config`、MPFR 开发包，以及可选的 OpenMP C++ runtime；
 - 主环境 CUDA toolkit 13.x、目标 `sm_89`；远端门禁另验证 CUDA 12.6、`sm_86`；
 - 项目内 `.venv` 安装 `libcuopt-cu13==26.8.0`；
 - ElimTSP 子模块固定提交 `d7bacf0d...`；

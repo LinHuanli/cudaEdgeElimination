@@ -218,13 +218,42 @@ __device__ void InsertCandidate(const std::int32_t node, const std::uint64_t sco
   nodes[position] = node;
 }
 
+__device__ bool IsJvWitnessDevice(const std::int32_t a, const std::int32_t b, const std::int32_t c,
+                                  const std::uint64_t cab, const std::int64_t* const edge_weight,
+                                  const std::int32_t* const row_offsets,
+                                  const std::int32_t* const neighbors,
+                                  const std::int32_t* const csr_edge_ids,
+                                  const std::int64_t* const x, const std::int64_t* const y,
+                                  const std::uint8_t distance_type) {
+  const std::uint64_t cac =
+      static_cast<std::uint64_t>(ExactDistanceDevice(a, c, x, y, distance_type));
+  const std::uint64_t cbc =
+      static_cast<std::uint64_t>(ExactDistanceDevice(b, c, x, y, distance_type));
+  for (std::int32_t offset = row_offsets[c]; offset < row_offsets[c + 1]; ++offset) {
+    const std::int32_t d = neighbors[offset];
+    if (d == a || d == b) {
+      continue;
+    }
+    const std::uint64_t left = cab + static_cast<std::uint64_t>(edge_weight[csr_edge_ids[offset]]);
+    const std::uint64_t first =
+        cac + static_cast<std::uint64_t>(ExactDistanceDevice(d, b, x, y, distance_type));
+    const std::uint64_t second =
+        static_cast<std::uint64_t>(ExactDistanceDevice(a, d, x, y, distance_type)) + cbc;
+    if (left <= first || left <= second) {
+      return false;
+    }
+  }
+  return true;
+}
+
 __global__ void
-JvCandidatesKernel(const std::int32_t edge_count, const std::int32_t* const edge_u,
-                   const std::int32_t* const edge_v, const std::int64_t* const edge_weight,
-                   const std::int32_t* const edge_active, const std::int32_t* const row_offsets,
-                   const std::int32_t* const neighbors, const std::int32_t* const csr_edge_ids,
-                   const std::int64_t* const x, const std::int64_t* const y,
-                   const std::uint8_t distance_type, std::int32_t* const witnesses) {
+JvCandidatesKernel(const std::int32_t dimension, const std::int32_t edge_count,
+                   const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+                   const std::int64_t* const edge_weight, const std::int32_t* const edge_active,
+                   const std::int32_t* const row_offsets, const std::int32_t* const neighbors,
+                   const std::int32_t* const csr_edge_ids, const std::int64_t* const x,
+                   const std::int64_t* const y, const std::uint8_t distance_type,
+                   const std::uint8_t exhaustive, std::int32_t* const witnesses) {
   const std::int32_t edge_id = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
   if (edge_id >= edge_count || edge_active[edge_id] == 0) {
     return;
@@ -259,28 +288,22 @@ JvCandidatesKernel(const std::int32_t edge_count, const std::int32_t* const edge
   const std::uint64_t cab = static_cast<std::uint64_t>(edge_weight[edge_id]);
   for (std::int32_t candidate_index = 0; candidate_index < candidate_count; ++candidate_index) {
     const std::int32_t c = candidate_nodes[candidate_index];
-    const std::uint64_t cac =
-        static_cast<std::uint64_t>(ExactDistanceDevice(a, c, x, y, distance_type));
-    const std::uint64_t cbc =
-        static_cast<std::uint64_t>(ExactDistanceDevice(b, c, x, y, distance_type));
-    bool compatible = false;
-    for (std::int32_t offset = row_offsets[c]; offset < row_offsets[c + 1]; ++offset) {
-      const std::int32_t d = neighbors[offset];
-      if (d == a || d == b) {
-        continue;
-      }
-      const std::uint64_t left =
-          cab + static_cast<std::uint64_t>(edge_weight[csr_edge_ids[offset]]);
-      const std::uint64_t first =
-          cac + static_cast<std::uint64_t>(ExactDistanceDevice(d, b, x, y, distance_type));
-      const std::uint64_t second =
-          static_cast<std::uint64_t>(ExactDistanceDevice(a, d, x, y, distance_type)) + cbc;
-      if (left <= first || left <= second) {
-        compatible = true;
-        break;
-      }
+    if (IsJvWitnessDevice(a, b, c, cab, edge_weight, row_offsets, neighbors, csr_edge_ids, x, y,
+                          distance_type)) {
+      witnesses[edge_id] = c;
+      return;
     }
-    if (!compatible) {
+  }
+  if (exhaustive == 0U) {
+    return;
+  }
+  // 快路径失败后才做全中心扫描；只是扩大候选完备性，不改变 CPU 证明语义。
+  for (std::int32_t c = 0; c < dimension; ++c) {
+    if (c == a || c == b) {
+      continue;
+    }
+    if (IsJvWitnessDevice(a, b, c, cab, edge_weight, row_offsets, neighbors, csr_edge_ids, x, y,
+                          distance_type)) {
       witnesses[edge_id] = c;
       return;
     }
@@ -478,7 +501,8 @@ std::uint64_t ResidentBytes(const JvDeviceCache& cache) {
 }
 
 double ElapsedMilliseconds(const std::chrono::steady_clock::time_point begin) {
-  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin)
+      .count();
 }
 
 } // namespace
@@ -486,7 +510,8 @@ double ElapsedMilliseconds(const std::chrono::steady_clock::time_point begin) {
 bool CudaBackendAvailable(std::string* const reason) { return SelectDevice(reason) >= 0; }
 
 std::vector<Candidate> FindJvCandidatesCuda(const GraphSnapshot& graph, int* const selected_device,
-                                            JvCudaCacheUsage* const cache_usage) {
+                                            JvCudaCacheUsage* const cache_usage,
+                                            const JvCandidateMode mode) {
   if (cache_usage != nullptr) {
     *cache_usage = {};
   }
@@ -538,11 +563,11 @@ std::vector<Candidate> FindJvCandidatesCuda(const GraphSnapshot& graph, int* con
   const int blocks = (static_cast<int>(graph.edges.size()) + kThreads - 1) / kThreads;
   const auto kernel_start = std::chrono::steady_clock::now();
   JvCandidatesKernel<<<blocks, kThreads>>>(
-      static_cast<std::int32_t>(graph.edges.size()), cache.device_edge_u.get(),
+      graph.dimension, static_cast<std::int32_t>(graph.edges.size()), cache.device_edge_u.get(),
       cache.device_edge_v.get(), cache.device_edge_weight.get(), cache.device_edge_active.get(),
-      cache.device_row_offsets.get(), cache.device_neighbors.get(),
-      cache.device_csr_edge_ids.get(),
+      cache.device_row_offsets.get(), cache.device_neighbors.get(), cache.device_csr_edge_ids.get(),
       cache.device_x.get(), cache.device_y.get(), static_cast<std::uint8_t>(graph.distance_type),
+      static_cast<std::uint8_t>(mode == JvCandidateMode::kExhaustive),
       cache.device_witnesses.get());
   CheckCuda(cudaGetLastError(), "JvCandidatesKernel launch");
   CheckCuda(cudaDeviceSynchronize(), "JvCandidatesKernel synchronize");

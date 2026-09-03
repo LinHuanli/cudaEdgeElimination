@@ -1,4 +1,4 @@
-# 实现状态（2026-09-03）
+# 实现状态（2026-09-04）
 
 | 工作包 | 状态 | 已验证证据 |
 |---|---|---|
@@ -8,7 +8,10 @@
 | M3 Concorde 导出 | 完成 | 内容寻址受限 overlay；Concorde graph 目标映射复核；随机 20 点和 pr299 CSR 往返 |
 | M3 完整图 exact pricing | 完成（安全下界桥接） | `CCbigguy` 注入；完整图负 reduced-cost penalty；三方哈希；错配拒绝 |
 | M3.1 对偶稳定化与边集导出 | 待实现 | pr299 PDLP 完整图界偏弱；尚未导出每边 exact RC/Concorde 消元后边集 |
-| M4.1 path-system 组合层 | 完成 | 路径规范化；固定哈希表；368,047 单元 CPU/CUDA 全量差分；`m=6,7` CPU fallback |
+| FGPU one-shot CLI | 完成（单 GPU、安全闭环） | geometry→LP-box→JV→可选 HT；五类输出；最终从初图重放；pcb442/pr1002 最优 tour 零缺边 |
+| FGPU native LP 删除 | 完成（degree-only） | CUDA multiplier；`2^24` 定点量化；完整 live-variable `__int128` box bound；V4 sidecar 与篡改拒绝 |
+| FGPU fully-resident 终态 | 部分完成 | GPU 候选/成本/传播已接入；最终 exact replay、HT 控制与完全图物化仍含 CPU；subtour cuts/tile certificate 待实现 |
+| M4.1 path-system 组合层 | 完成 | 路径规范化；固定哈希表；`m<=6` CPU/CUDA 差分；`m=6` 表为 4,989,600 bytes，`m=7` CPU fallback |
 | M4.2a CPU k-opt 叶证明 | 完成 | proper 3/4/5-opt `4/25/208` 模板；ElimTSP oracle 差分；`path-kopt-proof-v1` 独立重放 |
 | M4.2b CUDA k-opt cost | 完成（CPU 认证候选器） | public 完整矩阵逐 cell 差分；broker 使用 `1/1/4` words candidate mask；改善 witness CPU 完整重建；memcheck 0 error |
 | M4.3a 精确困难叶 | 完成（有界 CPU fallback） | 收缩 forced outside matching；Held–Karp 子集 DP；通用交换 witness 独立重放；block 超限为 unresolved |
@@ -43,6 +46,8 @@
 | M5 中大型调优 | 进行中（JV 三轮 + HT host/device/multi-GPU fast paths） | point/path/reply/leaf/scan-binding fast paths；reply 驻留、任务去重与目标级静态多 GPU |
 
 ## 当前基准结果
+
+FGPU one-shot 快速主链在单张 RTX 4000 Ada 上：pcb442 `97,461 -> 8,015`，wall 4.872 秒，89,446 条删除 record；pr1002 `501,501 -> 23,288`，wall 18.439 秒，478,213 条删除 record。两者均包含最终 proof replay，官方最优 tour 分别为 50,778/259,045 且零缺边。pcb442 相对作者单轮 `KH -Jq` 的 12,914 条/94.89 秒同时更稀疏、更快；相对旧固定点 4,016 条/99.68 秒则仍弱，不能报告等强度 `20.46x`。详见 [FGPU One-Shot 实现与首轮基准](66_FGPU_OneShot_实现与基准.md)。
 
 pr299 输入 1208 条边；JV 两个 epoch 后保留 1122 条，提交 86 条删除。CPU 与 CUDA 的最终内容哈希均为 `b9b67e9981518177`。这些数字是正确性回归结果，不构成论文性能结论。
 

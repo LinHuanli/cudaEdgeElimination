@@ -1,4 +1,6 @@
+#include "../fgpu/lp_box_verifier.hpp"
 #include "cuda_edge_elimination/elimination.hpp"
+#include "cuda_edge_elimination/fgpu.hpp"
 
 #include "elimination_commit.hpp"
 
@@ -12,6 +14,8 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <numeric>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -30,6 +34,7 @@ constexpr std::uintmax_t kMaxEliminationProofBytes = 512U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtProofBytes = 256U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtAggregateBytes = 256U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtProofs = 1000000U;
+constexpr std::size_t kMaxEmbeddedLpProofs = 1000000U;
 constexpr std::size_t kMaxEliminationRecords = 1000000U;
 constexpr std::size_t kMaxEpochMetrics = 1000000U;
 
@@ -170,25 +175,53 @@ EliminationMethod ParseEliminationMethod(const std::string_view method) {
   if (method == "HT") {
     return EliminationMethod::kHamiltonTutte;
   }
+  if (method == "GEOM_MAIN") {
+    return EliminationMethod::kGeometryMain;
+  }
+  if (method == "LP_BOX") {
+    return EliminationMethod::kLpBox;
+  }
   throw std::runtime_error("证明 record 的方法不受支持");
 }
 
 void ValidateProofContainer(const EliminationResult& result) {
   if (result.proof.size() > kMaxEliminationRecords || result.epochs.size() > kMaxEpochMetrics ||
       result.ht_proofs.size() > kMaxEmbeddedHtProofs ||
-      result.ht_proofs.size() > std::numeric_limits<std::uint32_t>::max()) {
+      result.ht_proofs.size() > std::numeric_limits<std::uint32_t>::max() ||
+      result.lp_box_proofs.size() > kMaxEmbeddedLpProofs ||
+      result.lp_box_proofs.size() > std::numeric_limits<std::uint32_t>::max()) {
     throw std::runtime_error("消元证明的 record、metrics 或 HT sidecar 数量超过上限");
   }
   std::vector<bool> referenced(result.ht_proofs.size(), false);
+  std::vector<bool> lp_referenced(result.lp_box_proofs.size(), false);
   for (const ProofRecord& record : result.proof) {
     if (record.method == EliminationMethod::kJv) {
-      if (record.certificate_index != kNoEliminationCertificate) {
+      if (record.certificate_index != kNoEliminationCertificate || record.second_witness != -1) {
         throw std::runtime_error("JV record 不得引用 HT sidecar");
       }
       continue;
     }
+    if (record.method == EliminationMethod::kGeometryMain) {
+      if (record.certificate_index != kNoEliminationCertificate || record.second_witness < 0) {
+        throw std::runtime_error("GEOM_MAIN record 的第二见证或 sidecar 非法");
+      }
+      continue;
+    }
+    if (record.method == EliminationMethod::kLpBox) {
+      if (record.witness != -1 || record.second_witness != -1 ||
+          record.certificate_index >= result.lp_box_proofs.size()) {
+        throw std::runtime_error("LP_BOX record 的见证或 sidecar 引用非法");
+      }
+      const LpBoxProof& proof = result.lp_box_proofs[record.certificate_index];
+      if (proof.snapshot_hash != record.snapshot_hash || proof.incumbent_cost < 0 ||
+          proof.fractional_bits > 40U) {
+        throw std::runtime_error("LP_BOX record 与量化 sidecar 绑定不一致");
+      }
+      lp_referenced[record.certificate_index] = true;
+      continue;
+    }
     if (record.method != EliminationMethod::kHamiltonTutte || record.witness != -1 ||
-        record.certificate_index >= result.ht_proofs.size() ||
+        record.second_witness != -1 || record.certificate_index >= result.ht_proofs.size() ||
         referenced[record.certificate_index]) {
       throw std::runtime_error("HT record 的 sidecar 引用非法或重复");
     }
@@ -202,18 +235,31 @@ void ValidateProofContainer(const EliminationResult& result) {
   if (std::find(referenced.begin(), referenced.end(), false) != referenced.end()) {
     throw std::runtime_error("消元证明含未引用的 HT sidecar");
   }
+  if (std::find(lp_referenced.begin(), lp_referenced.end(), false) != lp_referenced.end()) {
+    throw std::runtime_error("消元证明含未引用的 LP box sidecar");
+  }
 }
 
 } // namespace
 
-std::vector<Candidate> FindJvCandidatesCpu(const GraphSnapshot& graph) {
+std::vector<Candidate> FindJvCandidatesCpu(const GraphSnapshot& graph, const JvCandidateMode mode) {
   std::vector<Candidate> candidates;
   for (std::size_t edge_id = 0; edge_id < graph.edges.size(); ++edge_id) {
     const Edge& edge = graph.edges[edge_id];
     if (!edge.active || graph.Degree(edge.u) <= 2 || graph.Degree(edge.v) <= 2) {
       continue;
     }
-    for (const std::int32_t witness : PotentialCandidateNodes(graph, edge.u, edge.v)) {
+    std::vector<std::int32_t> witness_nodes;
+    if (mode == JvCandidateMode::kExhaustive) {
+      witness_nodes.resize(static_cast<std::size_t>(graph.dimension));
+      std::iota(witness_nodes.begin(), witness_nodes.end(), 0);
+    } else {
+      witness_nodes = PotentialCandidateNodes(graph, edge.u, edge.v);
+    }
+    for (const std::int32_t witness : witness_nodes) {
+      if (witness == edge.u || witness == edge.v) {
+        continue;
+      }
       if (IsJvWitness(graph, edge, witness, nullptr)) {
         candidates.push_back({static_cast<std::int32_t>(edge_id), witness, EliminationMethod::kJv});
         break;
@@ -248,7 +294,7 @@ bool VerifyJvCandidate(const GraphSnapshot& graph, const Candidate& candidate,
 }
 
 EliminationResult RunJvElimination(GraphSnapshot* const graph, const Backend backend,
-                                   const std::uint32_t max_rounds) {
+                                   const std::uint32_t max_rounds, const JvCandidateMode mode) {
   if (graph == nullptr || max_rounds == 0) {
     throw std::invalid_argument("图不能为空且 max_rounds 必须大于 0");
   }
@@ -269,7 +315,8 @@ EliminationResult RunJvElimination(GraphSnapshot* const graph, const Backend bac
   }
 
   EliminationResult result;
-  result.backend = use_cuda ? "cuda" : "cpu";
+  result.backend = (use_cuda ? "cuda" : "cpu") +
+                   std::string(mode == JvCandidateMode::kExhaustive ? "-exhaustive" : "-quick");
   result.initial_hash = graph->ContentHash();
   for (std::uint32_t epoch = 0; epoch < max_rounds; ++epoch) {
     EpochMetrics metrics;
@@ -283,8 +330,8 @@ EliminationResult RunJvElimination(GraphSnapshot* const graph, const Backend bac
     int selected_device = -1;
     JvCudaCacheUsage cuda_cache;
     std::vector<Candidate> proposed =
-        use_cuda ? FindJvCandidatesCuda(*graph, &selected_device, &cuda_cache)
-                 : FindJvCandidatesCpu(*graph);
+        use_cuda ? FindJvCandidatesCuda(*graph, &selected_device, &cuda_cache, mode)
+                 : FindJvCandidatesCpu(*graph, mode);
     metrics.propose_ms = ElapsedMilliseconds(propose_start);
     metrics.proposed = proposed.size();
     metrics.jv_static_cache_hit = cuda_cache.static_hit;
@@ -323,12 +370,20 @@ EliminationResult RunJvElimination(GraphSnapshot* const graph, const Backend bac
 
 void WriteProof(const std::filesystem::path& path, const EliminationResult& result) {
   ValidateProofContainer(result);
-  const bool version2 = !result.ht_proofs.empty();
+  const bool version4 = !result.lp_box_proofs.empty();
+  const bool version3 =
+      version4 ||
+      std::any_of(result.proof.begin(), result.proof.end(), [](const ProofRecord& record) {
+        return record.method == EliminationMethod::kGeometryMain;
+      });
+  const bool version2 = version3 || !result.ht_proofs.empty();
   std::ofstream output(path, std::ios::binary);
   if (!output) {
     throw std::runtime_error("无法创建证明文件: " + path.string());
   }
-  output << (version2 ? "CUDAEE_PROOF_V2\n" : "CUDAEE_PROOF_V1\n");
+  output << (version4   ? "CUDAEE_PROOF_V4\n"
+             : version3 ? "CUDAEE_PROOF_V3\n"
+                        : (version2 ? "CUDAEE_PROOF_V2\n" : "CUDAEE_PROOF_V1\n"));
   output << "backend " << result.backend << '\n';
   output << "initial_hash " << HexHash(result.initial_hash) << '\n';
   for (const ProofRecord& record : result.proof) {
@@ -337,6 +392,9 @@ void WriteProof(const std::filesystem::path& path, const EliminationResult& resu
            << ' ' << record.witness;
     if (version2) {
       output << ' ' << record.certificate_index;
+    }
+    if (version3) {
+      output << ' ' << record.second_witness;
     }
     output << '\n';
   }
@@ -360,6 +418,19 @@ void WriteProof(const std::filesystem::path& path, const EliminationResult& resu
       output << "end_ht_proof\n";
     }
   }
+  if (version4) {
+    output << "lp_box_proof_count " << result.lp_box_proofs.size() << '\n';
+    for (std::size_t index = 0U; index < result.lp_box_proofs.size(); ++index) {
+      const LpBoxProof& proof = result.lp_box_proofs[index];
+      output << "lp_box_proof " << index << ' ' << HexHash(proof.snapshot_hash) << ' '
+             << proof.fractional_bits << ' ' << proof.incumbent_cost << '\n';
+      output << "lp_box_dual " << proof.vertex_dual_numerator.size();
+      for (const std::int64_t value : proof.vertex_dual_numerator) {
+        output << ' ' << value;
+      }
+      output << "\nend_lp_box_proof\n";
+    }
+  }
   output << "final_hash " << HexHash(result.final_hash) << '\n';
   output << "END\n";
   if (!output) {
@@ -379,7 +450,9 @@ EliminationResult ReadProof(const std::filesystem::path& path) {
   }
   std::string magic;
   std::getline(input, magic);
-  const bool version2 = magic == "CUDAEE_PROOF_V2";
+  const bool version4 = magic == "CUDAEE_PROOF_V4";
+  const bool version3 = version4 || magic == "CUDAEE_PROOF_V3";
+  const bool version2 = version3 || magic == "CUDAEE_PROOF_V2";
   if (!version2 && magic != "CUDAEE_PROOF_V1") {
     throw std::runtime_error("证明版本不受支持");
   }
@@ -391,7 +464,9 @@ EliminationResult ReadProof(const std::filesystem::path& path) {
   bool saw_final = false;
   bool saw_end = false;
   bool saw_ht_proof_count = false;
+  bool saw_lp_proof_count = false;
   std::size_t declared_ht_proofs = 0U;
+  std::size_t declared_lp_proofs = 0U;
   std::size_t embedded_bytes = 0U;
   while (std::getline(input, line)) {
     std::istringstream fields(line);
@@ -433,6 +508,14 @@ EliminationResult ReadProof(const std::filesystem::path& path) {
             ParseIntegerToken<std::uint32_t>(certificate_index, 10, " record certificate_index");
       } else if (record.method != EliminationMethod::kJv) {
         throw std::runtime_error("V1 证明只支持 JV record");
+      }
+      if (version3) {
+        std::string second_witness;
+        if (!(fields >> second_witness)) {
+          throw std::runtime_error("V3 证明 record 缺少 second_witness");
+        }
+        record.second_witness =
+            ParseIntegerToken<std::int32_t>(second_witness, 10, " record second_witness");
       }
       RequireLineEnd(&fields, "record 行");
       if (result.proof.size() >= kMaxEliminationRecords) {
@@ -491,6 +574,56 @@ EliminationResult ReadProof(const std::filesystem::path& path) {
         throw std::runtime_error("证明内嵌 HT sidecar 缺少结束标记");
       }
       result.ht_proofs.push_back(ParseHtRecursiveProof(serialized));
+    } else if (kind == "lp_box_proof_count") {
+      std::string count;
+      if (!version4 || saw_lp_proof_count || !(fields >> count)) {
+        throw std::runtime_error("证明 lp_box_proof_count 行无效或重复");
+      }
+      RequireLineEnd(&fields, "lp_box_proof_count 行");
+      declared_lp_proofs = ParseIntegerToken<std::size_t>(count, 10, " lp_box_proof_count");
+      if (declared_lp_proofs > kMaxEmbeddedLpProofs || declared_lp_proofs > result.proof.size()) {
+        throw std::runtime_error("证明 lp_box_proof_count 超过上限");
+      }
+      result.lp_box_proofs.reserve(declared_lp_proofs);
+      saw_lp_proof_count = true;
+    } else if (kind == "lp_box_proof") {
+      std::string index_token;
+      std::string hash_token;
+      LpBoxProof proof;
+      if (!version4 || !saw_lp_proof_count ||
+          !(fields >> index_token >> hash_token >> proof.fractional_bits >> proof.incumbent_cost)) {
+        throw std::runtime_error("证明 lp_box_proof 头无效");
+      }
+      RequireLineEnd(&fields, "lp_box_proof 头");
+      const std::size_t index =
+          ParseIntegerToken<std::size_t>(index_token, 10, " lp_box_proof index");
+      if (index != result.lp_box_proofs.size() || index >= declared_lp_proofs) {
+        throw std::runtime_error("证明 lp_box_proof 索引非法");
+      }
+      proof.snapshot_hash = ParseHashToken(hash_token, " lp_box_proof snapshot_hash");
+      std::string dual_line;
+      if (!std::getline(input, dual_line)) {
+        throw std::runtime_error("证明 lp_box_dual 被截断");
+      }
+      std::istringstream dual_fields(dual_line);
+      std::string dual_kind;
+      std::size_t dual_count = 0U;
+      if (!(dual_fields >> dual_kind >> dual_count) || dual_kind != "lp_box_dual" ||
+          dual_count > 100000000U) {
+        throw std::runtime_error("证明 lp_box_dual 头非法");
+      }
+      proof.vertex_dual_numerator.resize(dual_count);
+      for (std::int64_t& value : proof.vertex_dual_numerator) {
+        if (!(dual_fields >> value)) {
+          throw std::runtime_error("证明 lp_box_dual 数组被截断");
+        }
+      }
+      RequireLineEnd(&dual_fields, "lp_box_dual 行");
+      std::string end_marker;
+      if (!std::getline(input, end_marker) || end_marker != "end_lp_box_proof") {
+        throw std::runtime_error("证明 lp_box_proof 缺少结束标记");
+      }
+      result.lp_box_proofs.push_back(std::move(proof));
     } else if (kind == "final_hash") {
       if (saw_final) {
         throw std::runtime_error("证明 final_hash 重复");
@@ -515,7 +648,8 @@ EliminationResult ReadProof(const std::filesystem::path& path) {
     throw std::runtime_error("证明 END 后存在多余字段");
   }
   if (!saw_backend || !saw_initial || !saw_final || !saw_end ||
-      (version2 && (!saw_ht_proof_count || result.ht_proofs.size() != declared_ht_proofs))) {
+      (version2 && (!saw_ht_proof_count || result.ht_proofs.size() != declared_ht_proofs)) ||
+      (version4 && (!saw_lp_proof_count || result.lp_box_proofs.size() != declared_lp_proofs))) {
     throw std::runtime_error("证明文件不完整");
   }
   ValidateProofContainer(result);
@@ -532,6 +666,11 @@ EliminationResult ReplayProof(GraphSnapshot* const graph, const EliminationResul
   EliminationResult replayed;
   replayed.backend = "replay-cpu";
   replayed.initial_hash = working.ContentHash();
+  replayed.lp_box_proofs = expected.lp_box_proofs;
+  GeometryVerificationData geometry_data;
+  bool geometry_data_ready = false;
+  std::vector<std::optional<LpBoxVerificationData>> lp_verification_cache(
+      expected.lp_box_proofs.size());
 
   std::size_t cursor = 0;
   std::uint32_t expected_epoch = 0;
@@ -553,22 +692,80 @@ EliminationResult ReplayProof(GraphSnapshot* const graph, const EliminationResul
       if (edge.u != record.u || edge.v != record.v) {
         throw std::runtime_error("证明的边端点不匹配");
       }
-      Candidate candidate{record.edge_id, record.witness, record.method};
-      std::string reason;
-      if (record.method == EliminationMethod::kJv) {
-        if (!VerifyJvCandidate(working, candidate, &reason)) {
-          throw std::runtime_error("JV 证明复核失败: " + reason);
-        }
-      } else if (record.method == EliminationMethod::kHamiltonTutte) {
-        const HtRecursiveProof& ht_proof = expected.ht_proofs[record.certificate_index];
-        if (!VerifyHtRecursiveProof(working, ht_proof, &reason)) {
-          throw std::runtime_error("HT 证明复核失败: " + reason);
-        }
-      } else {
-        throw std::runtime_error("证明方法不受支持");
-      }
-      candidates.push_back(candidate);
+      candidates.push_back({record.edge_id, record.witness, record.method, record.second_witness});
       records.push_back(&record);
+    }
+
+    // sidecar/最近邻的共享部分每个不可变 epoch 只构造一次；逐 record 的纯只读
+    // 数学复核可并行，最后仍按规范 record 顺序报告首个错误并原子提交。
+    const bool needs_geometry =
+        std::any_of(records.begin(), records.end(), [](const ProofRecord* const record) {
+          return record->method == EliminationMethod::kGeometryMain;
+        });
+    if (needs_geometry && !geometry_data_ready) {
+      geometry_data = BuildGeometryVerificationData(working);
+      geometry_data_ready = true;
+    }
+    for (const ProofRecord* const record : records) {
+      if (record->method != EliminationMethod::kLpBox) {
+        continue;
+      }
+      if (record->certificate_index >= expected.lp_box_proofs.size()) {
+        throw std::runtime_error("LP_BOX record 的 sidecar 索引越界");
+      }
+      std::optional<LpBoxVerificationData>& cached =
+          lp_verification_cache[record->certificate_index];
+      if (!cached.has_value()) {
+        cached =
+            BuildLpBoxVerificationData(working, expected.lp_box_proofs[record->certificate_index]);
+        if (!cached->certified) {
+          throw std::runtime_error("LP_BOX 共享证明复核失败: " + cached->reason);
+        }
+      }
+    }
+
+    std::vector<std::uint8_t> valid(records.size(), 0U);
+    std::vector<std::string> reasons(records.size());
+#ifdef CUDAEE_HAS_OPENMP
+#pragma omp parallel for schedule(dynamic, 64)
+#endif
+    for (std::int64_t record_index = 0; record_index < static_cast<std::int64_t>(records.size());
+         ++record_index) {
+      const std::size_t index = static_cast<std::size_t>(record_index);
+      const ProofRecord& record = *records[index];
+      const Candidate& candidate = candidates[index];
+      bool accepted = false;
+      try {
+        if (record.method == EliminationMethod::kJv) {
+          accepted = VerifyJvCandidate(working, candidate, &reasons[index]);
+        } else if (record.method == EliminationMethod::kHamiltonTutte) {
+          accepted = VerifyHtRecursiveProof(working, expected.ht_proofs[record.certificate_index],
+                                            &reasons[index]);
+        } else if (record.method == EliminationMethod::kGeometryMain) {
+          accepted = VerifyGeometryCandidate(working, geometry_data, candidate, &reasons[index]);
+        } else if (record.method == EliminationMethod::kLpBox) {
+          accepted = detail::VerifyLpBoxCandidateForSnapshot(
+              working, expected.lp_box_proofs[record.certificate_index],
+              *lp_verification_cache[record.certificate_index], candidate, snapshot_hash,
+              &reasons[index]);
+        } else {
+          reasons[index] = "证明方法不受支持";
+        }
+      } catch (const std::exception& error) {
+        reasons[index] = std::string("复核器异常: ") + error.what();
+      }
+      valid[index] = static_cast<std::uint8_t>(accepted);
+    }
+    for (std::size_t index = 0U; index < records.size(); ++index) {
+      if (valid[index] != 0U) {
+        continue;
+      }
+      const EliminationMethod method = records[index]->method;
+      const std::string prefix = method == EliminationMethod::kJv              ? "JV"
+                                 : method == EliminationMethod::kHamiltonTutte ? "HT"
+                                 : method == EliminationMethod::kGeometryMain  ? "GEOM_MAIN"
+                                                                               : "LP_BOX";
+      throw std::runtime_error(prefix + " 证明复核失败: " + reasons[index]);
     }
     std::vector<Candidate> committed =
         detail::CommitVerifiedCandidates(&working, std::move(candidates), snapshot_hash);
@@ -579,7 +776,7 @@ EliminationResult ReplayProof(GraphSnapshot* const graph, const EliminationResul
       const Candidate& candidate = committed[index];
       const ProofRecord& record = *records[index];
       if (candidate.edge_id != record.edge_id || candidate.witness != record.witness ||
-          candidate.method != record.method) {
+          candidate.method != record.method || candidate.second_witness != record.second_witness) {
         throw std::runtime_error("证明 record 未按确定性提交顺序排列");
       }
       const Edge& edge = working.edges[static_cast<std::size_t>(candidate.edge_id)];
@@ -590,9 +787,12 @@ EliminationResult ReplayProof(GraphSnapshot* const graph, const EliminationResul
         }
         certificate_index = static_cast<std::uint32_t>(replayed.ht_proofs.size());
         replayed.ht_proofs.push_back(expected.ht_proofs[record.certificate_index]);
+      } else if (candidate.method == EliminationMethod::kLpBox) {
+        certificate_index = record.certificate_index;
       }
       replayed.proof.push_back({epoch, snapshot_hash, candidate.edge_id, edge.u, edge.v,
-                                candidate.witness, candidate.method, certificate_index});
+                                candidate.witness, candidate.method, certificate_index,
+                                candidate.second_witness});
     }
     ++expected_epoch;
   }

@@ -440,7 +440,7 @@ void LpExampleCommand(const Arguments& arguments) {
 void PathTableCommand(const Arguments& arguments) {
   const std::uint32_t parsed_path_count = RequiredInteger<std::uint32_t>(arguments, "paths");
   if (parsed_path_count == 0 || parsed_path_count > cudaee::kMaxGpuPathCount) {
-    throw std::invalid_argument("path-table 的 --paths 必须位于 [1,5]");
+    throw std::invalid_argument("path-table 的 --paths 必须位于 [1,6]");
   }
   const auto path_count = parsed_path_count;
   const cudaee::PathCompatibilityTable table = cudaee::BuildPathCompatibilityTable(path_count);

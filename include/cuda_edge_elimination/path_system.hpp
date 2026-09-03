@@ -9,7 +9,7 @@
 namespace cudaee {
 
 constexpr std::uint32_t kMaxTestablePathCount = 7;
-constexpr std::uint32_t kMaxGpuPathCount = 5;
+constexpr std::uint32_t kMaxGpuPathCount = 6;
 constexpr std::uint32_t kMaxPathEndpoints = 2 * kMaxTestablePathCount;
 constexpr std::uint8_t kUnmatchedEndpoint = 0xffU;
 
@@ -76,7 +76,7 @@ struct PathCompatibilityBatchResult {
   bool cpu_verified{false};
 };
 
-// m<=5 可查 CUDA bitset 表；m=6,7 无条件转为 CPU 直接判定，绝不截断搜索空间。
+// m<=6 可查 CUDA bitset 表；m=7 无条件转为 CPU 直接判定，绝不截断搜索空间。
 [[nodiscard]] PathCompatibilityBatchResult
 EvaluatePathCompatibility(std::uint32_t path_count,
                           const std::vector<PathCompatibilityQuery>& queries,

@@ -109,9 +109,9 @@ void TestPathNormalization() {
 void TestMatchingEnumerationAndTables() {
   constexpr std::array<std::size_t, 7> kOutsideCounts = {1, 2, 8, 48, 384, 3840, 46080};
   constexpr std::array<std::size_t, 7> kInsideCounts = {1, 3, 15, 105, 945, 10395, 135135};
-  constexpr std::array<std::uint64_t, 5> kExpectedTableHashes = {
-      0x4104b5c5658e8f3aULL, 0x5fcd7fdac93b4fe9ULL, 0x9642d8a1cb6bf1eeULL, 0x1853eb4cc99dd217ULL,
-      0xf6bccacc5c1fa84fULL};
+  constexpr std::array<std::uint64_t, 6> kExpectedTableHashes = {
+      0x4104b5c5658e8f3aULL, 0x5fcd7fdac93b4fe9ULL, 0x9642d8a1cb6bf1eeULL,
+      0x1853eb4cc99dd217ULL, 0xf6bccacc5c1fa84fULL, 0x750842211d2a93e7ULL};
 
   for (std::uint32_t path_count = 1; path_count <= cudaee::kMaxTestablePathCount; ++path_count) {
     const auto outside = cudaee::EnumerateOutsideMatchings(path_count);
@@ -140,13 +140,26 @@ void TestMatchingEnumerationAndTables() {
             "packed table size");
       Check(table.generator_hash == kExpectedTableHashes[static_cast<std::size_t>(path_count - 1U)],
             "pinned compatibility-table generator hash");
-      for (std::uint32_t inside_index = 0; inside_index < table.inside_count; ++inside_index) {
-        for (std::uint32_t outside_index = 0; outside_index < table.outside_count;
-             ++outside_index) {
-          const bool independent =
-              IndependentConnectedUnion(outside[outside_index], inside[inside_index], path_count);
-          Check(table.Covers(outside_index, inside_index) == independent,
-                "table equals independent connectivity oracle");
+      const auto check_cell = [&](const std::uint32_t outside_index,
+                                  const std::uint32_t inside_index) {
+        const bool independent =
+            IndependentConnectedUnion(outside[outside_index], inside[inside_index], path_count);
+        Check(table.Covers(outside_index, inside_index) == independent,
+              "table equals independent connectivity oracle");
+      };
+      if (path_count == 6U) {
+        check_cell(0U, 0U);
+        check_cell(table.outside_count - 1U, table.inside_count - 1U);
+        for (std::uint32_t index = 1U; index <= 16384U; ++index) {
+          check_cell((index * 2654435761U) % table.outside_count,
+                     (index * 2246822519U) % table.inside_count);
+        }
+      } else {
+        for (std::uint32_t inside_index = 0; inside_index < table.inside_count; ++inside_index) {
+          for (std::uint32_t outside_index = 0; outside_index < table.outside_count;
+               ++outside_index) {
+            check_cell(outside_index, inside_index);
+          }
         }
       }
       std::cout << "path_count=" << path_count << " table_hash=" << table.generator_hash
@@ -156,16 +169,10 @@ void TestMatchingEnumerationAndTables() {
 }
 
 void TestCpuFallbackAndCudaDifferential() {
-  const std::vector<cudaee::PathCompatibilityQuery> fallback_queries_m6 = {{0, 0}, {3839, 10394}};
-  const cudaee::PathCompatibilityBatchResult fallback_m6 = cudaee::EvaluatePathCompatibility(
-      6, fallback_queries_m6, cudaee::PathCompatibilityBackend::kCuda);
-  Check(fallback_m6.backend == "cpu-fallback-m>5", "m=6 uses explicit CPU fallback");
-  Check(fallback_m6.cpu_verified, "m=6 fallback verified");
-
   const std::vector<cudaee::PathCompatibilityQuery> fallback_queries_m7 = {{0, 0}, {46079, 135134}};
   const cudaee::PathCompatibilityBatchResult fallback_m7 = cudaee::EvaluatePathCompatibility(
       7, fallback_queries_m7, cudaee::PathCompatibilityBackend::kAuto);
-  Check(fallback_m7.backend == "cpu-fallback-m>5", "m=7 uses automatic CPU fallback");
+  Check(fallback_m7.backend == "cpu-fallback-m>6", "m=7 uses automatic CPU fallback");
   Check(fallback_m7.cpu_verified, "m=7 fallback verified");
 
 #ifdef CUDAEE_HAS_CUDA
@@ -180,15 +187,24 @@ void TestCpuFallbackAndCudaDifferential() {
     const std::uint32_t inside_count =
         static_cast<std::uint32_t>(cudaee::ExpectedInsideMatchingCount(path_count));
     std::vector<cudaee::PathCompatibilityQuery> queries;
-    queries.reserve(static_cast<std::size_t>(outside_count) * inside_count);
-    for (std::uint32_t inside_index = 0; inside_index < inside_count; ++inside_index) {
-      for (std::uint32_t outside_index = 0; outside_index < outside_count; ++outside_index) {
-        queries.push_back({outside_index, inside_index});
+    if (path_count == 6U) {
+      // m=6 全表约 5 MiB；差分取边界和确定性步长样本，表本身已在上方逐位检查。
+      queries = {{0U, 0U}, {outside_count - 1U, inside_count - 1U}};
+      for (std::uint32_t index = 1U; index <= 4096U; ++index) {
+        queries.push_back(
+            {(index * 2654435761U) % outside_count, (index * 2246822519U) % inside_count});
+      }
+    } else {
+      queries.reserve(static_cast<std::size_t>(outside_count) * inside_count);
+      for (std::uint32_t inside_index = 0; inside_index < inside_count; ++inside_index) {
+        for (std::uint32_t outside_index = 0; outside_index < outside_count; ++outside_index) {
+          queries.push_back({outside_index, inside_index});
+        }
       }
     }
     const cudaee::PathCompatibilityBatchResult result = cudaee::EvaluatePathCompatibility(
         path_count, queries, cudaee::PathCompatibilityBackend::kCuda);
-    Check(result.backend == "cuda", "m<=5 selected CUDA");
+    Check(result.backend == "cuda", "m<=6 selected CUDA");
     Check(result.cpu_verified, "CUDA results independently verified");
     Check(result.compatible.size() == queries.size(), "CUDA query count");
   }

@@ -105,6 +105,21 @@ std::uint64_t ComputeGeneratorHash(const PathCompatibilityTable& table) {
   return hash;
 }
 
+bool IsAlternatingHamiltonianCycleUnchecked(const EndpointMatching& outside,
+                                            const EndpointMatching& inside,
+                                            const std::uint32_t path_count) {
+  const std::uint32_t endpoint_count = 2U * path_count;
+  std::array<bool, kMaxPathEndpoints> visited{};
+  std::uint32_t current = 0U;
+  std::uint32_t steps = 0U;
+  while (!visited[current]) {
+    visited[current] = true;
+    current = (steps % 2U == 0U) ? inside.mate[current] : outside.mate[current];
+    ++steps;
+  }
+  return steps == endpoint_count && current == 0U;
+}
+
 } // namespace
 
 NormalizedPathSystem NormalizePathSystem(const std::vector<Path>& paths,
@@ -436,7 +451,7 @@ bool PathCompatibilityTable::Covers(const std::uint32_t outside_index,
 PathCompatibilityTable BuildPathCompatibilityTable(const std::uint32_t path_count) {
   ValidatePathCount(path_count);
   if (path_count > kMaxGpuPathCount) {
-    throw std::invalid_argument("完整兼容表仅支持 m<=5；m=6,7 必须 CPU 直接判定");
+    throw std::invalid_argument("完整兼容表仅支持 m<=6；m=7 必须 CPU 直接判定");
   }
   const std::vector<EndpointMatching> outside = EnumerateOutsideMatchings(path_count);
   const std::vector<EndpointMatching> inside = EnumerateInsideMatchings(path_count);
@@ -452,9 +467,15 @@ PathCompatibilityTable BuildPathCompatibilityTable(const std::uint32_t path_coun
   table.words_per_inside = (table.outside_count + 63U) / 64U;
   table.coverage.assign(static_cast<std::size_t>(table.inside_count) * table.words_per_inside, 0);
 
-  for (std::uint32_t inside_index = 0; inside_index < table.inside_count; ++inside_index) {
+#ifdef CUDAEE_HAS_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+  for (std::int64_t signed_inside = 0;
+       signed_inside < static_cast<std::int64_t>(table.inside_count); ++signed_inside) {
+    const std::uint32_t inside_index = static_cast<std::uint32_t>(signed_inside);
     for (std::uint32_t outside_index = 0; outside_index < table.outside_count; ++outside_index) {
-      if (IsAlternatingHamiltonianCycle(outside[outside_index], inside[inside_index], path_count)) {
+      if (IsAlternatingHamiltonianCycleUnchecked(outside[outside_index], inside[inside_index],
+                                                 path_count)) {
         const std::size_t word_index =
             static_cast<std::size_t>(inside_index) * table.words_per_inside + outside_index / 64U;
         table.coverage[word_index] |= std::uint64_t{1} << (outside_index % 64U);
@@ -480,7 +501,7 @@ EvaluatePathCompatibility(const std::uint32_t path_count,
 
   PathCompatibilityBatchResult result;
   if (path_count > kMaxGpuPathCount) {
-    result.backend = backend == PathCompatibilityBackend::kCpu ? "cpu" : "cpu-fallback-m>5";
+    result.backend = backend == PathCompatibilityBackend::kCpu ? "cpu" : "cpu-fallback-m>6";
     result.compatible.reserve(queries.size());
     for (const PathCompatibilityQuery& query : queries) {
       result.compatible.push_back(static_cast<std::uint8_t>(IsAlternatingHamiltonianCycle(

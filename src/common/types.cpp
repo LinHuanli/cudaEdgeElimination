@@ -20,6 +20,10 @@ std::string ToString(const EliminationMethod method) {
     return "JV";
   case EliminationMethod::kHamiltonTutte:
     return "HT";
+  case EliminationMethod::kGeometryMain:
+    return "GEOM_MAIN";
+  case EliminationMethod::kLpBox:
+    return "LP_BOX";
   }
   throw std::logic_error("未知消元方法");
 }

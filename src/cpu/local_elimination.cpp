@@ -36,7 +36,8 @@ void AppendEliminationStage(EliminationResult* const combined, const Elimination
     throw std::logic_error("Local Elimination 子阶段未绑定前一阶段最终快照");
   }
   if (stage.proof.empty()) {
-    if (!stage.ht_proofs.empty() || stage.initial_hash != stage.final_hash) {
+    if (!stage.ht_proofs.empty() || !stage.lp_box_proofs.empty() ||
+        stage.initial_hash != stage.final_hash) {
       throw std::logic_error("Local Elimination 空子阶段含孤立 sidecar 或修改了图");
     }
     return;
@@ -46,6 +47,7 @@ void AppendEliminationStage(EliminationResult* const combined, const Elimination
       combined->proof.size() > kMaxCombinedProofRecords - stage.proof.size() ||
       stage.ht_proofs.size() > kMaxCombinedHtProofs ||
       combined->ht_proofs.size() > kMaxCombinedHtProofs - stage.ht_proofs.size() ||
+      !stage.lp_box_proofs.empty() ||
       combined->ht_proofs.size() >
           static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
     throw std::overflow_error("Local Elimination 聚合 proof 超过安全数量上限");
@@ -207,8 +209,8 @@ LocalEliminationResult RunLocalElimination(GraphSnapshot* const graph,
   const auto run_jv_fixed_point = [&]() -> bool {
     const std::size_t edges_before = working.ActiveEdgeCount();
     const auto begin = std::chrono::steady_clock::now();
-    const EliminationResult jv =
-        RunJvElimination(&working, options.jv_backend, options.max_jv_rounds);
+    const EliminationResult jv = RunJvElimination(&working, options.jv_backend,
+                                                  options.max_jv_rounds, options.jv_candidate_mode);
     const double elapsed_ms = ElapsedMilliseconds(begin);
     if (jv.epochs.empty()) {
       throw std::logic_error("Local Elimination 的 JV 子阶段未产生终止 metrics");

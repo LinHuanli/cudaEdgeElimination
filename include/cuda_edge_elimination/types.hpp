@@ -27,6 +27,10 @@ struct Edge {
 enum class EliminationMethod : std::uint8_t {
   kJv = 1,
   kHamiltonTutte = 2,
+  // Hougardy--Schroeder Main Edge Elimination 的几何见证。
+  kGeometryMain = 3,
+  // 量化 Lagrangian box bound 证明强制目标边后下界超过 incumbent。
+  kLpBox = 4,
 };
 
 constexpr std::uint32_t kNoEliminationCertificate = UINT32_MAX;
@@ -35,6 +39,8 @@ struct Candidate {
   std::int32_t edge_id{-1};
   std::int32_t witness{-1};
   EliminationMethod method{EliminationMethod::kJv};
+  // 几何 Main Edge 证明需要两个 strongly-potential 点；其他方法保持 -1。
+  std::int32_t second_witness{-1};
 };
 
 struct ProofRecord {
@@ -47,6 +53,8 @@ struct ProofRecord {
   EliminationMethod method{EliminationMethod::kJv};
   // HT 记录指向 EliminationResult::ht_proofs；JV 不携带嵌套证书。
   std::uint32_t certificate_index{kNoEliminationCertificate};
+  // V3 几何记录的第二个 potential 点；旧格式和其他方法保持 -1。
+  std::int32_t second_witness{-1};
 };
 
 [[nodiscard]] std::string ToString(DistanceType type);

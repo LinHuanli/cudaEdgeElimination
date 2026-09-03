@@ -10,7 +10,7 @@
 - epoch 快照、CPU 复核、最小度保护、确定性提交，以及兼容 JV V1 的自包含 HT V2 证明日志；
 - `lp-epoch-v1` CSR 模型、cuOpt C API 动态 sidecar、残差与精确定点下界，以及按稳定边/行身份投影且带覆盖率门禁的 PDLP warm start；
 - Concorde 受限 overlay、列—边映射、`CCbigguy` 对偶注入与完整图精确定价证书；
-- 路径系统规范化、`m<=5` CPU 生成/CUDA 查询兼容表与 `m=6,7` CPU 回退；
+- 路径系统规范化、`m<=6` CPU 生成/CUDA 查询兼容表与 `m=7` CPU 回退；
 - proper 3/4/5-opt CPU 叶 witness、inside coverage 与 `path-kopt-proof-v1` 重放；
 - 批量 CUDA k-opt 精确成本矩阵的逐 cell CPU 差分接口，以及 broker 专用的紧凑 candidate mask；严格改善 witness 仍由 CPU 完整重建；
 - 收缩 forced outside matching 的 CPU 精确 Held–Karp 子集 DP 困难叶回退；
@@ -51,8 +51,11 @@
 - 带锁定来源 SHA-256 和本地精确复核的 pcb3038/rl5915/d15112 最优 tour 获取工具；
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 - TSPLIB 完全图构造、`kh-jq` 锁定 profile、完整 target sweep，以及单 GPU CUDA-JV/作者 KH-HS 固定点端到端复现实验。
+- `fgpu-elim` 单命令链路：CUDA Main-Edge 几何筛选、MPFR 区间认证、native CUDA degree-subgradient、`__int128` LP-box 强制边证书、exhaustive CUDA JV、PDLP 排序的 HT wavefront，以及 `.edg/.fix/.nonpairs/.fgcert/.manifest` 五类输出；LP/JV 会跨不可变快照交错到固定点。
+- FGPU V4 证书把量化 vertex dual 与快照哈希绑定；在线提交和独立重放均重算完整 box-Lagrangian 下界。几何、LP 与 JV 同 epoch records 可并行复核，但提交次序、首错和最终哈希保持确定。
+- path matching coverage 已扩展到 `m=6`（3,840 outside、10,395 inside、4,989,600 bytes），固定生成器哈希为 `750842211d2a93e7`。
 
-尚未完成的研究项（跨 target SoA continuation ready queue、generation cancellation、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。V3 的跨目标 leaf broker 在 d15112 32-target 上保持 `19,498 states/18 proofs`，五对 clean A/B 的单 GPU target execution 相对 CPU 为 `1.009x`，algorithm total 为 `1.001x`，process wall 为 `0.997x`，因此端到端只能判定为持平，`transposed` 继续保持 opt-in。这些结果不是论文 Table 7 的同协议对比，详见 [V3 跨目标 Leaf Broker](docs/research/64_V3_单GPU跨目标LeafBroker.md)。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。CPU 精确困难叶有 18 blocks 上限，CUDA 候选器上限为 13；任何超限或错误只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；`lp-solve` 本身也永不删除边，只有 Concorde 桥接路径经过完整图精确定价后才产生下界授权。
+尚未完成的研究项（跨 target SoA continuation ready queue、generation cancellation、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。V3 的跨目标 leaf broker 在 d15112 32-target 上保持 `19,498 states/18 proofs`，五对 clean A/B 的单 GPU target execution 相对 CPU 为 `1.009x`，algorithm total 为 `1.001x`，process wall 为 `0.997x`，因此端到端只能判定为持平，`transposed` 继续保持 opt-in。这些结果不是论文 Table 7 的同协议对比，详见 [V3 跨目标 Leaf Broker](docs/research/64_V3_单GPU跨目标LeafBroker.md)。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。CPU 精确困难叶有 18 blocks 上限，CUDA 候选器上限为 13；任何超限或错误只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；旧 `cudaee lp-solve` 仍只输出数值结果。新的 `fgpu-elim --pdlp native` 只有在量化 multiplier 经完整 live-variable box bound 重算、强制目标边下界严格超过 incumbent，并写入 V4 sidecar 后，才可授权 LP 删除。
 
 ## 快速开始
 
@@ -102,6 +105,10 @@ tools/run_v3_transposed_single_gpu_ab.sh d15112 2 5
 
 # pcb442：完全图 -> 单 GPU JV -> 作者 KH-HS/JV 固定点（自动选择空闲 GPU）
 ./tools/run_complete_kh_jq_e2e.sh pcb442
+
+# 新 FGPU one-shot：参数 2 是物理 GPU ordinal；省略时自动选择本机空闲卡
+CUDAEE_FGPU_ENABLE_HT=0 tools/run_fgpu_oneshot.sh pcb442 2
+CUDAEE_FGPU_ENABLE_HT=0 tools/run_fgpu_oneshot.sh pr1002 2
 ```
 
 CLI：
