@@ -193,6 +193,7 @@ void WriteManifest(const std::filesystem::path& path, const FgpuInput& input,
   output << "nonpair_count " << report.nonpair_count << '\n';
   output << "termination " << report.termination << '\n';
   output << "certificate_records " << report.certificate.proof.size() << '\n';
+  output << "certificate_bytes " << report.certificate_bytes << '\n';
   output << "geometry_backend " << report.geometry.backend << '\n';
   output << "geometry_device " << report.geometry.selected_device << '\n';
   output << "geometry_kernel_ms " << report.geometry.kernel_ms << '\n';
@@ -475,6 +476,12 @@ FgpuRunReport RunFgpuElimination(const FgpuInput& input, const FgpuOutputPaths& 
   WriteFixedEdges(outputs.fixed, graph.dimension, fixed_edges);
   WriteEmptyNonpairs(outputs.nonpairs, graph.dimension);
   WriteProof(outputs.certificate, report.certificate);
+  std::error_code certificate_size_error;
+  report.certificate_bytes =
+      std::filesystem::file_size(outputs.certificate, certificate_size_error);
+  if (certificate_size_error) {
+    throw std::runtime_error("无法读取刚写出的 FGPU 证书大小");
+  }
   report.total_ms = ElapsedMilliseconds(total_begin);
   WriteManifest(outputs.manifest, input, config, report, final_tour_ptr);
   return report;
@@ -491,6 +498,12 @@ FgpuRunReport VerifyFgpuCertificate(const FgpuInput& input, const FgpuOutputPath
   report.initial_hash = initial.ContentHash();
   report.initial_edges = initial.ActiveEdgeCount();
   report.certificate = ReadProof(outputs.certificate);
+  std::error_code certificate_size_error;
+  report.certificate_bytes =
+      std::filesystem::file_size(outputs.certificate, certificate_size_error);
+  if (certificate_size_error) {
+    throw std::runtime_error("无法读取 FGPU 证书大小");
+  }
   const EliminationResult replayed = ReplayProof(&initial, report.certificate);
   if (replayed.final_hash != report.certificate.final_hash) {
     throw std::logic_error("FGPU verify 重放结果哈希不一致");

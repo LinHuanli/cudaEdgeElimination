@@ -456,6 +456,22 @@ set_tests_properties(integration.ht_epoch_verify PROPERTIES
   DEPENDS integration.ht_epoch_commit
   LABELS "integration;hamilton-tutte;epoch")
 
+if(ZLIB_FOUND AND Python3_Interpreter_FOUND)
+  add_test(
+    NAME negative.ht_epoch_zlib_tamper
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/differential/tamper_ht_zlib_certificate.py"
+      --exe "$<TARGET_FILE:cudaee>"
+      --tsp "${HT_RECURSIVE_TSP}"
+      --edges "${HT_RECURSIVE_EDGES}"
+      --proof "${HT_EPOCH_PROOF}"
+      --output "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.epoch.tampered.proof")
+  set_tests_properties(negative.ht_epoch_zlib_tamper PROPERTIES
+    DEPENDS integration.ht_epoch_commit
+    PASS_REGULAR_EXPRESSION "tampered compressed HT certificate rejected"
+    LABELS "negative;certificate;hamilton-tutte;epoch")
+endif()
+
 set(HT_SCAN_EDGES "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.scan.edg")
 set(HT_SCAN_PROOF "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.scan.proof")
 set(HT_SCAN_REPORT "${CMAKE_CURRENT_BINARY_DIR}/tmp/recursive-point.scan.report")

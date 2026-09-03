@@ -33,7 +33,7 @@
 | M4.3b3b2b2b2b2a GPU leaf 驻留缓存 | 完成（线程/设备本地） | 精确坐标/模板键；增长型 workspace；命中与字节指标 |
 | M4.3b3b2b2b2b2b1 CPU long-tail | 完成（128-cell 基线） | 缓存后交叉点；融合矩阵分流；CPU/CUDA proof 规范计数 |
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
-| M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V2 内嵌 sidecar；图副本原子提交；旧 V1 兼容 |
+| M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V5 zlib/CRC32 内嵌 sidecar；图副本原子提交；旧 V1–V4 兼容 |
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
 | M5 JV—HT 多 epoch 编排 | 完成（有界调度基线） | JV 固定点；无提交 sweep 推进；提交后重排；联合 V2 重放；pcb3038 CPU/CUDA/tour 门禁 |
 | M5 JV 活动 edge-id 紧凑启动 | 已评测并排除 | d15112 启动行 `-2.925%`，kernel `+1.272%`，算法总时间反而回退 `1.052%`；原型已撤销 |
@@ -47,7 +47,7 @@
 
 ## 当前基准结果
 
-FGPU one-shot 快速主链在单张 RTX 4000 Ada 上：pcb442 `97,461 -> 8,015`，wall 4.872 秒，89,446 条删除 record；pr1002 `501,501 -> 23,288`，wall 18.439 秒，478,213 条删除 record。两者均包含最终 proof replay，官方最优 tour 分别为 50,778/259,045 且零缺边。pcb442 相对作者单轮 `KH -Jq` 的 12,914 条/94.89 秒同时更稀疏、更快；相对旧固定点 4,016 条/99.68 秒则仍弱，不能报告等强度 `20.46x`。详见 [FGPU One-Shot 实现与首轮基准](66_FGPU_OneShot_实现与基准.md)。
+FGPU one-shot 快速主链在单张 RTX 4000 Ada 上：pcb442 `97,461 -> 8,015`，wall 4.872 秒，89,446 条删除 record；pr1002 `501,501 -> 23,288`，wall 18.439 秒，478,213 条删除 record。两者均包含最终 proof replay，官方最优 tour 分别为 50,778/259,045 且零缺边。pcb442 相对作者单轮 `KH -Jq` 的 12,914 条/94.89 秒同时更稀疏、更快；相对旧固定点 4,016 条/99.68 秒则仍弱，不能报告等强度 `20.46x`。pr1002 作者单轮为 21,651 条，FGPU 多 1,637 条；该作者运行与 HT 并发，只用于强度参考。详见 [FGPU One-Shot 实现与首轮基准](66_FGPU_OneShot_实现与基准.md)。
 
 pr299 输入 1208 条边；JV 两个 epoch 后保留 1122 条，提交 86 条删除。CPU 与 CUDA 的最终内容哈希均为 `b9b67e9981518177`。这些数字是正确性回归结果，不构成论文性能结论。
 
@@ -173,7 +173,7 @@ CPU long-tail：项目内稳态基准在 RTX 4000 Ada 上定位 3-opt 64/256、4
 
 Multi-block continuation：cooperative kernel 以 grid barrier 冻结并消费完成队列批次，只有 `queue_tail==state_count` 才正常终止；自动 block 数不超过 kernel 的实际 cooperative residency，显式越界闭门失败。固定 truth table 的 single/2-block 状态相同；512 个 child 跨两个 block 汇入同一 AND move 时，单失败和全成功真值均正确，513-state 自动模式选择 3 blocks。固定 recursive-point 显式 2 blocks 的 34-state 数组经 CPU 全量认证，V1 proof 与 single block 逐字节一致。
 
-HT epoch commit：`ht-commit` 可重复接收同一不可变快照上的 recursive HT sidecar，先逐份 CPU 重放，再按 `(u,v,serialized-proof)` 规范化重复目标，并在图副本上执行共用最小度门禁与 CSR 重建。实际含 HT 删除时写自包含 `CUDAEE_PROOF_V2`，outer record 唯一引用 inner HT V1；通用 `verify` 检查绑定、规范顺序、完整证明、最终哈希后才发布重放图。固定 recursive-point 的两份等价 sidecar 从 28 条边提交 1 条，哈希由 `d7bfbec67ffc9a66` 变为 `78ce8b9a9dc29473`；坏 sidecar 混入时整批零修改。JV-only 仍写原 V1。
+HT epoch commit：`ht-commit` 可重复接收同一不可变快照上的 recursive HT sidecar，先逐份 CPU 重放，再按 `(u,v,serialized-proof)` 规范化重复目标，并在图副本上执行共用最小度门禁与 CSR 重建。实际含 HT 删除时写 `CUDAEE_PROOF_V5`：outer record 唯一引用 inner HT V1，sidecar 逐份 zlib 压缩并绑定 raw size/CRC32；通用 `verify` 检查压缩上限、绑定、规范顺序、完整证明和最终哈希后才发布重放图。V1–V4 仍可读取；无 zlib 构建保持 V2–V4 原文路径。固定 recursive-point 的两份等价 sidecar 从 28 条边提交 1 条，哈希由 `d7bfbec67ffc9a66` 变为 `78ce8b9a9dc29473`；坏 sidecar 混入时整批零修改。JV-only 仍写原 V1。
 
 ## 安全边界
 

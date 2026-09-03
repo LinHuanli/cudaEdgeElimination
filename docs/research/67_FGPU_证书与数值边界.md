@@ -15,7 +15,7 @@ FGPU 当前采用两层模型：
 - 全部输出前从初始图再次重放完整证书链；
 - `aggressive-fp32` 也不能绕过 exact verifier。
 
-## 2. V4 外层证书
+## 2. V4/V5 外层证书
 
 当证书包含 LP 删除时，格式头为 `CUDAEE_PROOF_V4`。主要对象是：
 
@@ -27,6 +27,15 @@ lp_box_proof <index> <snapshot_hash> <fractional_bits> <incumbent_cost>
 lp_box_dual <dimension> <q_0> ... <q_(n-1)>
 end_lp_box_proof
 ```
+
+存在 HT sidecar 且构建启用 zlib 时自动写为 `CUDAEE_PROOF_V5`：
+
+```text
+ht_proof_zlib <index> <raw_size> <compressed_size> <crc32>
+<compressed binary payload>end_ht_proof_zlib
+```
+
+每份 sidecar 独立压缩，保留原始长度和 CRC32。读取器在分配和解压前同时检查单份、累计原文、累计压缩数据和整体文件上限，再做 CRC32 与数学 proof replay。V1–V4 仍可向后兼容读取；未启用 zlib 的构建继续写 V2–V4 原文并保留原 256 MiB 上限。
 
 方法与 payload：
 
@@ -98,6 +107,7 @@ CTest 已覆盖：
 - 把几何 potential point 改成目标边端点，必须报 `GEOM_MAIN` 复核失败；
 - 把一个 LP multiplier 改成极端但语法合法的 `int64`，重算下界后必须拒绝；
 - 从 `.fix` 删除一条记录并同步修改 header，必须因与证明图推导不一致而拒绝；
+- 翻转 V5 压缩 HT payload 中任意一位，必须在 zlib/CRC32 门禁中拒绝；
 - 文件级符号链接逃逸、输出重名与输出覆盖输入，必须在写文件前拒绝；
 - 已知最优 tour 的成本和每条活动边完整性；
 - CPU/CUDA path matching、k-opt、JV、HT 的差分；

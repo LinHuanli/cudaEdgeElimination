@@ -266,7 +266,8 @@ void RunCommand(const Arguments& arguments) {
             << " geometry_device=" << report.geometry.selected_device
             << " geometry_kernel_ms=" << std::fixed << std::setprecision(3)
             << report.geometry.kernel_ms << " geometry_verify_ms=" << report.geometry.verify_ms
-            << " total_ms=" << report.total_ms << '\n';
+            << " certificate_bytes=" << report.certificate_bytes << " total_ms=" << report.total_ms
+            << '\n';
 }
 
 void VerifyCommand(const Arguments& arguments) {
@@ -283,6 +284,7 @@ void VerifyCommand(const Arguments& arguments) {
             << " geometry=" << report.geometry_committed << " jv=" << report.jv_committed
             << " lp=" << report.lp_committed << " ht=" << report.ht_committed
             << " active_edges=" << report.final_edges
+            << " certificate_bytes=" << report.certificate_bytes
             << " final_hash=" << cudaee::HexHash(report.final_hash) << '\n';
 }
 

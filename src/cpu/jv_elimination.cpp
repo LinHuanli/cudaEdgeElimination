@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -26,6 +27,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef CUDAEE_HAVE_ZLIB
+#include <zlib.h>
+#endif
+
 namespace cudaee {
 namespace {
 
@@ -33,6 +38,8 @@ constexpr std::size_t kMaxCandidateNodes = 10;
 constexpr std::uintmax_t kMaxEliminationProofBytes = 512U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtProofBytes = 256U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtAggregateBytes = 256U * 1024U * 1024U;
+constexpr std::size_t kMaxEmbeddedHtRawAggregateBytes = std::size_t{2} * 1024U * 1024U * 1024U;
+constexpr std::size_t kMaxEmbeddedHtCompressedAggregateBytes = 384U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtProofs = 1000000U;
 constexpr std::size_t kMaxEmbeddedLpProofs = 1000000U;
 constexpr std::size_t kMaxEliminationRecords = 1000000U;
@@ -42,6 +49,101 @@ struct ScoredNode {
   std::int64_t score{};
   std::int32_t node{-1};
 };
+
+struct EncodedHtProof {
+  std::string payload;
+  std::size_t raw_size{};
+  std::uint32_t checksum{};
+};
+
+#ifdef CUDAEE_HAVE_ZLIB
+std::uint32_t Crc32(const std::string_view content) {
+  uLong checksum = crc32(0L, Z_NULL, 0U);
+  std::size_t offset = 0U;
+  while (offset < content.size()) {
+    const std::size_t remaining = content.size() - offset;
+    const uInt chunk =
+        static_cast<uInt>(std::min<std::size_t>(remaining, std::numeric_limits<uInt>::max()));
+    checksum = crc32(checksum, reinterpret_cast<const Bytef*>(content.data() + offset), chunk);
+    offset += chunk;
+  }
+  return static_cast<std::uint32_t>(checksum);
+}
+
+std::string CompressHtProof(const std::string_view raw) {
+  if (raw.empty() || raw.size() > static_cast<std::size_t>(std::numeric_limits<uLong>::max())) {
+    throw std::runtime_error("HT sidecar 无法交给 zlib 压缩");
+  }
+  uLongf compressed_size = compressBound(static_cast<uLong>(raw.size()));
+  std::string compressed(static_cast<std::size_t>(compressed_size), '\0');
+  const int status = compress2(reinterpret_cast<Bytef*>(compressed.data()), &compressed_size,
+                               reinterpret_cast<const Bytef*>(raw.data()),
+                               static_cast<uLong>(raw.size()), Z_BEST_SPEED);
+  if (status != Z_OK) {
+    throw std::runtime_error("zlib 压缩 HT sidecar 失败，状态=" + std::to_string(status));
+  }
+  compressed.resize(static_cast<std::size_t>(compressed_size));
+  return compressed;
+}
+
+std::string DecompressHtProof(const std::string_view compressed, const std::size_t raw_size) {
+  if (compressed.empty() || raw_size == 0U ||
+      compressed.size() > static_cast<std::size_t>(std::numeric_limits<uLong>::max()) ||
+      raw_size > static_cast<std::size_t>(std::numeric_limits<uLongf>::max())) {
+    throw std::runtime_error("压缩 HT sidecar 的长度无法交给 zlib");
+  }
+  uLongf actual_size = static_cast<uLongf>(raw_size);
+  std::string raw(raw_size, '\0');
+  const int status = uncompress(reinterpret_cast<Bytef*>(raw.data()), &actual_size,
+                                reinterpret_cast<const Bytef*>(compressed.data()),
+                                static_cast<uLong>(compressed.size()));
+  if (status != Z_OK || actual_size != raw_size) {
+    throw std::runtime_error("zlib 解压 HT sidecar 失败或长度不匹配，状态=" +
+                             std::to_string(status));
+  }
+  return raw;
+}
+#endif
+
+std::vector<EncodedHtProof> PrepareHtProofs(const std::vector<HtRecursiveProof>& proofs,
+                                            const bool compressed) {
+  std::vector<EncodedHtProof> result;
+  result.reserve(proofs.size());
+  std::size_t total_raw = 0U;
+  std::size_t total_payload = 0U;
+  for (const HtRecursiveProof& proof : proofs) {
+    const std::string raw = SerializeHtRecursiveProof(proof);
+    if (raw.empty() || raw.size() > kMaxEmbeddedHtProofBytes ||
+        total_raw > kMaxEmbeddedHtRawAggregateBytes - raw.size()) {
+      throw std::runtime_error("消元证明的 HT sidecar 原文超出有界解压上限");
+    }
+    EncodedHtProof encoded;
+    encoded.raw_size = raw.size();
+#ifdef CUDAEE_HAVE_ZLIB
+    if (compressed) {
+      encoded.checksum = Crc32(raw);
+      encoded.payload = CompressHtProof(raw);
+    } else
+#else
+    if (compressed) {
+      throw std::runtime_error("当前构建未启用 zlib，不能生成 V5 HT 证书");
+    } else
+#endif
+    {
+      encoded.payload = raw;
+    }
+    const std::size_t payload_limit =
+        compressed ? kMaxEmbeddedHtCompressedAggregateBytes : kMaxEmbeddedHtAggregateBytes;
+    if (encoded.payload.empty() || encoded.payload.size() > kMaxEmbeddedHtProofBytes ||
+        total_payload > payload_limit - encoded.payload.size()) {
+      throw std::runtime_error("消元证明的内嵌 HT sidecar 超出大小上限");
+    }
+    total_raw += raw.size();
+    total_payload += encoded.payload.size();
+    result.push_back(std::move(encoded));
+  }
+  return result;
+}
 
 bool LessScoredNode(const ScoredNode& lhs, const ScoredNode& rhs) {
   return std::tie(lhs.score, lhs.node) < std::tie(rhs.score, rhs.node);
@@ -370,7 +472,15 @@ EliminationResult RunJvElimination(GraphSnapshot* const graph, const Backend bac
 
 void WriteProof(const std::filesystem::path& path, const EliminationResult& result) {
   ValidateProofContainer(result);
-  const bool version4 = !result.lp_box_proofs.empty();
+  // V5 把大量重复的 HT 文本 sidecar 逐个 zlib 压缩，同时保留原始
+  // 长度和 CRC32。先完成全部编码与上限检查，避免失败时留下半个证书。
+#ifdef CUDAEE_HAVE_ZLIB
+  const bool version5 = !result.ht_proofs.empty();
+#else
+  const bool version5 = false;
+#endif
+  const std::vector<EncodedHtProof> encoded_ht = PrepareHtProofs(result.ht_proofs, version5);
+  const bool version4 = version5 || !result.lp_box_proofs.empty();
   const bool version3 =
       version4 ||
       std::any_of(result.proof.begin(), result.proof.end(), [](const ProofRecord& record) {
@@ -381,7 +491,8 @@ void WriteProof(const std::filesystem::path& path, const EliminationResult& resu
   if (!output) {
     throw std::runtime_error("无法创建证明文件: " + path.string());
   }
-  output << (version4   ? "CUDAEE_PROOF_V4\n"
+  output << (version5   ? "CUDAEE_PROOF_V5\n"
+             : version4 ? "CUDAEE_PROOF_V4\n"
              : version3 ? "CUDAEE_PROOF_V3\n"
                         : (version2 ? "CUDAEE_PROOF_V2\n" : "CUDAEE_PROOF_V1\n"));
   output << "backend " << result.backend << '\n';
@@ -404,18 +515,20 @@ void WriteProof(const std::filesystem::path& path, const EliminationResult& resu
            << metrics.propose_ms << ' ' << metrics.verify_ms << '\n';
   }
   if (version2) {
-    output << "ht_proof_count " << result.ht_proofs.size() << '\n';
-    std::size_t total_bytes = 0U;
-    for (std::size_t index = 0; index < result.ht_proofs.size(); ++index) {
-      const std::string serialized = SerializeHtRecursiveProof(result.ht_proofs[index]);
-      if (serialized.empty() || serialized.size() > kMaxEmbeddedHtProofBytes ||
-          total_bytes > kMaxEmbeddedHtAggregateBytes - serialized.size()) {
-        throw std::runtime_error("消元证明的内嵌 HT sidecar 超出大小上限");
+    output << "ht_proof_count " << encoded_ht.size() << '\n';
+    for (std::size_t index = 0; index < encoded_ht.size(); ++index) {
+      const EncodedHtProof& proof = encoded_ht[index];
+      if (version5) {
+        output << "ht_proof_zlib " << index << ' ' << proof.raw_size << ' ' << proof.payload.size()
+               << ' ' << std::hex << std::setw(8) << std::setfill('0') << proof.checksum << std::dec
+               << std::setfill(' ') << '\n';
+        output.write(proof.payload.data(), static_cast<std::streamsize>(proof.payload.size()));
+        output << "end_ht_proof_zlib\n";
+      } else {
+        output << "ht_proof " << index << ' ' << proof.payload.size() << '\n';
+        output.write(proof.payload.data(), static_cast<std::streamsize>(proof.payload.size()));
+        output << "end_ht_proof\n";
       }
-      total_bytes += serialized.size();
-      output << "ht_proof " << index << ' ' << serialized.size() << '\n';
-      output.write(serialized.data(), static_cast<std::streamsize>(serialized.size()));
-      output << "end_ht_proof\n";
     }
   }
   if (version4) {
@@ -450,7 +563,13 @@ EliminationResult ReadProof(const std::filesystem::path& path) {
   }
   std::string magic;
   std::getline(input, magic);
-  const bool version4 = magic == "CUDAEE_PROOF_V4";
+  const bool version5 = magic == "CUDAEE_PROOF_V5";
+#ifndef CUDAEE_HAVE_ZLIB
+  if (version5) {
+    throw std::runtime_error("当前构建未启用 zlib，无法读取 V5 HT 证书");
+  }
+#endif
+  const bool version4 = version5 || magic == "CUDAEE_PROOF_V4";
   const bool version3 = version4 || magic == "CUDAEE_PROOF_V3";
   const bool version2 = version3 || magic == "CUDAEE_PROOF_V2";
   if (!version2 && magic != "CUDAEE_PROOF_V1") {
@@ -468,6 +587,7 @@ EliminationResult ReadProof(const std::filesystem::path& path) {
   std::size_t declared_ht_proofs = 0U;
   std::size_t declared_lp_proofs = 0U;
   std::size_t embedded_bytes = 0U;
+  std::size_t embedded_raw_bytes = 0U;
   while (std::getline(input, line)) {
     std::istringstream fields(line);
     std::string kind;
@@ -551,7 +671,7 @@ EliminationResult ReadProof(const std::filesystem::path& path) {
     } else if (kind == "ht_proof") {
       std::string index_token;
       std::string size_token;
-      if (!version2 || !saw_ht_proof_count || !(fields >> index_token >> size_token)) {
+      if (!version2 || version5 || !saw_ht_proof_count || !(fields >> index_token >> size_token)) {
         throw std::runtime_error("证明 ht_proof 头无效");
       }
       RequireLineEnd(&fields, "ht_proof 头");
@@ -574,6 +694,55 @@ EliminationResult ReadProof(const std::filesystem::path& path) {
         throw std::runtime_error("证明内嵌 HT sidecar 缺少结束标记");
       }
       result.ht_proofs.push_back(ParseHtRecursiveProof(serialized));
+    } else if (kind == "ht_proof_zlib") {
+      std::string index_token;
+      std::string raw_size_token;
+      std::string compressed_size_token;
+      std::string checksum_token;
+      if (!version5 || !saw_ht_proof_count ||
+          !(fields >> index_token >> raw_size_token >> compressed_size_token >> checksum_token)) {
+        throw std::runtime_error("证明 ht_proof_zlib 头无效");
+      }
+      RequireLineEnd(&fields, "ht_proof_zlib 头");
+      const std::size_t index =
+          ParseIntegerToken<std::size_t>(index_token, 10, " ht_proof_zlib index");
+      const std::size_t raw_size =
+          ParseIntegerToken<std::size_t>(raw_size_token, 10, " ht_proof_zlib raw_size");
+      const std::size_t compressed_size = ParseIntegerToken<std::size_t>(
+          compressed_size_token, 10, " ht_proof_zlib compressed_size");
+      if (checksum_token.size() != 8U) {
+        throw std::runtime_error("证明 ht_proof_zlib checksum 必须是 8 位十六进制数");
+      }
+      const std::uint32_t expected_checksum =
+          ParseIntegerToken<std::uint32_t>(checksum_token, 16, " ht_proof_zlib checksum");
+      if (index != result.ht_proofs.size() || index >= declared_ht_proofs || raw_size == 0U ||
+          raw_size > kMaxEmbeddedHtProofBytes || compressed_size == 0U ||
+          compressed_size > kMaxEmbeddedHtProofBytes ||
+          embedded_raw_bytes > kMaxEmbeddedHtRawAggregateBytes - raw_size ||
+          embedded_bytes > kMaxEmbeddedHtCompressedAggregateBytes - compressed_size) {
+        throw std::runtime_error("证明 ht_proof_zlib 索引或大小非法");
+      }
+      embedded_raw_bytes += raw_size;
+      embedded_bytes += compressed_size;
+      std::string compressed(compressed_size, '\0');
+      input.read(compressed.data(), static_cast<std::streamsize>(compressed_size));
+      if (static_cast<std::size_t>(input.gcount()) != compressed_size) {
+        throw std::runtime_error("证明内嵌压缩 HT sidecar 被截断");
+      }
+      std::string end_marker;
+      if (!std::getline(input, end_marker) || end_marker != "end_ht_proof_zlib") {
+        throw std::runtime_error("证明内嵌压缩 HT sidecar 缺少结束标记");
+      }
+#ifdef CUDAEE_HAVE_ZLIB
+      const std::string serialized = DecompressHtProof(compressed, raw_size);
+      if (Crc32(serialized) != expected_checksum) {
+        throw std::runtime_error("证明内嵌压缩 HT sidecar 的 CRC32 校验失败");
+      }
+      result.ht_proofs.push_back(ParseHtRecursiveProof(serialized));
+#else
+      static_cast<void>(expected_checksum);
+      throw std::runtime_error("当前构建未启用 zlib，无法解压 HT sidecar");
+#endif
     } else if (kind == "lp_box_proof_count") {
       std::string count;
       if (!version4 || saw_lp_proof_count || !(fields >> count)) {

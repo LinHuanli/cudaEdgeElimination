@@ -162,6 +162,7 @@ struct FgpuRunReport {
   std::size_t nonpair_count{};
   std::uint32_t pdlp_epochs{};
   double pdlp_total_solve_ms{};
+  std::uintmax_t certificate_bytes{};
   std::string termination;
   double total_ms{};
   GeometryMetrics geometry;

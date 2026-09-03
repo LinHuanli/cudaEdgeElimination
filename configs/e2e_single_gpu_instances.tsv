@@ -1,4 +1,4 @@
 # CUDAEE_E2E_SINGLE_GPU_INSTANCES_V1
 # instance<TAB>dimension<TAB>TSPLIB（只读）<TAB>SHA-256<TAB>最优 tour（只读）<TAB>SHA-256<TAB>最优值<TAB>完全图边数<TAB>KH -Jq 参考剩余边
 pcb442	442	../references/tensoraco/TSPLIB/pcb442.tsp.gz	419f17c72e1ed65fea564864d7e46cd7dcd7748d3634b7ce8ffc97cb9c6b7ee2	../references/tensoraco/TSPLIB/pcb442.opt.tour.gz	e668784eb52dc351be335b71629031e59da7648e9ac90bfb6b122dd68d3ce08c	50778	97461	12970
-pr1002	1002	../references/tensoraco/TSPLIB/pr1002.tsp.gz	8fbbbaea25681f45c3963bfd76136ca21370b346a9c69296dac5259a6839f128	../references/tensoraco/TSPLIB/pr1002.opt.tour.gz	72451efe160727d7e6884de218a412aba98a8b4b9e051929d62e0193efcf3ec1	259045	501501	TBD
+pr1002	1002	../references/tensoraco/TSPLIB/pr1002.tsp.gz	8fbbbaea25681f45c3963bfd76136ca21370b346a9c69296dac5259a6839f128	../references/tensoraco/TSPLIB/pr1002.opt.tour.gz	72451efe160727d7e6884de218a412aba98a8b4b9e051929d62e0193efcf3ec1	259045	501501	21651
