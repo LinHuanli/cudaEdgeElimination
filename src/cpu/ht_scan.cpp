@@ -482,8 +482,11 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     }
     std::exception_ptr worker_launch_failure;
     std::vector<std::exception_ptr> worker_setup_failures(worker_count);
-    // target 难度相差很大；动态领取可避免静态 stride 在批尾只剩少数
-    // worker 处理困难边。结果仍按 relative 索引回填，提交顺序完全不变。
+    // target 难度相差很大；CPU worker 或多 worker 共享一张 GPU 时动态领取，
+    // 可避免静态 stride 在批尾只剩少数 worker 处理困难边。多张不同 GPU
+    // 仍使用确定性静态分片，避免 target/device 对应随主机调度漂移。
+    // 两种路径的结果都按 relative 索引回填，提交顺序完全不变。
+    const bool static_device_partition = options.target_devices.size() > 1U;
     std::atomic<std::size_t> next_relative{0U};
     try {
       for (std::size_t worker = 0U; worker < worker_count; ++worker) {
@@ -506,8 +509,10 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
             worker_setup_failures[worker] = std::current_exception();
             return;
           }
+          std::size_t relative = static_device_partition
+                                     ? worker
+                                     : next_relative.fetch_add(1U, std::memory_order_relaxed);
           while (true) {
-            const std::size_t relative = next_relative.fetch_add(1U, std::memory_order_relaxed);
             if (relative >= evaluations.size()) {
               break;
             }
@@ -523,6 +528,9 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
               // 同一 worker 后续 target 不再运行；整批仍等待其他只读 worker 安全结束。
               return;
             }
+            relative = static_device_partition
+                           ? relative + worker_count
+                           : next_relative.fetch_add(1U, std::memory_order_relaxed);
           }
         });
       }
@@ -550,7 +558,7 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     }
     for (std::unique_ptr<HtTargetEvaluation>& evaluation : evaluations) {
       if (evaluation == nullptr) {
-        throw std::logic_error("HT target worker 未返回完整的静态切片结果");
+        throw std::logic_error("HT target worker 未返回完整的目标结果");
       }
       ConsumeHtTargetEvaluation(std::move(*evaluation), &scan, &proven);
       evaluation.reset();
