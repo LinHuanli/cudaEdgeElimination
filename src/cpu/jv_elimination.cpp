@@ -38,7 +38,9 @@ constexpr std::size_t kMaxCandidateNodes = 10;
 constexpr std::uintmax_t kMaxEliminationProofBytes = 512U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtProofBytes = 256U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtAggregateBytes = 256U * 1024U * 1024U;
-constexpr std::size_t kMaxEmbeddedHtRawAggregateBytes = std::size_t{2} * 1024U * 1024U * 1024U;
+// pcb442 的完整深扫已实测超过 2 GiB 原文；V5 逐份流式压缩/解压，
+// 因此提高累计原文预算而不放宽单份、压缩 payload 或文件上限。
+constexpr std::size_t kMaxEmbeddedHtRawAggregateBytes = std::size_t{8} * 1024U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtCompressedAggregateBytes = 384U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtProofs = 1000000U;
 constexpr std::size_t kMaxEmbeddedLpProofs = 1000000U;

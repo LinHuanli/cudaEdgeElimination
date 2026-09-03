@@ -35,7 +35,7 @@ ht_proof_zlib <index> <raw_size> <compressed_size> <crc32>
 <compressed binary payload>end_ht_proof_zlib
 ```
 
-每份 sidecar 独立压缩，保留原始长度和 CRC32。读取器在分配和解压前同时检查单份、累计原文、累计压缩数据和整体文件上限，再做 CRC32 与数学 proof replay。V1–V4 仍可向后兼容读取；未启用 zlib 的构建继续写 V2–V4 原文并保留原 256 MiB 上限。
+每份 sidecar 独立压缩，保留原始长度和 CRC32。读取器在分配和解压前同时检查单份 256 MiB、累计原文 8 GiB、累计压缩 payload 384 MiB 和整体文件 512 MiB 上限，再做 CRC32 与数学 proof replay。2 GiB 累计原文门禁已被 pcb442 深扫真实触发，因而只提高逐份处理的累计原文预算；单份、压缩数据和磁盘文件上限不放宽。V1–V4 仍可向后兼容读取；未启用 zlib 的构建继续写 V2–V4 原文并保留原 256 MiB 上限。
 
 证书中的 epoch `propose_ms/verify_ms` 历史槽统一编码为 0；真实性无关的 wall-clock 只写 report/manifest。这样动态调度或硬件差异不会改变相同数学证明的证书字节。
 
