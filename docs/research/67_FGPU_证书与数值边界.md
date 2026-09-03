@@ -35,7 +35,7 @@ ht_proof_zlib <index> <raw_size> <compressed_size> <crc32>
 <compressed binary payload>end_ht_proof_zlib
 ```
 
-每份 sidecar 独立压缩，保留原始长度和 CRC32。读取器在分配和解压前同时检查单份 256 MiB、累计原文 8 GiB、累计压缩 payload 768 MiB 和整体文件 1 GiB 上限，再做 CRC32 与数学 proof replay。2 GiB 累计原文门禁和 384 MiB 压缩 payload 门禁已分别被 pcb442 的分段深扫与完整 one-shot 真实触发；调整后仍保留四个独立硬边界，不接受无界输入。V1–V4 仍可向后兼容读取；未启用 zlib 的构建继续写 V2–V4 原文并保留原 256 MiB 上限。
+每份 sidecar 独立压缩，保留原始长度和 CRC32。读取器在分配和解压前同时检查单份 256 MiB、累计原文 8 GiB、累计压缩 payload 448 MiB 和整体文件 512 MiB 上限，再做 CRC32 与数学 proof replay。2 GiB 累计原文门禁和 384 MiB 压缩 payload 门禁已分别被 pcb442 的分段深扫与完整 one-shot 真实触发；one-shot 实测为 414,979,169 bytes payload 和 421,564,264 bytes 文件，因此调整后仍保留四个接近真实规模的独立硬边界，不接受无界输入。V1–V4 仍可向后兼容读取；未启用 zlib 的构建继续写 V2–V4 原文并保留原 256 MiB 上限。
 
 证书中的 epoch `propose_ms/verify_ms` 历史槽统一编码为 0；真实性无关的 wall-clock 只写 report/manifest。这样动态调度或硬件差异不会改变相同数学证明的证书字节。
 
@@ -91,7 +91,7 @@ PDLP/subgradient 的 double multiplier 本身不是证明。它先量化为公�
   -> 原子替换工作图
 ```
 
-并行只改变纯只读谓词的执行时序，不改变 proof 顺序、提交边集或最终哈希。
+并行只改变纯只读谓词的执行时序，不改变 proof 顺序、提交边集或最终哈希。含 HT 的 epoch 由于 sidecar 树规模相差可达数个数量级，每个 record 单独动态领取；几何、LP 和 JV 的廉价 record 仍按 64 条 chunk 领取，避免无必要的 OpenMP 调度开销。
 
 ## 5. 输出绑定
 

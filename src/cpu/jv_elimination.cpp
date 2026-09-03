@@ -35,15 +35,14 @@ namespace cudaee {
 namespace {
 
 constexpr std::size_t kMaxCandidateNodes = 10;
-constexpr std::uintmax_t kMaxEliminationProofBytes =
-    std::uintmax_t{1024} * 1024U * 1024U;
+constexpr std::uintmax_t kMaxEliminationProofBytes = std::uintmax_t{512} * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtProofBytes = 256U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtAggregateBytes = 256U * 1024U * 1024U;
 // pcb442 的完整深扫已实测超过 2 GiB 原文；从完全图开始的单份
 // one-shot 证书又实测超过 384 MiB 压缩 payload。V5 仍对原文、
 // 压缩数据、单份 sidecar 和最终文件分别设置硬上限，不接受无界输入。
 constexpr std::size_t kMaxEmbeddedHtRawAggregateBytes = std::size_t{8} * 1024U * 1024U * 1024U;
-constexpr std::size_t kMaxEmbeddedHtCompressedAggregateBytes = 768U * 1024U * 1024U;
+constexpr std::size_t kMaxEmbeddedHtCompressedAggregateBytes = 448U * 1024U * 1024U;
 constexpr std::size_t kMaxEmbeddedHtProofs = 1000000U;
 constexpr std::size_t kMaxEmbeddedLpProofs = 1000000U;
 constexpr std::size_t kMaxEliminationRecords = 1000000U;
@@ -145,8 +144,8 @@ std::vector<EncodedHtProof> PrepareHtProofs(const std::vector<HtRecursiveProof>&
     }
     if (total_payload > payload_limit - encoded.payload.size()) {
       throw std::runtime_error("消元证明的内嵌 HT sidecar 累计 payload 超出大小上限: " +
-                               std::to_string(total_payload + encoded.payload.size()) +
-                               " > " + std::to_string(payload_limit));
+                               std::to_string(total_payload + encoded.payload.size()) + " > " +
+                               std::to_string(payload_limit));
     }
     total_raw += raw.size();
     total_payload += encoded.payload.size();
@@ -908,7 +907,15 @@ EliminationResult ReplayProof(GraphSnapshot* const graph, const EliminationResul
     std::vector<std::uint8_t> valid(records.size(), 0U);
     std::vector<std::string> reasons(records.size());
 #ifdef CUDAEE_HAS_OPENMP
-#pragma omp parallel for schedule(dynamic, 64)
+    // HT sidecar 的树规模可相差数个数量级；64 个 record 的粗粒度 chunk
+    // 在 pcb442 one-shot 重放中会留下明显的单线程长尾。HT epoch 改为逐份
+    // 动态领取；几何/LP/JV 的廉价 record 仍保留 64 条批量以减少调度开销。
+    const bool needs_ht =
+        std::any_of(records.begin(), records.end(), [](const ProofRecord* const record) {
+          return record->method == EliminationMethod::kHamiltonTutte;
+        });
+    const int verification_chunk_size = needs_ht ? 1 : 64;
+#pragma omp parallel for schedule(dynamic, verification_chunk_size)
 #endif
     for (std::int64_t record_index = 0; record_index < static_cast<std::int64_t>(records.size());
          ++record_index) {
