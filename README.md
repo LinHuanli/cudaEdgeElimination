@@ -52,10 +52,10 @@
 - CPU 单元测试、CUDA 差分测试入口和 pr299 集成脚本。
 - TSPLIB 完全图构造、`kh-jq` 锁定 profile、完整 target sweep，以及单 GPU CUDA-JV/作者 KH-HS 固定点端到端复现实验。
 - `fgpu-elim` 单命令链路：CUDA Main-Edge 几何筛选、MPFR 区间认证、native CUDA degree-subgradient、`__int128` LP-box 强制边证书、exhaustive CUDA JV、PDLP 排序的 HT wavefront，以及 `.edg/.fix/.nonpairs/.fgcert/.manifest` 五类输出；LP/JV 会跨不可变快照交错到固定点。
-- FGPU V4 证书把量化 vertex dual 与快照哈希绑定；在线提交和独立重放均重算完整 box-Lagrangian 下界。几何、LP 与 JV 同 epoch records 可并行复核，但提交次序、首错和最终哈希保持确定。
+- FGPU V4 证书把量化 vertex dual 与快照哈希绑定；V5 对 HT sidecar 做有界 zlib 压缩并绑定原长/CRC32。在线提交和独立重放均重算完整数学条件。几何、LP 与 JV 同 epoch records 可并行复核，但提交次序、首错和最终哈希保持确定。
 - path matching coverage 已扩展到 `m=6`（3,840 outside、10,395 inside、4,989,600 bytes），固定生成器哈希为 `750842211d2a93e7`。
 
-尚未完成的研究项（跨 target SoA continuation ready queue、generation cancellation、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。V3 的跨目标 leaf broker 在 d15112 32-target 上保持 `19,498 states/18 proofs`，五对 clean A/B 的单 GPU target execution 相对 CPU 为 `1.009x`，algorithm total 为 `1.001x`，process wall 为 `0.997x`，因此端到端只能判定为持平，`transposed` 继续保持 opt-in。这些结果不是论文 Table 7 的同协议对比，详见 [V3 跨目标 Leaf Broker](docs/research/64_V3_单GPU跨目标LeafBroker.md)。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。CPU 精确困难叶有 18 blocks 上限，CUDA 候选器上限为 13；任何超限或错误只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；旧 `cudaee lp-solve` 仍只输出数值结果。新的 `fgpu-elim --pdlp native` 只有在量化 multiplier 经完整 live-variable box bound 重算、强制目标边下界严格超过 incumbent，并写入 V4 sidecar 后，才可授权 LP 删除。
+尚未完成的研究项（跨 target SoA continuation ready queue、generation cancellation、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。V3 的跨目标 leaf broker 在 d15112 32-target 上保持 `19,498 states/18 proofs`，五对 clean A/B 的单 GPU target execution 相对 CPU 为 `1.009x`，algorithm total 为 `1.001x`，process wall 为 `0.997x`，因此端到端只能判定为持平，`transposed` 继续保持 opt-in。这些结果不是论文 Table 7 的同协议对比，详见 [V3 跨目标 Leaf Broker](docs/research/64_V3_单GPU跨目标LeafBroker.md)。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。CPU 精确困难叶有 18 blocks 上限，CUDA 候选器上限为 13；任何超限或错误只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；旧 `cudaee lp-solve` 仍只输出数值结果。新的 `fgpu-elim --pdlp native` 只有在量化 multiplier 经完整 live-variable box bound 重算、强制目标边下界严格超过 incumbent，并写入 V4/V5 sidecar 后，才可授权 LP 删除。`run_fgpu_oneshot.sh` 默认拒绝 `*-limit/*-partial` 终止；只有显式 `CUDAEE_FGPU_ALLOW_PARTIAL=1` 才保留部分搜索作为调试产物。
 
 ## 快速开始
 

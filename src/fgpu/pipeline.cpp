@@ -163,12 +163,36 @@ void WriteManifest(const std::filesystem::path& path, const FgpuInput& input,
   if (!output) {
     throw std::runtime_error("无法创建 FGPU manifest: " + path.string());
   }
-  output << "FGPU_ELIM_MANIFEST_V1\n";
+  // V2 在 V1 的运行结果字段前补齐输入角色和全部搜索预算，避免只凭
+  // 产物无法恢复同一次 one-shot 配置；当前 manifest 没有反向读取路径。
+  output << "FGPU_ELIM_MANIFEST_V2\n";
   output << "instance " << input.instance.string() << '\n';
+  output << "input_edges " << (input.input_edges.empty() ? "-" : input.input_edges.string())
+         << '\n';
+  output << "tour " << (input.tour.empty() ? "-" : input.tour.string()) << '\n';
+  output << "tour_role "
+         << (input.tour.empty() ? "none"
+                                : (input.tour_is_known_optimum ? "known-optimum" : "incumbent"))
+         << '\n';
+  output << "expected_tour_cost " << input.expected_tour_cost << '\n';
   output << "device " << config.device << '\n';
   output << "numeric " << ToString(config.numeric_mode) << '\n';
   output << "verification " << ToString(config.verification_mode) << '\n';
+  output << "enable_geometry " << (config.enable_geometry ? 1 : 0) << '\n';
+  output << "enable_jv " << (config.enable_jv ? 1 : 0) << '\n';
+  output << "enable_ht " << (config.enable_hamilton_tutte ? 1 : 0) << '\n';
+  output << "potential_candidates " << config.potential_candidates << '\n';
+  output << "geometry_witnesses_per_edge " << config.geometry_witnesses_per_edge << '\n';
+  output << "max_jv_rounds " << config.max_jv_rounds << '\n';
+  output << "max_ht_epochs " << config.max_ht_epochs << '\n';
+  output << "ht_targets_per_epoch " << config.ht_targets_per_epoch << '\n';
+  output << "ht_target_workers " << config.ht_target_workers << '\n';
+  output << "max_paths " << config.max_paths << '\n';
+  output << "max_local_nodes " << config.max_local_nodes << '\n';
   output << "pdlp " << ToString(config.pdlp_backend) << '\n';
+  output << "pdlp_iterations_budget " << config.pdlp_iterations << '\n';
+  output << "max_pdlp_epochs " << config.max_pdlp_epochs << '\n';
+  output << "cuopt_library " << (config.cuopt_library.empty() ? "-" : config.cuopt_library) << '\n';
   output << "pdlp_backend " << report.pdlp.backend << '\n';
   output << "pdlp_device " << report.pdlp.selected_device << '\n';
   output << "pdlp_iterations " << report.pdlp.iterations << '\n';
@@ -176,7 +200,6 @@ void WriteManifest(const std::filesystem::path& path, const FgpuInput& input,
   output << "pdlp_epochs " << report.pdlp_epochs << '\n';
   output << "pdlp_total_solve_ms " << report.pdlp_total_solve_ms << '\n';
   output << "pdlp_cpu_certified " << (report.pdlp.cpu_certified ? 1 : 0) << '\n';
-  output << "ht_target_workers " << config.ht_target_workers << '\n';
   if (report.pdlp.exact_bound.certified) {
     output << "pdlp_bound_numerator " << report.pdlp.exact_bound.numerator << '\n';
     output << "pdlp_bound_denominator " << report.pdlp.exact_bound.denominator << '\n';
@@ -472,9 +495,8 @@ FgpuRunReport RunFgpuElimination(const FgpuInput& input, const FgpuOutputPaths& 
     throw std::runtime_error("FGPU 最终 CPU 证书重放与设备主链结果不一致");
   }
 
-  graph.WriteActiveEdges(outputs.edges);
-  WriteFixedEdges(outputs.fixed, graph.dimension, fixed_edges);
-  WriteEmptyNonpairs(outputs.nonpairs, graph.dimension);
+  // 证书是五个输出中唯一可能进行大规模预编码的对象；先完成它，
+  // 避免 sidecar 上限/压缩失败时留下一组看似正式的新 `.edg/.fix/.np`。
   WriteProof(outputs.certificate, report.certificate);
   std::error_code certificate_size_error;
   report.certificate_bytes =
@@ -482,6 +504,9 @@ FgpuRunReport RunFgpuElimination(const FgpuInput& input, const FgpuOutputPaths& 
   if (certificate_size_error) {
     throw std::runtime_error("无法读取刚写出的 FGPU 证书大小");
   }
+  graph.WriteActiveEdges(outputs.edges);
+  WriteFixedEdges(outputs.fixed, graph.dimension, fixed_edges);
+  WriteEmptyNonpairs(outputs.nonpairs, graph.dimension);
   report.total_ms = ElapsedMilliseconds(total_begin);
   WriteManifest(outputs.manifest, input, config, report, final_tour_ptr);
   return report;

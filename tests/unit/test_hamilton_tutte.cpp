@@ -6,7 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <random>
 #include <stdexcept>
@@ -1409,6 +1411,21 @@ void TestRecursivePointProof() {
   const std::filesystem::path epoch_path =
       std::filesystem::path(CUDAEE_HT_TEST_TMP_DIR) / "recursive-point.epoch-proof";
   cudaee::WriteProof(epoch_path, epoch_result);
+  cudaee::EliminationResult retimed_epoch = epoch_result;
+  retimed_epoch.epochs.front().propose_ms += 123.0;
+  retimed_epoch.epochs.front().verify_ms += 456.0;
+  const std::filesystem::path retimed_epoch_path =
+      std::filesystem::path(CUDAEE_HT_TEST_TMP_DIR) / "recursive-point.retimed-epoch-proof";
+  cudaee::WriteProof(retimed_epoch_path, retimed_epoch);
+  const auto read_binary = [](const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+      throw std::runtime_error("test failure: cannot read proof bytes");
+    }
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+  };
+  Check(read_binary(epoch_path) == read_binary(retimed_epoch_path),
+        "portable proof bytes exclude nondeterministic epoch timings");
   const cudaee::EliminationResult loaded_epoch = cudaee::ReadProof(epoch_path);
   Check(loaded_epoch.proof.size() == 1U && loaded_epoch.ht_proofs.size() == 1U &&
             cudaee::SerializeHtRecursiveProof(loaded_epoch.ht_proofs.front()) == serialized,

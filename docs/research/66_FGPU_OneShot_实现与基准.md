@@ -104,6 +104,8 @@ CUDAEE_FGPU_ENABLE_HT=0 tools/run_fgpu_oneshot.sh pr1002 2
 
 pr1002 同环境作者 `KH -Jq` 从 501,501 条删到 21,651 条，最优 tour 缺边为 0；FGPU 快速主链为 23,288 条，比作者多 1,637 条（约 7.56%）。作者程序报告的 `Time=16432.86 s` 是 OpenMP 各线程累计 user CPU time，不是 wall；该次 wall 又受并发 HT 实验干扰，因此只用于确定强度，不计入正式 speedup。
 
+pcb442 的深 HT 试验从 8,015 条快速主链输出继续，16 个 HT epoch 内提交 973 条 HT 删除和 90 条随后 JV 删除，到 6,952 条；wall 708.64 秒，峰值 RSS 1,630,348 KiB。V5 证书为 33,961,540 bytes，独立重放 39.43 秒，最优 tour 仍是零缺边。该运行明确以 `ht-epoch-limit` 结束，因此 6,952 只是安全部分结果，不是固定点；且已经足以否定“直接开启当前深 HT 会保留 20x 端到端加速”这个假设。
+
 ### 5.1 外部 HS 诊断（不属于 FGPU 主方法）
 
 为判断快速主链后的剩余边是否仍有大量可删结构，对其输出额外运行一轮作者 CPU `KH -q`，再运行 exhaustive CUDA JV：
@@ -121,7 +123,9 @@ pr1002 同环境作者 `KH -Jq` 从 501,501 条删到 21,651 条，最优 tour �
 2. proof replay 原先串行验证同 epoch records。现在共享数据串行构造一次，数学谓词并行执行，仍按规范次序报告首错和提交。pr1002 的 478,213-record verifier 约为 8.25 秒。
 3. native LP 的 persistent CSR kernel 只在 `n<=64` 自动采用。pcb442 实测 cooperative barrier 比普通 edge-atomic 路径慢，因此大图使用测得更快的实现。
 4. HT 从 weight-desc 改成 PDLP reduced-score 排序；pcb442 的 64-target 试验提交 23 HT + 2 JV，wall 8.35 秒。共享单 GPU 的 4 workers 把相同工作降至 5.53 秒。
-5. 完整 HT 扫描首次在写出阶段超过 256 MiB 原文 sidecar 上限并失败关闭。V5 现在逐 sidecar 做有界 zlib 压缩，记录 raw/compressed size 和 CRC32，全部预编码通过后才打开输出文件。失败半成品的 256 MiB 原文用 gzip level 1 只有 17,942,822 bytes，说明膨胀主要来自文本表示。
+5. 完整 HT 扫描首次在写出阶段超过 256 MiB 原文 sidecar 上限并失败关闭。V5 现在逐 sidecar 做有界 zlib 压缩，记录 raw/compressed size 和 CRC32，全部预编码通过后才打开输出文件。pcb442 的 973 份 sidecar 原文合计 505,332,235 bytes，压缩 payload 为 33,848,952 bytes（`14.929x`），最终整个证书为 33,961,540 bytes。
+6. target workers 从静态 stride 改为原子动态领取，但结果仍按规范 target 索引回填。pcb442 512-target、4-worker clean A/B 均提交 228 HT + 15 JV，最终边集 SHA-256 同为 `932159d53af50f9e47e6093f66f8a864a21118557326ce58eeb115f706641a52`；wall 从 48.63 降到 44.01 秒（`1.105x`）。64-target 小批次为 5.53/5.55 秒，基本持平，说明收益只来自较大批次的长尾均衡。
+7. proof 的 epoch metrics 原先携带 wall-clock，导致相同数学 proof 因计时抖动产生不同字节。现在证书中的两个历史时间槽规范写 0，真实时间只留在 report/manifest；单元测试要求仅计时不同的 V5 证书逐字节相同。
 
 ## 7. 尚未达到设计终态的部分
 

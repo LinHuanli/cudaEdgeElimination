@@ -84,6 +84,24 @@ if(CUDAEE_ENABLE_CUDA)
     LABELS "integration;fgpu;geometry;gpu;correctness")
 
   add_test(
+    NAME integration.fgpu_manifest_v2
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/differential/check_fgpu_manifest.py"
+      --manifest "${FGPU_TEST_DIR}/recursive-point.manifest"
+      --expect "input_edges=-"
+      --expect "tour_role=known-optimum"
+      --expect "enable_geometry=1"
+      --expect "enable_jv=0"
+      --expect "enable_ht=0"
+      --expect "potential_candidates=6"
+      --expect "geometry_witnesses_per_edge=4"
+      --expect "pdlp=off")
+  set_tests_properties(integration.fgpu_manifest_v2 PROPERTIES
+    DEPENDS integration.fgpu_geometry_run
+    PASS_REGULAR_EXPRESSION "FGPU manifest V2 verified"
+    LABELS "integration;fgpu;manifest;correctness")
+
+  add_test(
     NAME integration.fgpu_geometry_verify
     COMMAND fgpu-elim verify
       --instance "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"

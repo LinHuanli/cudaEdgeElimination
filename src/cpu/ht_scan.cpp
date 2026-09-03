@@ -5,6 +5,7 @@
 #include "transposed_leaf_broker.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -480,16 +481,20 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
           broker_device);
     }
     std::exception_ptr worker_launch_failure;
+    std::vector<std::exception_ptr> worker_setup_failures(worker_count);
+    // target 难度相差很大；动态领取可避免静态 stride 在批尾只剩少数
+    // worker 处理困难边。结果仍按 relative 索引回填，提交顺序完全不变。
+    std::atomic<std::size_t> next_relative{0U};
     try {
       for (std::size_t worker = 0U; worker < worker_count; ++worker) {
         workers.emplace_back([&, worker] {
           LeafBrokerWorkerGuard broker_guard(leaf_broker.get());
           // 连设备绑定和错误消息分配也纳入捕获，线程入口不得让异常逃逸并触发 terminate。
-          std::size_t failure_slot = worker;
+          int device = -1;
           try {
-            const int device = options.target_devices.empty()
-                                   ? -1
-                                   : options.target_devices[worker % options.target_devices.size()];
+            device = options.target_devices.empty()
+                         ? -1
+                         : options.target_devices[worker % options.target_devices.size()];
             if (device >= 0) {
               std::string reason;
               if (!detail::SetCudaDevicePreferenceForCurrentThread(device, &reason)) {
@@ -497,19 +502,27 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
                                          std::to_string(device) + ": " + reason);
               }
             }
-            for (std::size_t relative = worker; relative < evaluations.size();
-                 relative += worker_count) {
-              failure_slot = relative;
+          } catch (...) {
+            worker_setup_failures[worker] = std::current_exception();
+            return;
+          }
+          while (true) {
+            const std::size_t relative = next_relative.fetch_add(1U, std::memory_order_relaxed);
+            if (relative >= evaluations.size()) {
+              break;
+            }
+            try {
               const std::uint64_t target_index =
                   options.target_offset + static_cast<std::uint64_t>(relative);
               const std::int32_t edge_id = targets[static_cast<std::size_t>(target_index)];
               evaluations[relative] = std::make_unique<HtTargetEvaluation>(EvaluateHtTarget(
                   *graph, edge_id, device, options.wavefront_options, snapshot_binding,
                   graph_validation_binding, snapshot_hash, leaf_broker.get()));
+            } catch (...) {
+              failures[relative] = std::current_exception();
+              // 同一 worker 后续 target 不再运行；整批仍等待其他只读 worker 安全结束。
+              return;
             }
-          } catch (...) {
-            failures[failure_slot] = std::current_exception();
-            // 同一 worker 后续 target 不再运行；整批仍等待其他只读 worker 安全结束。
           }
         });
       }
@@ -524,6 +537,11 @@ HtScanResult RunHtScanEpoch(GraphSnapshot* const graph, const HtScanOptions& opt
     }
     if (worker_launch_failure != nullptr) {
       std::rethrow_exception(worker_launch_failure);
+    }
+    for (const std::exception_ptr& failure : worker_setup_failures) {
+      if (failure != nullptr) {
+        std::rethrow_exception(failure);
+      }
     }
     for (const std::exception_ptr& failure : failures) {
       if (failure != nullptr) {

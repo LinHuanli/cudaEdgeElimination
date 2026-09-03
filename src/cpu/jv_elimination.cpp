@@ -510,9 +510,11 @@ void WriteProof(const std::filesystem::path& path, const EliminationResult& resu
     output << '\n';
   }
   for (const EpochMetrics& metrics : result.epochs) {
+    // wall-clock 只属于 report/manifest，不能进入可移植数学证书；否则同一
+    // proof 在不同调度和硬件上只因计时抖动就产生不同字节。
     output << "metrics " << metrics.epoch << ' ' << metrics.edges_before << ' ' << metrics.proposed
            << ' ' << metrics.verified << ' ' << metrics.rejected << ' ' << metrics.committed << ' '
-           << metrics.propose_ms << ' ' << metrics.verify_ms << '\n';
+           << 0 << ' ' << 0 << '\n';
   }
   if (version2) {
     output << "ht_proof_count " << encoded_ht.size() << '\n';

@@ -37,20 +37,28 @@ geometry_witnesses="${CUDAEE_FGPU_GEOMETRY_WITNESSES:-8}"
 pdlp_iterations="${CUDAEE_FGPU_PDLP_ITERATIONS:-5000}"
 pdlp_epochs="${CUDAEE_FGPU_PDLP_EPOCHS:-8}"
 enable_ht="${CUDAEE_FGPU_ENABLE_HT:-0}"
-ht_epochs="${CUDAEE_FGPU_HT_EPOCHS:-16}"
+# 完整 sweep 在每次 HT 提交后会从 offset=0 重排；16 轮对 pcb442
+# 不足以越过“提交轮 + 最终无提交分片”。64 仍是安全预算：若耗尽会
+# 明确输出 ht-epoch-limit，绝不冒充固定点。
+ht_epochs="${CUDAEE_FGPU_HT_EPOCHS:-64}"
 ht_targets="${CUDAEE_FGPU_HT_TARGETS:-512}"
 ht_workers="${CUDAEE_FGPU_HT_WORKERS:-4}"
 omp_threads="${CUDAEE_FGPU_OMP_THREADS:-8}"
 cpu_cost_threads="${CUDAEE_FGPU_CPU_COST_THREADS:-2}"
+allow_partial="${CUDAEE_FGPU_ALLOW_PARTIAL:-0}"
 
 for value in "${potential_k}" "${geometry_witnesses}" "${pdlp_iterations}" "${pdlp_epochs}" \
              "${enable_ht}" "${ht_epochs}" "${ht_targets}" "${ht_workers}" \
-             "${omp_threads}" "${cpu_cost_threads}"; do
+             "${omp_threads}" "${cpu_cost_threads}" "${allow_partial}"; do
   if ! [[ "${value}" =~ ^[0-9]+$ ]]; then
     echo "错误：FGPU 数值环境参数必须是非负整数。" >&2
     exit 5
   fi
 done
+if (( enable_ht > 1 || allow_partial > 1 )); then
+  echo "错误：CUDAEE_FGPU_ENABLE_HT 和 CUDAEE_FGPU_ALLOW_PARTIAL 必须是 0 或 1。" >&2
+  exit 5
+fi
 
 cmake --build --preset "${preset}" --target fgpu-elim --parallel
 exe="${repo_root}/build/${preset}/fgpu-elim"
@@ -104,6 +112,16 @@ OMP_NUM_THREADS="${omp_threads}" "${exe}" verify \
   --expected-cost "${optimum}" --output-edges "${output_edges}" --fixed "${fixed}" \
   --nonpairs "${nonpairs}" --certificate "${certificate}" | tee "${run_dir}/verify.stdout"
 
+termination="$(awk '{ for (i = 1; i <= NF; ++i) if ($i ~ /^termination=/) { sub(/^termination=/, "", $i); print $i; exit } }' "${run_dir}/run.stdout")"
+if [[ -z "${termination}" ]]; then
+  echo "错误：运行输出缺少 termination 字段。" >&2
+  exit 6
+fi
+if (( allow_partial == 0 )) && [[ "${termination}" == *-limit || "${termination}" == *-partial ]]; then
+  echo "错误：搜索以 ${termination} 结束，未达固定点；产物已验证但不冒充完整运行。" >&2
+  exit 6
+fi
+
 read -r output_dimension output_count <"${output_edges}"
 if [[ "${output_dimension}" != "${dimension}" || "${output_count}" -gt "${complete_edges}" ]]; then
   echo "错误：最终边文件规模门禁失败。" >&2
@@ -125,6 +143,7 @@ fi
   echo "start_epoch ${start_epoch}"
   echo "end_epoch ${end_epoch}"
   echo "wall_seconds $((end_epoch - start_epoch))"
+  echo "termination ${termination}"
   echo "final_edges ${output_count}"
   echo "edge_sha256 $(sha256sum "${output_edges}" | awk '{print $1}')"
   echo "fixed_sha256 $(sha256sum "${fixed}" | awk '{print $1}')"

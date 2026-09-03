@@ -37,6 +37,8 @@ ht_proof_zlib <index> <raw_size> <compressed_size> <crc32>
 
 每份 sidecar 独立压缩，保留原始长度和 CRC32。读取器在分配和解压前同时检查单份、累计原文、累计压缩数据和整体文件上限，再做 CRC32 与数学 proof replay。V1–V4 仍可向后兼容读取；未启用 zlib 的构建继续写 V2–V4 原文并保留原 256 MiB 上限。
 
+证书中的 epoch `propose_ms/verify_ms` 历史槽统一编码为 0；真实性无关的 wall-clock 只写 report/manifest。这样动态调度或硬件差异不会改变相同数学证明的证书字节。
+
 方法与 payload：
 
 | method | payload | verifier |
@@ -96,9 +98,10 @@ PDLP/subgradient 的 double multiplier 本身不是证明。它先量化为公�
 - `.edg` 必须与 proof replay 的活动边集逐边一致；
 - `.fix` 当前等于最终活动图中至少一个端点 degree=2 的所有边，verifier 会重新推导并逐边比较；
 - `.nonpairs` 当前必须是 ElimTSP 格式的规范空集合，verifier 会检查 header、每个节点行和尾随字段；
-- `.manifest` 记录阶段数、后端、GPU ordinal、LP bound、各类提交数、tour hash 和 wall time；
+- `.manifest` V2 记录输入边/tour 角色、全部几何/JV/HT/PDLP 预算与开关、后端、GPU ordinal、LP bound、各类提交数、tour hash 和 wall time；
 - 外层运行脚本另记录 Git/GPU UUID/输入与输出 SHA-256。
 - CLI 在创建目录前解析完整输出路径的符号链接，库层再拒绝五个输出互相重名或覆盖 instance/input-edges/tour。
+- 正式写出先完成可能大规模预编码的 `.fgcert`，再写 `.edg/.fix/.nonpairs`，最后以 manifest 作为本次运行完成标记；证书压缩或大小门禁失败时不会先留下看似正式的新边集。
 
 ## 6. 负向测试
 
