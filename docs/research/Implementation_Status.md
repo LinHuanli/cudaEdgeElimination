@@ -8,7 +8,7 @@
 | M3 Concorde 导出 | 完成 | 内容寻址受限 overlay；Concorde graph 目标映射复核；随机 20 点和 pr299 CSR 往返 |
 | M3 完整图 exact pricing | 完成（安全下界桥接） | `CCbigguy` 注入；完整图负 reduced-cost penalty；三方哈希；错配拒绝 |
 | M3.1 对偶稳定化与边集导出 | 待实现 | pr299 PDLP 完整图界偏弱；尚未导出每边 exact RC/Concorde 消元后边集 |
-| FGPU one-shot CLI | 完成（单 GPU、安全闭环） | geometry→LP-box→JV→可选 HT；五类输出；最终从初图重放；pcb442/pr1002 最优 tour 零缺边 |
+| FGPU one-shot CLI | 完成（单 GPU、安全闭环） | geometry→LP-box→JV→可选 HT；五类输出；最终从初图重放；pcb442 单命令到 3,239 边固定点，pcb442/pr1002 最优 tour 零缺边 |
 | FGPU native LP 删除 | 完成（degree-only） | CUDA multiplier；`2^24` 定点量化；完整 live-variable `__int128` box bound；V4 sidecar 与篡改拒绝 |
 | FGPU fully-resident 终态 | 部分完成 | GPU 候选/成本/传播已接入；最终 exact replay、HT 控制与完全图物化仍含 CPU；subtour cuts/tile certificate 待实现 |
 | M4.1 path-system 组合层 | 完成 | 路径规范化；固定哈希表；`m<=6` CPU/CUDA 差分；`m=6` 表为 4,989,600 bytes，`m=7` CPU fallback |
@@ -33,7 +33,7 @@
 | M4.3b3b2b2b2b2a GPU leaf 驻留缓存 | 完成（线程/设备本地） | 精确坐标/模板键；增长型 workspace；命中与字节指标 |
 | M4.3b3b2b2b2b2b1 CPU long-tail | 完成（128-cell 基线） | 缓存后交叉点；融合矩阵分流；CPU/CUDA proof 规范计数 |
 | M4.3b3b2b2b2b2b2 multi-block continuation | 完成（cooperative 基线） | grid barrier；residency 门禁；512-way AND 跨 block 差分 |
-| M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V5 zlib/CRC32 内嵌 sidecar；图副本原子提交；旧 V1–V4 兼容 |
+| M4.3b3b2b2b2c HT epoch commit | 完成 | 整批 CPU 重放；V5 zlib/CRC32 内嵌 sidecar；8 GiB raw/448 MiB compressed/512 MiB file 有界门禁；旧 V1–V4 兼容 |
 | M5 有界全图 HT scan | 完成（单快照 pilot） | 稳定目标切片；预算 unresolved；V2 阶段计时；三路工作签名；V2 原子提交；最优 tour 门禁 |
 | M5 JV—HT 多 epoch 编排 | 完成（有界调度基线） | JV 固定点；无提交 sweep 推进；提交后重排；联合 V2 重放；pcb3038 CPU/CUDA/tour 门禁 |
 | M5 JV 活动 edge-id 紧凑启动 | 已评测并排除 | d15112 启动行 `-2.925%`，kernel `+1.272%`，算法总时间反而回退 `1.052%`；原型已撤销 |
@@ -42,14 +42,16 @@
 | M5 HT reply 精确任务去重 | 完成（batch-local） | 物理 tasks `28497 -> 418`；CPU 完整逻辑展开；V16/V19；d15112 七对 A/B 与 14 份 proof/tour 门禁 |
 | M5 HT 跨 batch reply 结果缓存 | 已画像并排除 | 最多 `418 -> 282`，但 23/23 batches 仍含新 key、可消除调用为 0；observer 已移除 |
 | M5 HT 目标级多 GPU | 完成（静态切片基线） | 固定设备 worker；顺序 CPU proof/原子提交；双 A4000 32-target `1.251×` target execution；V17/V20 |
-| V3 单 GPU target workers | 完成 | 多 worker 共享单一显式 ordinal；规范顺序消费；设备 affinity 差分；worker 上限 32 |
+| V3 单 GPU target workers | 完成 | 多 worker 共享单一显式 ordinal；原子动态领取与规范顺序消费；多设备保留确定性静态分片；worker 上限 32 |
 | M5 中大型调优 | 进行中（JV 三轮 + HT host/device/multi-GPU fast paths） | point/path/reply/leaf/scan-binding fast paths；reply 驻留、任务去重与目标级静态多 GPU |
 
 ## 当前基准结果
 
-FGPU one-shot 快速主链在单张 RTX 4000 Ada 上：pcb442 `97,461 -> 8,015`，wall 4.872 秒，89,446 条删除 record；pr1002 `501,501 -> 23,288`，wall 18.439 秒，478,213 条删除 record。两者均包含最终 proof replay，官方最优 tour 分别为 50,778/259,045 且零缺边。pcb442 相对作者单轮 `KH -Jq` 的 12,914 条/94.89 秒同时更稀疏、更快；相对旧固定点 4,016 条/99.68 秒则仍弱，不能报告等强度 `20.46x`。pr1002 作者单轮为 21,651 条，FGPU 多 1,637 条；该作者运行与 HT 并发，只用于强度参考。详见 [FGPU One-Shot 实现与首轮基准](66_FGPU_OneShot_实现与基准.md)。
+FGPU one-shot 快速主链在单张 RTX 4000 Ada 上：pcb442 `97,461 -> 8,015`，wall 4.872 秒，89,446 条删除 record；pr1002 `501,501 -> 23,288`，wall 18.439 秒，478,213 条删除 record。两者均包含最终 proof replay，官方最优 tour 分别为 50,778/259,045 且零缺边。pcb442 相对作者单轮 `KH -Jq` 的 12,914 条/94.89 秒同时更稀疏、更快；相对旧固定点 4,016 条/99.68 秒则仍弱，不能报告等强度 `20.46x`。pr1002 作者单轮为 21,651 条，FGPU 多 1,637 条；该作者运行与 HT 并发，只用于强度参考。详见 [FGPU One-Shot 实现与完整基准](66_FGPU_OneShot_实现与基准.md)。
 
-pcb442 从 8,015 条后接当前深 HT，16 epochs 内再删 973 HT + 90 JV，到 6,952 条，wall 708.64 秒；V5 压缩证书 33,961,540 bytes，39.43 秒独立重放通过，tour 零缺边。终止是 `ht-epoch-limit`，不是固定点，而且当前 HT 长尾使端到端时间显著慢于作者 94.89 秒单轮；不应在默认加速配置中开启。
+pcb442 完整深 HT 现已用一条命令从 97,461 条完全图边到真实 `local-pdlp-fixed-point` 的 3,239 条：Geometry/LP/JV/HT 分别删 85,297/3,856/289/4,780 条，删除率 96.6766%，content hash `ba92119b724b2a1c`。单 GPU、16 target workers、8 replay threads 的 wall 为 3,201.08 秒，峰值 RSS 19,888,500 KiB；421,564,264-byte V5 证书含 6,812,894,031 raw / 414,979,169 compressed HT bytes，独立 verifier 在 1,351.77 秒内重放通过，官方 50,778 tour 零缺边。强度比作者旧固定点 4,016 条少 777 条（稀疏 19.35%），但是作者 99.68 秒的 `32.11x`；这是可靠的强度结果和明确的性能反例，不应在默认加速配置中开启。
+
+另一条四段证书链到 3,231 边，比 one-shot 再少 8 边，但累计 wall 5,298.722 秒。one-shot 边集是该分段边集的严格超集；这个差异说明有界 HT 固定点存在 snapshot/分批路径依赖，不是唯一最小闭包。两条路径证书和 tour 门禁均通过；单命令 one-shot 是主结果，分段链作为交叉验证。
 
 pr299 输入 1208 条边；JV 两个 epoch 后保留 1122 条，提交 86 条删除。CPU 与 CUDA 的最终内容哈希均为 `b9b67e9981518177`。这些数字是正确性回归结果，不构成论文性能结论。
 

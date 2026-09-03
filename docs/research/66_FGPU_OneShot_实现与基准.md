@@ -1,4 +1,4 @@
-# FGPU-Elim One-Shot 实现与首轮基准
+# FGPU-Elim One-Shot 实现与完整基准
 
 ## 1. 当前结论
 
@@ -100,13 +100,44 @@ CUDAEE_FGPU_ENABLE_HT=0 tools/run_fgpu_oneshot.sh pr1002 2
 
 当前快速 FGPU 主链为 8,015 条、4.872 秒。它同时比作者单轮留下更少边且约快 `94.89 / 4.872 = 19.48x`；但相对 4,016 条固定点仍多 3,999 条。若只计算 wall 比为 `99.68 / 4.872 = 20.46x`，这个数字不是等强度 speedup，不能单独作为论文主结论。
 
-当前可信表述是：快速主链已明显越过作者单轮强度，并保留约 20x 的 wall 余量；是否能在深 HT 后接近 4,016 条，需要以完整 target sweep 的最终结果判断。
+当前可信表述是：快速主链已明显越过作者单轮强度，并保留约 20x 的 wall 余量；它是当前唯一适合作为“加速配置”的结果。
 
 pr1002 同环境作者 `KH -Jq` 从 501,501 条删到 21,651 条，最优 tour 缺边为 0；FGPU 快速主链为 23,288 条，比作者多 1,637 条（约 7.56%）。作者程序报告的 `Time=16432.86 s` 是 OpenMP 各线程累计 user CPU time，不是 wall；该次 wall 又受并发 HT 实验干扰，因此只用于确定强度，不计入正式 speedup。
 
-pcb442 的深 HT 试验从 8,015 条快速主链输出继续，16 个 HT epoch 内提交 973 条 HT 删除和 90 条随后 JV 删除，到 6,952 条；wall 708.64 秒，峰值 RSS 1,630,348 KiB。V5 证书为 33,961,540 bytes，独立重放 39.43 秒，最优 tour 仍是零缺边。该运行明确以 `ht-epoch-limit` 结束，因此 6,952 只是安全部分结果，不是固定点；且已经足以否定“直接开启当前深 HT 会保留 20x 端到端加速”这个假设。
+### 5.1 从完全图开始的完整 one-shot
 
-### 5.1 外部 HS 诊断（不属于 FGPU 主方法）
+主强度实验只用物理 GPU 2 上的一张 RTX 4000 Ada，`OMP_NUM_THREADS=8`、`CUDAEE_CPU_COST_THREADS=2`、16 个 host target workers 共享该 GPU。从 pcb442 完全图以一条 `fgpu-elim run` 命令启动，native LP 每轮 5,000 iterations、最多 2 个 PDLP epochs，每个 HT epoch 尝试全部当前目标，最多 16 epochs。
+
+| 初始边 | Geometry | LP | JV | HT | 最终边 | termination | wall | 峰值 RSS |
+|---:|---:|---:|---:|---:|---:|---|---:|---:|
+| 97,461 | 85,297 | 3,856 | 289 | 4,780 | 3,239 | `local-pdlp-fixed-point` | 3,201.08 s | 19,888,500 KiB |
+
+它在单命令内提交 94,222 条删除 record，删除率 96.6766%；最终 content hash 为 `ba92119b724b2a1c`，`.edg` SHA-256 为 `8f08ee895375d415da8b5d23743dc929878f5543f3ee8cc8013f6cda084268b9`。应用程序的内置全量 replay 通过；随后用最终 tight-cap 二进制独立重放同一份证书，1,351.77 秒内再次验证 94,222 条 record，峰值 RSS 9,082,504 KiB。官方 50,778 tour 在在线门禁和独立 verifier 中均为零缺边。
+
+V5 证书 SHA-256 为 `f9b9b92bab246c4f4e81450f1b0205ace0dbbb902ae4af782b9b398579299d23`，共 421,564,264 bytes；其中 4,780 份 HT sidecar 原文合计 6,812,894,031 bytes，zlib payload 414,979,169 bytes，压缩比 `16.417x`，最大单份原文 13,189,196 bytes。该证书已用最终 8 GiB raw / 448 MiB compressed / 512 MiB file 读取门禁通过。原始产物保留在 `artifacts/fgpu-pcb442-oneshot-ht-full-v5-final/`（`artifacts/` 不进入 Git）。
+
+与作者单轮 12,914 边/94.89 秒相比，one-shot 少留 9,675 边（稀疏 74.92%），但 wall 慢 `33.73x`；与作者旧固定点 4,016 边/99.68 秒相比，少留 777 边（稀疏 19.35%），但 wall 慢 `32.11x`。因此可信结论是：当前 one-shot 已达到并超过文章级删边强度，但不存在等强度 GPU 加速，方向是显著减速。
+
+### 5.2 分段证书链交叉验证
+
+另一条 pcb442 完整深 HT 路径以每段已认证 `.edg` 作为下一段输入，直到真实 `local-pdlp-fixed-point`，而不是把 `ht-epoch-limit` 当作结束：
+
+| 段 | 输入边 | 输出边 | 本段删除 | termination | wall | 证书 bytes | 独立重放 |
+|---|---:|---:|---:|---|---:|---:|---:|
+| 快速主链 | 97,461 | 8,015 | Geometry 85,297 + LP 3,872 + JV 277 | `jv-pdlp-fixed-point` | 4.872 s | 6,055,405 | 通过 |
+| HT 小切片 1 | 8,015 | 6,952 | HT 973 + JV 90 | `ht-epoch-limit` | 708.64 s | 33,961,540 | 39.43 s |
+| HT 小切片 2 | 6,952 | 5,794 | LP 1 + HT 1,107 + JV 50 | `ht-epoch-limit` | 3,460.89 s | 73,139,366 | 107.30 s |
+| HT 全目标收口 | 5,794 | 3,231 | HT 2,551 + JV 12 | `local-pdlp-fixed-point` | 1,124.32 s | 129,492,375 | 62.12 s |
+
+整条链恰好有 94,230 条删除 record，最终删除率 96.6848%，四份证书共 242,648,686 bytes。最终 edge content hash 为 `dff4f155be4057d8`，`.edg` SHA-256 为 `8259939de2f817548f43f4744130d8c69fd7bbeebc990d625ee50256df75e0c7`；官方 50,778 tour 在每段在线门禁和最终独立重放中均为零缺边。
+
+最后一段 8/16 workers 的 wall 分别为 1,538.94/1,124.32 秒（`1.369x`），而 `.edg` 和规范化 `.fgcert` 均逐字节相同；证书 SHA-256 同为 `037b6f6d2a8e06a5bc1db703ec037ea0cefa5c4408c8e0edbd3c1c38afdf4f30`。表中采用更快的 16-worker 结果，仍只使用一张 GPU。
+
+强度上，3,231 比作者旧固定点 4,016 少 785 条（稀疏 19.55%）；性能上，累计运行 wall 为 5,298.722 秒（88.31 分钟），是作者 99.68 秒的 `53.16x`，方向是减速而非加速。one-shot 的 3,239 条边是这 3,231 条的严格超集，只多保留 8 条；one-shot wall 比分段链减少 39.59%（`1.655x`），但合并证书是四段总证书的 `1.737x`。
+
+两条路径都有有效证明。差异来自有界 HT 的 snapshot、目标评分、批提交和 degree gate 路径依赖；`local-pdlp-fixed-point` 表示在当前预算和所到达图上无新提交，不表示所有分批路径都会得到唯一最小边集。分段链因此是独立强度交叉验证，one-shot 才是用户要求的单命令主结果。
+
+### 5.3 外部 HS 诊断（不属于 FGPU 主方法）
 
 为判断快速主链后的剩余边是否仍有大量可删结构，对其输出额外运行一轮作者 CPU `KH -q`，再运行 exhaustive CUDA JV：
 
@@ -124,8 +155,10 @@ pcb442 的深 HT 试验从 8,015 条快速主链输出继续，16 个 HT epoch �
 3. native LP 的 persistent CSR kernel 只在 `n<=64` 自动采用。pcb442 实测 cooperative barrier 比普通 edge-atomic 路径慢，因此大图使用测得更快的实现。
 4. HT 从 weight-desc 改成 PDLP reduced-score 排序；pcb442 的 64-target 试验提交 23 HT + 2 JV，wall 8.35 秒。共享单 GPU 的 4 workers 把相同工作降至 5.53 秒。
 5. 完整 HT 扫描首次在写出阶段超过 256 MiB 原文 sidecar 上限并失败关闭。V5 现在逐 sidecar 做有界 zlib 压缩，记录 raw/compressed size 和 CRC32，全部预编码通过后才打开输出文件。pcb442 的 973 份 sidecar 原文合计 505,332,235 bytes，压缩 payload 为 33,848,952 bytes（`14.929x`），最终整个证书为 33,961,540 bytes。
-6. target workers 从静态 stride 改为原子动态领取，但结果仍按规范 target 索引回填。pcb442 512-target、4-worker clean A/B 均提交 228 HT + 15 JV，最终边集 SHA-256 同为 `932159d53af50f9e47e6093f66f8a864a21118557326ce58eeb115f706641a52`；wall 从 48.63 降到 44.01 秒（`1.105x`）。64-target 小批次为 5.53/5.55 秒，基本持平，说明收益只来自较大批次的长尾均衡。
+6. CPU workers 或多 worker 共享单 GPU 时，target 从静态 stride 改为原子动态领取，但结果仍按规范 target 索引回填。pcb442 512-target、4-worker clean A/B 均提交 228 HT + 15 JV，最终边集 SHA-256 同为 `932159d53af50f9e47e6093f66f8a864a21118557326ce58eeb115f706641a52`；wall 从 48.63 降到 44.01 秒（`1.105x`）。64-target 小批次为 5.53/5.55 秒，基本持平。完整收口的 8/16-worker 单 GPU 结果为 1,538.94/1,124.32 秒（`1.369x`），且边集与证书逐字节相同。多张不同 GPU 仍使用确定性静态分片；相关回归单独及连续 5 次均通过。
 7. proof 的 epoch metrics 原先携带 wall-clock，导致相同数学 proof 因计时抖动产生不同字节。现在证书中的两个历史时间槽规范写 0，真实时间只留在 report/manifest；单元测试要求仅计时不同的 V5 证书逐字节相同。
+8. pcb442 的旧 2 GiB V5 累计原文门禁被真实深扫触发并安全失败；全目标批量同样在 1,544.79 秒搜索后触发，且因先写证书而没有留下伪正式边集。累计原文上限现为仍有界的 8 GiB；从完全图开始的单份 one-shot 证书又真实触发了旧 384 MiB 压缩 payload 门禁。该次保守的 2-thread 压力运行在 6,805.11 秒后失败，峰值 RSS 19,305,412 KiB，输出目录仍为空；这个 wall 只是失败关闭证据，不是性能基准。成功证书的实际 payload 为 414,979,169 bytes，因此累计压缩上限收紧为有约 13.2% 余量的 448 MiB，整体文件继续保留 512 MiB 上限，单份 256 MiB 上限不变。最终收口段 2,551 份 HT sidecar 原文为 2,061,801,234 bytes，压缩 payload 为 129,211,331 bytes（`15.957x`），说明旧 2 GiB 原文门禁只剩约 85.7 MB 余量。
+9. 含 HT 的 replay epoch 原使用 `schedule(dynamic,64)`，完整 one-shot 实测出现其他线程已空闲、单线程处理最后重型 chunk 的长尾。现在 HT 逐 sidecar 动态领取，几何/LP/JV 仍每 64 条领取；最终二进制对 94,222-record 证书的 8 线程独立重放为 1,351.77 秒，运行中未再观测到 64-record 的单线程尾部。
 
 ## 7. 尚未达到设计终态的部分
 
@@ -137,5 +170,6 @@ pcb442 的深 HT 试验从 8,015 条快速主链输出继续，16 个 HT epoch �
 - 尚未实现设计稿中的多输出 inside path-cover solver，现有 leaf 仍以 outside cursor 为搜索入口并用 inside coverage 批量覆盖；
 - V5 已解决 HT sidecar 文本膨胀，但几何/LP/JV 仍是每条删除边一个外层 record；100k 完全图仍需要 tile/DAG 聚合证书；
 - `max_local_nodes` 已有 CLI 契约，但当前浅层 HT profile 尚未以独立 ExtendedPool 执行该容量分桶。
+- `ReplayProof` 为保留返回容器语义会复制已验证 HT sidecar；完整 one-shot 进程峰值约 18.97 GiB，独立 verifier 峰值约 8.66 GiB，尚需不实体化返回 proof 的轻量 replay API。
 
 这些缺口都以保留边或关闭不适用模块处理，不会把 heuristic 阴性解释成证明。
