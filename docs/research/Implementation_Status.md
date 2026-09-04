@@ -11,6 +11,7 @@
 | FGPU one-shot CLI | 完成（单 GPU、安全闭环） | geometry→LP-box→JV→可选 HT；五类输出；最终从初图重放；pcb442 单命令到 3,239 边固定点，pcb442/pr1002 最优 tour 零缺边 |
 | FGPU native LP 删除 | 完成（degree-only） | CUDA multiplier；`2^24` 定点量化；完整 live-variable `__int128` box bound；V4 sidecar 与篡改拒绝 |
 | FGPU fully-resident 终态 | 部分完成 | GPU 候选/成本/传播已接入；最终 exact replay、HT 控制与完全图物化仍含 CPU；subtour cuts/tile certificate 待实现 |
+| FGPU resident raw 固定点 | 完成（degree-LP/local raw） | 默认无 CPU audit/证书/epoch 上限/节点上限；pcb3038 七次 clean 中位 56.33 s，4,613,203 → 23,720，七份 SHA-256 一致；强度仍不等价论文完整 LP |
 | M4.1 path-system 组合层 | 完成 | 路径规范化；固定哈希表；`m<=6` CPU/CUDA 差分；`m=6` 表为 4,989,600 bytes，`m=7` CPU fallback |
 | M4.2a CPU k-opt 叶证明 | 完成 | proper 3/4/5-opt `4/25/208` 模板；ElimTSP oracle 差分；`path-kopt-proof-v1` 独立重放 |
 | M4.2b CUDA k-opt cost | 完成（CPU 认证候选器） | public 完整矩阵逐 cell 差分；broker 使用 `1/1/4` words candidate mask；改善 witness CPU 完整重建；memcheck 0 error |
@@ -46,6 +47,14 @@
 | M5 中大型调优 | 进行中（JV 三轮 + HT host/device/multi-GPU fast paths） | point/path/reply/leaf/scan-binding fast paths；reply 驻留、任务去重与目标级静态多 GPU |
 
 ## 当前基准结果
+
+FGPU resident raw 基准绑定 `e102216`：pcb3038 完全图在单张 RTX 4000 Ada 上
+七次 clean 进程 wall 中位为 56.330 s，GPU solve 为 55.404 s；Geometry/PDLP/JV/
+Quick-HS 分别为 4.484/0.083/0.268/50.230 s。七次都从 4,613,203 条删至
+23,720 条，hash `824cfe92e7345428`，已知最优 tour 零缺边；常驻显存约 308.3 MiB。
+该 raw 路径无 CPU 逐边审计和证书，不受 epoch 或节点人为上限截断。论文同实例
+为 6,466 条，当前仍多 17,254 条（`3.668x`），所以 56.33 s 不能与论文
+5,460.2 s LP 直接形成等强度加速比。
 
 FGPU one-shot 快速主链在单张 RTX 4000 Ada 上：pcb442 `97,461 -> 8,015`，wall 4.872 秒，89,446 条删除 record；pr1002 `501,501 -> 23,288`，wall 18.439 秒，478,213 条删除 record。两者均包含最终 proof replay，官方最优 tour 分别为 50,778/259,045 且零缺边。pcb442 相对作者单轮 `KH -Jq` 的 12,914 条/94.89 秒同时更稀疏、更快；相对旧固定点 4,016 条/99.68 秒则仍弱，不能报告等强度 `20.46x`。pr1002 作者单轮为 21,651 条，FGPU 多 1,637 条；该作者运行与 HT 并发，只用于强度参考。详见 [FGPU One-Shot 实现与完整基准](66_FGPU_OneShot_实现与基准.md)。
 
