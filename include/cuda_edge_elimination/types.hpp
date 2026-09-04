@@ -33,6 +33,8 @@ enum class EliminationMethod : std::uint8_t {
   kLpBox = 4,
   // GPU-resident KH -q 浅层 Hamilton--Tutte；record 直接保存 c,d 紧凑见证。
   kGpuQuickHs = 5,
+  // 一个顶点已有两条精确 fixed 边时，其余关联边可删除。
+  kFixedPropagation = 6,
 };
 
 constexpr std::uint32_t kNoEliminationCertificate = UINT32_MAX;

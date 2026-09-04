@@ -26,6 +26,17 @@ enum class VerificationMode : std::uint8_t {
   kDeferred,
 };
 
+enum class FgpuSolveMode : std::uint8_t {
+  kGpuSafe,
+  kGpuFastRaw,
+};
+
+enum class FgpuTermination : std::uint8_t {
+  kFixedPoint,
+  kPartialOom,
+  kPartialDeviceError,
+};
+
 enum class ProofStatus : std::uint8_t {
   kProved,
   kExhausted,
@@ -179,6 +190,47 @@ struct FgpuOutputPaths {
   std::filesystem::path manifest;
 };
 
+// 正式单 GPU 主链不暴露阶段开关或搜索预算；所有服务运行到
+// 联合不动点。device=-1 时选择当前可见且剩余显存最多的一张卡。
+struct FgpuSolveOptions {
+  int device{-1};
+  FgpuSolveMode mode{FgpuSolveMode::kGpuSafe};
+  bool serialize_certificate{false};
+};
+
+struct FgpuSolveReport {
+  FgpuTermination termination{FgpuTermination::kFixedPoint};
+  bool gpu_replayed{false};
+  bool unaudited{false};
+  std::uint64_t initial_hash{};
+  std::uint64_t final_hash{};
+  // final_hash 只表示活动图；state hash 还覆盖 fixed 与 non-pair。
+  std::uint64_t final_state_hash{};
+  std::size_t initial_edges{};
+  std::size_t final_edges{};
+  std::size_t fixed_edges{};
+  std::size_t pairs{};
+  std::size_t nonpairs{};
+  std::size_t lp_nonpairs{};
+  std::size_t fixed_anchor_nonpairs{};
+  std::size_t point_nonpairs{};
+  std::size_t nonpair_fixed_edges{};
+  std::size_t direct_fixed_edges{};
+  std::size_t proof_replayed{};
+  std::size_t proof_rejected{};
+  std::size_t lp_connectivity_cuts{};
+  std::size_t lp_path_closed_replies{};
+  std::uint32_t lp_degree_snapshots{};
+  std::uint32_t lp_strong_snapshots{};
+  double lp_lower_bound{};
+  int selected_device{-1};
+  std::uint64_t resident_bytes{};
+  double proof_replay_ms{};
+  double commit_ms{};
+  double gpu_solve_wall_ms{};
+  double end_to_end_ms{};
+};
+
 struct FgpuRunReport {
   std::uint64_t initial_hash{};
   std::uint64_t final_hash{};
@@ -186,6 +238,7 @@ struct FgpuRunReport {
   std::size_t final_edges{};
   std::size_t geometry_committed{};
   std::size_t lp_committed{};
+  std::size_t fixed_propagation_committed{};
   std::size_t jv_committed{};
   std::size_t ht_committed{};
   std::size_t quick_hs_committed{};
@@ -209,27 +262,71 @@ struct FgpuResidentConfig {
   std::uint32_t max_hs_epochs{0U};
   std::uint32_t max_jv_rounds{0U};
   std::uint32_t potential_candidates{32U};
+  std::uint32_t main_edge_potentials{11U};
+  std::uint32_t main_edge_positions{23U};
+  std::uint32_t quick_hs_candidates{10U};
+  std::uint32_t quick_hs_pair_trials{10U};
   std::uint32_t pdlp_iterations{5000U};
   std::uint32_t max_pdlp_epochs{0U};
   bool enable_quick_hs{true};
   bool enable_jv{true};
   bool enable_geometry{true};
   bool enable_pdlp{true};
+  // 新 one-shot 路径启用；旧 resident 默认关闭以冻结既有基线语义。
+  bool enable_main_edge{false};
+  // 低度数 Main-Edge reply 启用 KH strong-3-opt/metric-excess。
+  bool enable_strong_metric{false};
+  bool enable_extra_edge{false};
+  // GPU continuation 深度；当前 1/2 分别对应 KH -e1/-e2。
+  std::uint32_t extra_edge_depth{1U};
+  bool quick_hs_two_hop{false};
+  // tour 仍可提供 LP 上界；关闭此项可做不偏置的论文强度比较。
+  bool protect_tour{true};
   bool enable_cpu_audit{false};
+  // 仅由正式 solve 路径开启；legacy resident CLI 保持旧基线。
+  bool enable_gpu_replay{false};
+  bool serialize_gpu_certificate{false};
+  bool enable_fixing{false};
+  bool enable_point_nonpair{false};
+  // 对每条活动边完整枚举两个端点的允许邻边对笛卡尔积。
+  bool enable_direct_fix{false};
 };
 
 struct FgpuResidentRunReport {
   std::uint64_t initial_hash{};
   std::uint64_t final_hash{};
+  std::uint64_t final_state_hash{};
   std::size_t initial_edges{};
   std::size_t final_edges{};
+  std::size_t fixed_count{};
+  std::size_t pair_count{};
+  std::size_t nonpair_count{};
+  std::size_t lp_nonpair_committed{};
+  std::size_t fixed_anchor_nonpair_committed{};
+  std::size_t point_nonpair_committed{};
+  std::size_t nonpair_fix_committed{};
+  std::size_t direct_fix_committed{};
   std::size_t jv_committed{};
   std::size_t quick_hs_committed{};
+  std::size_t extra_edge_committed{};
   std::size_t geometry_committed{};
+  std::size_t main_edge_committed{};
   std::size_t lp_committed{};
+  std::size_t fixed_propagation_committed{};
   std::uint32_t hs_epochs{};
+  std::uint32_t hs_full_sweeps{};
+  std::uint32_t hs_active_sweeps{};
+  std::uint64_t hs_full_tasks{};
+  std::uint64_t hs_active_tasks{};
+  std::uint32_t extra_edge_epochs{};
   std::uint32_t jv_rounds{};
   std::uint32_t pdlp_epochs{};
+  std::size_t lp_connectivity_cuts{};
+  std::size_t lp_path_closed_replies{};
+  std::uint32_t lp_degree_snapshots{};
+  std::uint32_t lp_strong_snapshots{};
+  double lp_lower_bound{};
+  std::uint32_t main_edge_epochs{};
   bool converged{false};
   bool cpu_audited{false};
   int selected_device{-1};
@@ -237,9 +334,13 @@ struct FgpuResidentRunReport {
   double upload_ms{};
   double gpu_kernel_ms{};
   double geometry_ms{};
+  double main_edge_ms{};
   double pdlp_ms{};
   double jv_ms{};
   double quick_hs_ms{};
+  double extra_edge_ms{};
+  double proof_replay_ms{};
+  double commit_ms{};
   double compaction_ms{};
   double gpu_download_ms{};
   // 从已解析图开始，到设备 fixed point 与最终 mask 回传；不含 CPU audit/文件写出。
@@ -249,8 +350,14 @@ struct FgpuResidentRunReport {
   double end_to_end_ms{};
   double trusted_total_ms{};
   std::uintmax_t certificate_bytes{};
+  std::size_t proof_replayed{};
+  std::size_t proof_rejected{};
   EliminationResult certificate;
 };
+
+[[nodiscard]] FgpuSolveReport RunFgpuElimination(const FgpuInput& input,
+                                                 const FgpuOutputPaths& outputs,
+                                                 const FgpuSolveOptions& options);
 
 [[nodiscard]] FgpuRunReport RunFgpuElimination(const FgpuInput& input,
                                                const FgpuOutputPaths& outputs,
@@ -271,5 +378,7 @@ struct FgpuResidentRunReport {
 [[nodiscard]] std::string ToString(VerificationMode mode);
 [[nodiscard]] std::string ToString(ProofStatus status);
 [[nodiscard]] std::string ToString(PdlpBackend backend);
+[[nodiscard]] std::string ToString(FgpuSolveMode mode);
+[[nodiscard]] std::string ToString(FgpuTermination termination);
 
 } // namespace cudaee

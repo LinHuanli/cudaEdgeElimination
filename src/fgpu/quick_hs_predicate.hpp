@@ -1,6 +1,7 @@
 #pragma once
 
 #include <climits>
+#include <cmath>
 #include <cstdint>
 
 #if defined(__CUDACC__)
@@ -16,18 +17,38 @@ namespace cudaee::detail::quick_hs {
 // 算法语义依据 Keld Helsgaun 的 MIT-licensed KH-ElimTSP 默认 -q 路径重构；
 // 改用固定数组和 host/device 公用实现，便于 CUDA 搜索与独立 CPU 重放一致。
 // KH -q 首期只会把 2/3/3 三条短路径交给 opt，合并共享端点后
-// 节点数不会超过 8。固定上限避免 device recursion 和动态分配。
+// 节点数不会超过 8；-e1 至多 9 点，-e2 三路径 continuation 至多 10 点。
+// 固定上限避免 device recursion 和动态分配。
 constexpr std::int32_t kMaxPathCount = 3;
-constexpr std::int32_t kMaxPathNodes = 8;
-constexpr std::int32_t kMaxPotentialNodes = 10;
+constexpr std::int32_t kMaxPathNodes = 10;
+// 编译期容量只决定线程私有存储；实际候选数和 pair 扫描宽度由运行配置给出。
+// 旧 resident 使用 10/10 复现 KH -q，新 one-shot 可在同一 kernel 内做完整宽度。
+constexpr std::int32_t kMaxPotentialNodes = 32;
 
 struct GraphView {
   std::int32_t dimension{};
-  // 每行占 dimension 个槽，前 degree[row] 个是按 (cost,node) 排序的活动邻点。
+  // legacy CPU replayer 使用定长稠密行；新 resident 主链使用
+  // row_offsets/neighbor_edge_ids 描述的稀疏 CSR。CSR 行按
+  // (cost,node) 排序，删边后保留 stable slot，遍历时跳过 inactive edge。
   const std::int32_t* degree{};
   const std::int32_t* neighbors{};
   const std::int64_t* distance{};
   const std::uint8_t* active{};
+  const std::int64_t* row_offsets{};
+  const std::int32_t* neighbor_edge_ids{};
+  // 当前 immutable snapshot 的逐顶点三角 pair mask。pair_offsets[v]
+  // 指向 v 的 d(v)*(d(v)-1)/2 个条目，1 表示该 Hamilton 邻边对已获证不可能。
+  const std::int64_t* pair_offsets{};
+  const std::uint8_t* nonpair_mask{};
+  const std::int32_t* edge_u{};
+  const std::int32_t* edge_v{};
+  const std::uint8_t* edge_active{};
+  const std::uint8_t* fixed_edge{};
+  const std::int64_t* coordinate_x{};
+  const std::int64_t* coordinate_y{};
+  std::int64_t edge_count{};
+  std::uint8_t distance_type{};
+  bool complete_graph{};
 };
 
 struct Witness {
@@ -40,19 +61,230 @@ struct SmallPath {
   std::int32_t node[kMaxPathNodes]{};
 };
 
+// endpoint/fixed 合并完成后，各路径必须顶点互异，path-order DP 才能把
+// 每个数组位置当成一个 Hamilton 顶点。作者实现只处理共享端点；若内部
+// 顶点仍跨路径重复，继续求解会把同一 TSP 顶点当成多个位置并产生假阴性。
+// 返回 true 时调用者应保守地保持 reply 开放，而不是据此授权删除。
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+HasAmbiguousPathOverlap(const SmallPath* const paths,
+                        const std::int32_t path_count) {
+  for (std::int32_t first_path = 0; first_path < path_count; ++first_path) {
+    for (std::int32_t first = 0; first < paths[first_path].size; ++first) {
+      for (std::int32_t second_path = first_path; second_path < path_count;
+           ++second_path) {
+        const std::int32_t begin = second_path == first_path ? first + 1 : 0;
+        for (std::int32_t second = begin; second < paths[second_path].size;
+             ++second) {
+          if (paths[first_path].node[first] == paths[second_path].node[second]) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+AllNodesDistinct(const std::int32_t* const nodes, const std::int32_t count) {
+  for (std::int32_t first = 0; first < count; ++first) {
+    for (std::int32_t second = first + 1; second < count; ++second) {
+      if (nodes[first] == nodes[second]) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::uint64_t
+IntegerSqrtFloor(std::uint64_t value) {
+#if defined(__CUDA_ARCH__)
+  // GPU 热路径先使用硬件 FP64 sqrt 得到候选，再用无溢出的整数除法
+  // 精确校正。最终返回值与逐 bit 算法完全相同，但避免每次距离计算
+  // 固定执行约 32 轮数据相关分支。
+  std::uint64_t root = static_cast<std::uint64_t>(sqrt(static_cast<double>(value)));
+  while (root != 0U && root > value / root) {
+    --root;
+  }
+  for (;;) {
+    const std::uint64_t next = root + 1U;
+    if (next == 0U || next > value / next) {
+      break;
+    }
+    root = next;
+  }
+  return root;
+#else
+  std::uint64_t root = 0;
+  std::uint64_t bit = std::uint64_t{1} << 62;
+  while (bit > value) {
+    bit >>= 2;
+  }
+  while (bit != 0) {
+    if (value >= root + bit) {
+      value -= root + bit;
+      root = (root >> 1) + bit;
+    } else {
+      root >>= 1;
+    }
+    bit >>= 2;
+  }
+  return root;
+#endif
+}
+
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::int64_t
 Distance(const GraphView& graph, const std::int32_t a, const std::int32_t b) {
-  return graph.distance[static_cast<std::int64_t>(a) * graph.dimension + b];
+  if (graph.distance != nullptr) {
+    return graph.distance[static_cast<std::int64_t>(a) * graph.dimension + b];
+  }
+  const std::int64_t dx = graph.coordinate_x[a] - graph.coordinate_x[b];
+  const std::int64_t dy = graph.coordinate_y[a] - graph.coordinate_y[b];
+  const std::uint64_t absolute_x =
+      static_cast<std::uint64_t>(dx < 0 ? -dx : dx);
+  const std::uint64_t absolute_y =
+      static_cast<std::uint64_t>(dy < 0 ? -dy : dy);
+  const std::uint64_t squared = absolute_x * absolute_x + absolute_y * absolute_y;
+  const std::uint64_t root = IntegerSqrtFloor(squared);
+  std::uint64_t rounded = root;
+  if (graph.distance_type == 0U) {
+    // EUC_2D: S-r^2 > r 与 sqrt(S) >= r+0.5 等价。
+    rounded += static_cast<std::uint64_t>(squared - root * root > root);
+  } else {
+    rounded += static_cast<std::uint64_t>(root * root != squared);
+  }
+  return static_cast<std::int64_t>(rounded);
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::int64_t
+NeighborBegin(const GraphView& graph, const std::int32_t node) {
+  return graph.row_offsets == nullptr ? 0 : graph.row_offsets[node];
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::int64_t
+NeighborEnd(const GraphView& graph, const std::int32_t node) {
+  return graph.row_offsets == nullptr ? graph.degree[node] : graph.row_offsets[node + 1];
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::int32_t
+Neighbor(const GraphView& graph, const std::int32_t node, const std::int64_t slot) {
+  return graph.row_offsets == nullptr
+             ? graph.neighbors[static_cast<std::int64_t>(node) * graph.dimension + slot]
+             : graph.neighbors[slot];
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+NeighborActive(const GraphView& graph, const std::int64_t slot) {
+  return graph.row_offsets == nullptr || graph.edge_active[graph.neighbor_edge_ids[slot]] != 0U;
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+PairForbiddenBySlots(const GraphView& graph, const std::int32_t center,
+                     const std::int64_t first_slot, const std::int64_t second_slot) {
+  if (graph.pair_offsets == nullptr || graph.nonpair_mask == nullptr || first_slot == second_slot) {
+    return false;
+  }
+  const std::int64_t begin = NeighborBegin(graph, center);
+  const std::int64_t degree = NeighborEnd(graph, center) - begin;
+  std::int64_t first = first_slot - begin;
+  std::int64_t second = second_slot - begin;
+  if (first < 0 || second < 0 || first >= degree || second >= degree) {
+    return false;
+  }
+  if (first > second) {
+    const std::int64_t temporary = first;
+    first = second;
+    second = temporary;
+  }
+  const std::int64_t local = first * (2 * degree - first - 1) / 2 + (second - first - 1);
+  return graph.nonpair_mask[graph.pair_offsets[center] + local] != 0U;
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+PairForbidden(const GraphView& graph, const std::int32_t center,
+              const std::int32_t first_neighbor, const std::int32_t second_neighbor) {
+  if (graph.pair_offsets == nullptr || graph.nonpair_mask == nullptr ||
+      first_neighbor == second_neighbor) {
+    return false;
+  }
+  std::int64_t first_slot = -1;
+  std::int64_t second_slot = -1;
+  for (std::int64_t slot = NeighborBegin(graph, center); slot < NeighborEnd(graph, center);
+       ++slot) {
+    if (!NeighborActive(graph, slot)) {
+      continue;
+    }
+    const std::int32_t neighbor = Neighbor(graph, center, slot);
+    first_slot = neighbor == first_neighbor ? slot : first_slot;
+    second_slot = neighbor == second_neighbor ? slot : second_slot;
+  }
+  return first_slot >= 0 && second_slot >= 0 &&
+         PairForbiddenBySlots(graph, center, first_slot, second_slot);
 }
 
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Active(const GraphView& graph, const std::int32_t a,
                                                       const std::int32_t b) {
-  return graph.active[static_cast<std::int64_t>(a) * graph.dimension + b] != 0U;
+  if (graph.active != nullptr) {
+    return graph.active[static_cast<std::int64_t>(a) * graph.dimension + b] != 0U;
+  }
+  if (a == b) {
+    return false;
+  }
+  const std::int32_t u = a < b ? a : b;
+  const std::int32_t v = a < b ? b : a;
+  if (graph.complete_graph) {
+    const std::int64_t prefix =
+        static_cast<std::int64_t>(u) * (2LL * graph.dimension - u - 1) / 2;
+    const std::int64_t edge = prefix + (v - u - 1);
+    return edge >= 0 && edge < graph.edge_count && graph.edge_active[edge] != 0U;
+  }
+  std::int64_t low = 0;
+  std::int64_t high = graph.edge_count;
+  while (low < high) {
+    const std::int64_t middle = low + (high - low) / 2;
+    const std::int32_t middle_u = graph.edge_u[middle];
+    const std::int32_t middle_v = graph.edge_v[middle];
+    if (middle_u < u || (middle_u == u && middle_v < v)) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low < graph.edge_count && graph.edge_u[low] == u && graph.edge_v[low] == v &&
+         graph.edge_active[low] != 0U;
 }
 
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Fixed(const GraphView& graph, const std::int32_t a,
                                                      const std::int32_t b) {
-  return Active(graph, a, b) && (graph.degree[a] == 2 || graph.degree[b] == 2);
+  if (!Active(graph, a, b)) {
+    return false;
+  }
+  if (graph.fixed_edge != nullptr) {
+    const std::int32_t u = a < b ? a : b;
+    const std::int32_t v = a < b ? b : a;
+    std::int64_t low = 0;
+    std::int64_t high = graph.edge_count;
+    if (graph.complete_graph) {
+      low = static_cast<std::int64_t>(u) * (2LL * graph.dimension - u - 1) / 2 +
+            (v - u - 1);
+    } else {
+      while (low < high) {
+        const std::int64_t middle = low + (high - low) / 2;
+        if (graph.edge_u[middle] < u ||
+            (graph.edge_u[middle] == u && graph.edge_v[middle] < v)) {
+          low = middle + 1;
+        } else {
+          high = middle;
+        }
+      }
+    }
+    if (low >= 0 && low < graph.edge_count && graph.edge_u[low] == u && graph.edge_v[low] == v &&
+        graph.fixed_edge[low] != 0U) {
+      return true;
+    }
+  }
+  return graph.degree[a] == 2 || graph.degree[b] == 2;
 }
 
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Opt22(const GraphView& graph, const std::int32_t a,
@@ -73,9 +305,11 @@ Opt23(const GraphView& graph, const std::int32_t a, const std::int32_t b, const 
     return false;
   }
   // 对齐 KH 默认 strong_3_opt=0 的两个固定边门禁。
-  const std::int32_t row = c * graph.dimension;
-  for (std::int32_t index = 0; index < graph.degree[c]; ++index) {
-    const std::int32_t z = graph.neighbors[row + index];
+  for (std::int64_t slot = NeighborBegin(graph, c); slot < NeighborEnd(graph, c); ++slot) {
+    if (!NeighborActive(graph, slot)) {
+      continue;
+    }
+    const std::int32_t z = Neighbor(graph, c, slot);
     if (z != c1 && z != c2 && graph.degree[z] == 2) {
       return false;
     }
@@ -167,7 +401,6 @@ PathOrderIsOpt(const GraphView& graph, const SmallPath* const paths, const std::
   }
 
   const std::int32_t dynamic_nodes = total - 2;
-  const std::int32_t full_mask = (1 << dynamic_nodes) - 1;
   // KH 用 INT_MIN/(N-1) 作为路径间固定连接的哨兵。这里提升为 int64
   // 只为避免中间和溢出，比较结果与其 32 位安全输入一致。
   const std::int64_t forced_cost = static_cast<std::int64_t>(INT_MIN) / (total - 1);
@@ -177,45 +410,51 @@ PathOrderIsOpt(const GraphView& graph, const SmallPath* const paths, const std::
                                             : Distance(graph, order[position], order[position + 1]);
   }
 
-  constexpr std::int64_t kInfinity = INT64_MAX / 8;
-  std::int64_t dynamic_program[(1 << (kMaxPathNodes - 2)) * (kMaxPathNodes - 2)];
-  for (std::int32_t index = 0; index < (1 << (kMaxPathNodes - 2)) * (kMaxPathNodes - 2); ++index) {
-    dynamic_program[index] = kInfinity;
-  }
+  // 当前三路径 continuation 的内部点最多 8 个。旧实现为每个 CUDA 线程分配
+  // subset×last 的 int64 Held--Karp 表，编译后产生约 3 KiB local stack，
+  // 并让首轮全图扫描完全受
+  // local-memory latency 支配。这里枚举同一个排列空间：起点到首个内部点仍
+  // 按 KH 原实现使用真实距离，其余转移继续使用相同的固定边负哨兵。因此
+  // “存在严格更短重连”的判定与动态规划完全等价，但线程私有状态只有 8 字节。
+  std::uint8_t dynamic_order[kMaxPathNodes - 2]{};
   for (std::int32_t node = 0; node < dynamic_nodes; ++node) {
-    dynamic_program[(1 << node) * (kMaxPathNodes - 2) + node] =
-        Distance(graph, order[node + 1], order[0]);
+    dynamic_order[node] = static_cast<std::uint8_t>(node);
   }
-  for (std::int32_t mask = 1; mask <= full_mask; ++mask) {
-    for (std::int32_t last = 0; last < dynamic_nodes; ++last) {
-      if ((mask & (1 << last)) == 0) {
-        continue;
-      }
-      const std::int64_t current = dynamic_program[mask * (kMaxPathNodes - 2) + last];
-      if (current == kInfinity) {
-        continue;
-      }
-      for (std::int32_t next = 0; next < dynamic_nodes; ++next) {
-        if ((mask & (1 << next)) != 0) {
-          continue;
-        }
-        const std::int32_t next_mask = mask | (1 << next);
-        const std::int64_t candidate =
-            current +
-            PathTransitionCost(graph, order, fixed_after, last + 1, next + 1, forced_cost);
-        std::int64_t& destination = dynamic_program[next_mask * (kMaxPathNodes - 2) + next];
-        if (candidate < destination) {
-          destination = candidate;
-        }
-      }
+  for (;;) {
+    std::int64_t candidate =
+        Distance(graph, order[dynamic_order[0] + 1], order[0]);
+    for (std::int32_t position = 1; position < dynamic_nodes; ++position) {
+      candidate += PathTransitionCost(
+          graph, order, fixed_after, static_cast<std::int32_t>(dynamic_order[position - 1]) + 1,
+          static_cast<std::int32_t>(dynamic_order[position]) + 1, forced_cost);
     }
-  }
-  for (std::int32_t last = 0; last < dynamic_nodes; ++last) {
-    const std::int64_t candidate =
-        dynamic_program[full_mask * (kMaxPathNodes - 2) + last] +
-        PathTransitionCost(graph, order, fixed_after, last + 1, total - 1, forced_cost);
+    candidate += PathTransitionCost(
+        graph, order, fixed_after,
+        static_cast<std::int32_t>(dynamic_order[dynamic_nodes - 1]) + 1, total - 1, forced_cost);
     if (candidate < original) {
       return false;
+    }
+
+    // 原地生成下一字典序排列，避免递归及 device 动态分配。
+    std::int32_t pivot = dynamic_nodes - 2;
+    while (pivot >= 0 && dynamic_order[pivot] >= dynamic_order[pivot + 1]) {
+      --pivot;
+    }
+    if (pivot < 0) {
+      break;
+    }
+    std::int32_t successor = dynamic_nodes - 1;
+    while (dynamic_order[successor] <= dynamic_order[pivot]) {
+      --successor;
+    }
+    const std::uint8_t pivot_value = dynamic_order[pivot];
+    dynamic_order[pivot] = dynamic_order[successor];
+    dynamic_order[successor] = pivot_value;
+    for (std::int32_t left = pivot + 1, right = dynamic_nodes - 1; left < right;
+         ++left, --right) {
+      const std::uint8_t left_value = dynamic_order[left];
+      dynamic_order[left] = dynamic_order[right];
+      dynamic_order[right] = left_value;
     }
   }
   return true;
@@ -307,6 +546,10 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Opt(const GraphView& graph,
     }
   }
 
+  if (HasAmbiguousPathOverlap(paths, path_count)) {
+    return true;
+  }
+
   std::int32_t endpoints[2 * kMaxPathCount]{};
   for (std::int32_t path = 0; path < path_count; ++path) {
     endpoints[2 * path] = paths[path].node[0];
@@ -374,6 +617,187 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Opt233(const GraphView& graph, co
 }
 
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+Opt33(const GraphView& graph, const std::int32_t a1, const std::int32_t a2,
+      const std::int32_t a3, const std::int32_t b1, const std::int32_t b2,
+      const std::int32_t b3) {
+  // 任一 constituent edge 与另一条二边路径已能严格改进时，
+  // 整个 3+3 path system 必然关闭。先做四个 KH opt23 必要条件，
+  // 只把少数 surviving replies 送入精确 path-ordering 枚举。该蕴含只对
+  // 两条顶点不交的路径成立；共享端点时通用 oracle 会先合并路径，不能把
+  // constituent path 的阴性结果直接提升成整个 path system 的阴性结果。
+  const std::int32_t nodes[6] = {a1, a2, a3, b1, b2, b3};
+  bool all_distinct = true;
+  for (std::int32_t first = 0; first < 6; ++first) {
+    for (std::int32_t second = first + 1; second < 6; ++second) {
+      all_distinct = all_distinct && nodes[first] != nodes[second];
+    }
+  }
+  if (all_distinct &&
+      (!Opt23(graph, a1, a2, b1, b2, b3, Distance(graph, a1, a2),
+              Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
+       !Opt23(graph, a2, a3, b1, b2, b3, Distance(graph, a2, a3),
+              Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
+       !Opt23(graph, b1, b2, a1, a2, a3, Distance(graph, b1, b2),
+              Distance(graph, a1, a2), Distance(graph, a2, a3)) ||
+       !Opt23(graph, b2, b3, a1, a2, a3, Distance(graph, b2, b3),
+              Distance(graph, a1, a2), Distance(graph, a2, a3)))) {
+    return false;
+  }
+  const SmallPath paths[kMaxPathCount] = {
+      {.size = 3, .node = {a1, a2, a3}},
+      {.size = 3, .node = {b1, b2, b3}},
+  };
+  return Opt(graph, paths, 2);
+}
+
+// 以下两个谓词对应 ElimTSP/KH-elim 的 opt243/opt333。先执行原实现中的
+// 低阶必要条件，再进入同一个精确 path-ordering 枚举，避免在大多数 reply 上
+// 支付 7! 排列的代价。
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+Opt243(const GraphView& graph, const std::int32_t a, const std::int32_t b,
+       const std::int32_t c1, const std::int32_t c2, const std::int32_t c3,
+       const std::int32_t c4, const std::int32_t d1, const std::int32_t d2,
+       const std::int32_t d3) {
+  if (!Opt23(graph, c1, c2, c2, c3, c4, Distance(graph, c1, c2),
+             Distance(graph, c2, c3), Distance(graph, c3, c4)) ||
+      !Opt23(graph, c1, c2, d1, d2, d3, Distance(graph, c1, c2),
+             Distance(graph, d1, d2), Distance(graph, d2, d3)) ||
+      !Opt23(graph, d1, d2, c1, c2, c3, Distance(graph, d1, d2),
+             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
+      !Opt23(graph, d2, d3, c1, c2, c3, Distance(graph, d2, d3),
+             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
+      !Opt23(graph, a, b, c1, c2, c3, Distance(graph, a, b),
+             Distance(graph, c1, c2), Distance(graph, c2, c3))) {
+    return false;
+  }
+  const SmallPath paths[kMaxPathCount] = {
+      {.size = 2, .node = {a, b}},
+      {.size = 4, .node = {c1, c2, c3, c4}},
+      {.size = 3, .node = {d1, d2, d3}},
+  };
+  return Opt(graph, paths, 3);
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+Opt244(const GraphView& graph, const std::int32_t a, const std::int32_t b,
+       const std::int32_t c1, const std::int32_t c2, const std::int32_t c3,
+       const std::int32_t c4, const std::int32_t d1, const std::int32_t d2,
+       const std::int32_t d3, const std::int32_t d4) {
+  const std::int32_t roles[10] = {a, b, c1, c2, c3, c4, d1, d2, d3, d4};
+  if (!AllNodesDistinct(roles, 10)) {
+    // q10 的每个 DP 位置必须代表不同 Hamilton 顶点；角色重叠时
+    // 保守保持 reply 开放，避免把重复位置当成不同顶点。
+    return true;
+  }
+  // 对齐 KH `opt244`：这些 Opt23 是证明成立的必要条件，不只是
+  // path-order DP 的性能预筛。漏掉任意一项都可能把可行 reply 误关掉。
+  if (!Opt23(graph, c1, c2, c2, c3, c4, Distance(graph, c1, c2),
+             Distance(graph, c2, c3), Distance(graph, c3, c4)) ||
+      !Opt23(graph, c1, c2, d1, d2, d3, Distance(graph, c1, c2),
+             Distance(graph, d1, d2), Distance(graph, d2, d3)) ||
+      !Opt23(graph, c1, c2, d2, d3, d4, Distance(graph, c1, c2),
+             Distance(graph, d2, d3), Distance(graph, d3, d4)) ||
+      !Opt23(graph, d1, d2, c1, c2, c3, Distance(graph, d1, d2),
+             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
+      !Opt23(graph, d2, d3, c1, c2, c3, Distance(graph, d2, d3),
+             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
+      !Opt23(graph, d3, d4, c1, c2, c3, Distance(graph, d3, d4),
+             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
+      !Opt23(graph, a, b, c1, c2, c3, Distance(graph, a, b),
+             Distance(graph, c1, c2), Distance(graph, c2, c3))) {
+    return false;
+  }
+  const SmallPath paths[kMaxPathCount] = {
+      {.size = 2, .node = {a, b}},
+      {.size = 4, .node = {c1, c2, c3, c4}},
+      {.size = 4, .node = {d1, d2, d3, d4}},
+  };
+  return Opt(graph, paths, 3);
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+Opt253(const GraphView& graph, const std::int32_t a, const std::int32_t b,
+       const std::int32_t c1, const std::int32_t c2, const std::int32_t c3,
+       const std::int32_t c4, const std::int32_t c5, const std::int32_t d1,
+       const std::int32_t d2, const std::int32_t d3) {
+  const std::int32_t roles[10] = {a, b, c1, c2, c3, c4, c5, d1, d2, d3};
+  if (!AllNodesDistinct(roles, 10)) {
+    return true;
+  }
+  if (!Opt23(graph, c1, c2, c2, c3, c4, Distance(graph, c1, c2),
+             Distance(graph, c2, c3), Distance(graph, c3, c4)) ||
+      !Opt23(graph, c1, c2, c3, c4, c5, Distance(graph, c1, c2),
+             Distance(graph, c3, c4), Distance(graph, c4, c5)) ||
+      !Opt23(graph, c1, c2, d1, d2, d3, Distance(graph, c1, c2),
+             Distance(graph, d1, d2), Distance(graph, d2, d3)) ||
+      !Opt23(graph, d1, d2, c1, c2, c3, Distance(graph, d1, d2),
+             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
+      !Opt23(graph, d2, d3, c1, c2, c3, Distance(graph, d2, d3),
+             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
+      !Opt23(graph, a, b, c1, c2, c3, Distance(graph, a, b),
+             Distance(graph, c1, c2), Distance(graph, c2, c3))) {
+    return false;
+  }
+  const SmallPath paths[kMaxPathCount] = {
+      {.size = 2, .node = {a, b}},
+      {.size = 5, .node = {c1, c2, c3, c4, c5}},
+      {.size = 3, .node = {d1, d2, d3}},
+  };
+  return Opt(graph, paths, 3);
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+Opt333(const GraphView& graph, const std::int32_t a, const std::int32_t b,
+       const std::int32_t b2, const std::int32_t c1, const std::int32_t c2,
+       const std::int32_t c3, const std::int32_t d1, const std::int32_t d2,
+       const std::int32_t d3) {
+  const SmallPath paths[kMaxPathCount] = {
+      {.size = 3, .node = {a, b, b2}},
+      {.size = 3, .node = {c1, c2, c3}},
+      {.size = 3, .node = {d1, d2, d3}},
+  };
+  return Opt(graph, paths, 3);
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+Opt343(const GraphView& graph, const std::int32_t a1, const std::int32_t a2,
+       const std::int32_t a3, const std::int32_t b1, const std::int32_t b2,
+       const std::int32_t b3, const std::int32_t b4, const std::int32_t c1,
+       const std::int32_t c2, const std::int32_t c3) {
+  const std::int32_t roles[10] = {a1, a2, a3, b1, b2,
+                                  b3, b4, c1, c2, c3};
+  if (!AllNodesDistinct(roles, 10)) {
+    return true;
+  }
+  if (!Opt23(graph, b1, b2, b2, b3, b4, Distance(graph, b1, b2),
+             Distance(graph, b2, b3), Distance(graph, b3, b4)) ||
+      !Opt23(graph, b1, b2, a1, a2, a3, Distance(graph, b1, b2),
+             Distance(graph, a1, a2), Distance(graph, a2, a3)) ||
+      !Opt23(graph, b1, b2, c1, c2, c3, Distance(graph, b1, b2),
+             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
+      !Opt23(graph, a1, a2, b1, b2, b3, Distance(graph, a1, a2),
+             Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
+      !Opt23(graph, a2, a3, b1, b2, b3, Distance(graph, a2, a3),
+             Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
+      !Opt23(graph, c1, c2, b1, b2, b3, Distance(graph, c1, c2),
+             Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
+      !Opt23(graph, c2, c3, b1, b2, b3, Distance(graph, c2, c3),
+             Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
+      !Opt23(graph, a2, a3, b2, b3, b4, Distance(graph, a2, a3),
+             Distance(graph, b2, b3), Distance(graph, b3, b4)) ||
+      !Opt23(graph, a2, a3, c1, c2, c3, Distance(graph, a2, a3),
+             Distance(graph, c1, c2), Distance(graph, c2, c3))) {
+    return false;
+  }
+  const SmallPath paths[kMaxPathCount] = {
+      {.size = 3, .node = {a1, a2, a3}},
+      {.size = 4, .node = {b1, b2, b3, b4}},
+      {.size = 3, .node = {c1, c2, c3}},
+  };
+  return Opt(graph, paths, 3);
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
 HasCycle222(const std::int32_t a, const std::int32_t b, const std::int32_t c1,
             const std::int32_t c2, const std::int32_t d1, const std::int32_t d2) {
   const std::int32_t endpoints[6] = {a, b, c1, c2, d1, d2};
@@ -389,7 +813,138 @@ Compatible(const GraphView& graph, const std::int32_t a, const std::int32_t b, c
                                   cab + ccd <= Distance(graph, a, d) + Distance(graph, c, b)));
 }
 
+// 完整移植 KH-ElimTSP `extra_edge_opt(..., e=0, f=0)` 的 -e1 语义。
+// 返回 true 表示六个可揭示端点都仍存在至少一个无法由局部重连关闭的 Hamilton
+// reply；任一端点的全部 reply 都被关闭时返回 false，当前父 reply 即获证。
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+ExtraEdgeOpt1(const GraphView& graph, const std::int32_t a, const std::int32_t b,
+              const std::int32_t c1, const std::int32_t c, const std::int32_t c2,
+              const std::int32_t d1, const std::int32_t d, const std::int32_t d2) {
+  const std::int32_t path_endpoints[2][2] = {{c1, c2}, {d1, d2}};
+  const std::int32_t path_centers[2] = {c, d};
+  for (std::int32_t path = 0; path < 2; ++path) {
+    const std::int32_t other = 1 - path;
+    for (std::int32_t side = 0; side < 2; ++side) {
+      const std::int32_t endpoint = path_endpoints[path][side];
+      const std::int32_t opposite = path_endpoints[path][1 - side];
+      if (endpoint == a || endpoint == b || endpoint == path_endpoints[other][0] ||
+          endpoint == path_endpoints[other][1]) {
+        continue;
+      }
+      bool unresolved = false;
+      for (std::int64_t slot = NeighborBegin(graph, endpoint);
+           slot < NeighborEnd(graph, endpoint); ++slot) {
+        if (!NeighborActive(graph, slot)) {
+          continue;
+        }
+        const std::int32_t extension = Neighbor(graph, endpoint, slot);
+        if (extension == path_centers[path] || extension == opposite ||
+            extension == path_centers[other]) {
+          continue;
+        }
+        if (PairForbidden(graph, endpoint, path_centers[path], extension)) {
+          continue;
+        }
+        if (Opt243(graph, a, b, extension, endpoint, path_centers[path], opposite,
+                   path_endpoints[other][0], path_centers[other],
+                   path_endpoints[other][1])) {
+          unresolved = true;
+          break;
+        }
+      }
+      if (!unresolved) {
+        return false;
+      }
+    }
+  }
+
+  const std::int32_t target_endpoints[2] = {b, a};
+  const std::int32_t target_opposites[2] = {a, b};
+  for (std::int32_t side = 0; side < 2; ++side) {
+    const std::int32_t endpoint = target_endpoints[side];
+    const std::int32_t opposite = target_opposites[side];
+    if (endpoint == c1 || endpoint == c2 || endpoint == d1 || endpoint == d2) {
+      continue;
+    }
+    bool unresolved = false;
+    for (std::int64_t slot = NeighborBegin(graph, endpoint);
+         slot < NeighborEnd(graph, endpoint); ++slot) {
+      if (!NeighborActive(graph, slot)) {
+        continue;
+      }
+      const std::int32_t extension = Neighbor(graph, endpoint, slot);
+      if (extension == opposite || extension == c || extension == d) {
+        continue;
+      }
+      if (PairForbidden(graph, endpoint, opposite, extension)) {
+        continue;
+      }
+      if (Opt333(graph, opposite, endpoint, extension, c1, c, c2, d1, d, d2)) {
+        unresolved = true;
+        break;
+      }
+    }
+    if (!unresolved) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// 一个固定 (c1-c-c2, d1-d-d2) Hamilton reply 是否仍可能出现在最优巡回中。
+// 独立函数供 CTA continuation engine 把不同 reply 分发到多个 lane。
+template <bool EnableExtraEdge1 = false>
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+ReplyPassesFastFilters(const GraphView& graph, const std::int32_t a, const std::int32_t b,
+                       const std::int32_t c1, const std::int32_t c,
+                       const std::int32_t c2, const std::int32_t d1,
+                       const std::int32_t d, const std::int32_t d2) {
+  if (c1 == d || c2 == d || d1 == c || d2 == c ||
+      (c2 == a && c1 == b) || (c2 == b && c1 == a) ||
+      ((d1 == a || d1 == b) && (c1 == d1 || c2 == d1)) ||
+      (d2 == a && (d1 == b || c1 == d2 || c2 == d2)) ||
+      (d2 == b && (d1 == a || c1 == d2 || c2 == d2)) ||
+      (d2 == c1 && (d1 == c2 || a == d2 || b == d2)) ||
+      (d2 == c2 && (d1 == c1 || a == d2 || b == d2)) ||
+      HasCycle222(a, b, c1, c2, d1, d2)) {
+    return false;
+  }
+  const std::int64_t cab = Distance(graph, a, b);
+  const std::int64_t cc1c = Distance(graph, c1, c);
+  const std::int64_t ccc2 = Distance(graph, c, c2);
+  const std::int64_t cd1d = Distance(graph, d1, d);
+  const std::int64_t cdd2 = Distance(graph, d, d2);
+  return Opt22(graph, c1, c, a, b, cc1c, cab) &&
+         Opt22(graph, c, c2, a, b, ccc2, cab) &&
+         Opt23(graph, a, b, c1, c, c2, cab, cc1c, ccc2) &&
+         Opt22(graph, d, d1, a, b, cd1d, cab) &&
+         Opt22(graph, d, d1, c1, c, cd1d, cc1c) &&
+         Opt22(graph, d, d1, c, c2, cd1d, ccc2) &&
+         Opt23(graph, d, d1, c1, c, c2, cd1d, cc1c, ccc2) &&
+         Opt222(graph, a, b, c1, c, d, d1) &&
+         Opt222(graph, a, b, c, c2, d, d1) &&
+         Opt232(graph, a, b, c1, c, c2, d1, d) &&
+         Opt22(graph, d, d2, a, b, cdd2, cab) &&
+         Opt22(graph, d, d2, c1, c, cdd2, cc1c) &&
+         Opt22(graph, d, d2, c, c2, cdd2, ccc2) &&
+         Opt23(graph, a, b, d1, d, d2, cab, cd1d, cdd2) &&
+         Opt23(graph, d, d2, c1, c, c2, cdd2, cc1c, ccc2) &&
+         Opt23(graph, c1, c, d1, d, d2, cc1c, cd1d, cdd2) &&
+         Opt23(graph, c, c2, d1, d, d2, ccc2, cd1d, cdd2);
+}
+
+template <bool EnableExtraEdge1 = false>
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+ReplyAdmitsTour(const GraphView& graph, const std::int32_t a, const std::int32_t b,
+                const std::int32_t c1, const std::int32_t c, const std::int32_t c2,
+                const std::int32_t d1, const std::int32_t d, const std::int32_t d2) {
+  return ReplyPassesFastFilters<EnableExtraEdge1>(graph, a, b, c1, c, c2, d1, d, d2) &&
+         Opt233(graph, a, b, c1, c, c2, d1, d, d2) &&
+         (!EnableExtraEdge1 || ExtraEdgeOpt1(graph, a, b, c1, c, c2, d1, d, d2));
+}
+
 // 返回 true 表示固定 c,d 的全部 Hamilton replies 都已被整数局部改进关闭。
+template <bool EnableExtraEdge1 = false>
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
 CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std::int32_t b,
                         const std::int32_t c, const std::int32_t d) {
@@ -398,10 +953,12 @@ CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std:
     return false;
   }
   const std::int64_t cab = Distance(graph, a, b);
-  const std::int32_t c_row = c * graph.dimension;
-  const std::int32_t d_row = d * graph.dimension;
-  for (std::int32_t c_first = 0; c_first < graph.degree[c]; ++c_first) {
-    const std::int32_t c1 = graph.neighbors[c_row + c_first];
+  for (std::int64_t c_first = NeighborBegin(graph, c); c_first < NeighborEnd(graph, c);
+       ++c_first) {
+    if (!NeighborActive(graph, c_first)) {
+      continue;
+    }
+    const std::int32_t c1 = Neighbor(graph, c, c_first);
     if (c1 == d) {
       continue;
     }
@@ -409,8 +966,14 @@ CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std:
     if (!Opt22(graph, c1, c, a, b, cc1c, cab)) {
       continue;
     }
-    for (std::int32_t c_second = c_first + 1; c_second < graph.degree[c]; ++c_second) {
-      const std::int32_t c2 = graph.neighbors[c_row + c_second];
+    for (std::int64_t c_second = c_first + 1; c_second < NeighborEnd(graph, c); ++c_second) {
+      if (!NeighborActive(graph, c_second)) {
+        continue;
+      }
+      if (PairForbiddenBySlots(graph, c, c_first, c_second)) {
+        continue;
+      }
+      const std::int32_t c2 = Neighbor(graph, c, c_second);
       if (c2 == d || (c2 == a && c1 == b) || (c2 == b && c1 == a)) {
         continue;
       }
@@ -419,8 +982,12 @@ CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std:
           !Opt23(graph, a, b, c1, c, c2, cab, cc1c, ccc2)) {
         continue;
       }
-      for (std::int32_t d_first = 0; d_first < graph.degree[d]; ++d_first) {
-        const std::int32_t d1 = graph.neighbors[d_row + d_first];
+      for (std::int64_t d_first = NeighborBegin(graph, d); d_first < NeighborEnd(graph, d);
+           ++d_first) {
+        if (!NeighborActive(graph, d_first)) {
+          continue;
+        }
+        const std::int32_t d1 = Neighbor(graph, d, d_first);
         if (d1 == c || ((d1 == a || d1 == b) && (c1 == d1 || c2 == d1))) {
           continue;
         }
@@ -432,8 +999,15 @@ CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std:
             !Opt232(graph, a, b, c1, c, c2, d1, d)) {
           continue;
         }
-        for (std::int32_t d_second = d_first + 1; d_second < graph.degree[d]; ++d_second) {
-          const std::int32_t d2 = graph.neighbors[d_row + d_second];
+        for (std::int64_t d_second = d_first + 1; d_second < NeighborEnd(graph, d);
+             ++d_second) {
+          if (!NeighborActive(graph, d_second)) {
+            continue;
+          }
+          if (PairForbiddenBySlots(graph, d, d_first, d_second)) {
+            continue;
+          }
+          const std::int32_t d2 = Neighbor(graph, d, d_second);
           if (d2 == c || (d2 == a && (d1 == b || c1 == d2 || c2 == d2)) ||
               (d2 == b && (d1 == a || c1 == d2 || c2 == d2)) ||
               (d2 == c1 && (d1 == c2 || a == d2 || b == d2)) ||
@@ -447,7 +1021,8 @@ CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std:
               Opt23(graph, d, d2, c1, c, c2, cdd2, cc1c, ccc2) &&
               Opt23(graph, c1, c, d1, d, d2, cc1c, cd1d, cdd2) &&
               Opt23(graph, c, c2, d1, d, d2, ccc2, cd1d, cdd2) &&
-              Opt233(graph, a, b, c1, c, c2, d1, d, d2)) {
+              Opt233(graph, a, b, c1, c, c2, d1, d, d2) &&
+              (!EnableExtraEdge1 || ExtraEdgeOpt1(graph, a, b, c1, c, c2, d1, d, d2))) {
             // 找到一个不能关闭的 reply，固定 c,d 不能证明目标边。
             return false;
           }
@@ -458,11 +1033,47 @@ CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std:
   return true;
 }
 
-CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE Witness FindWitness(const GraphView& graph,
-                                                              const std::int32_t a,
-                                                              const std::int32_t b) {
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE void
+InsertWitnessCandidate(const GraphView& graph, const std::int32_t a, const std::int32_t b,
+                       const std::int32_t node, const std::int32_t candidate_limit,
+                       std::int32_t* const candidate_nodes,
+                       std::int64_t* const candidate_scores, std::int32_t* const candidate_count) {
+  if (node == a || node == b) {
+    return;
+  }
+  for (std::int32_t existing = 0; existing < *candidate_count; ++existing) {
+    if (candidate_nodes[existing] == node) {
+      return;
+    }
+  }
+  const std::int64_t score = Distance(graph, a, node) + Distance(graph, node, b);
+  if (*candidate_count == candidate_limit &&
+      (score > candidate_scores[candidate_limit - 1] ||
+       (score == candidate_scores[candidate_limit - 1] &&
+        node >= candidate_nodes[candidate_limit - 1]))) {
+    return;
+  }
+  std::int32_t position =
+      *candidate_count < candidate_limit ? (*candidate_count)++ : candidate_limit - 1;
+  while (position > 0 &&
+         (score < candidate_scores[position - 1] ||
+          (score == candidate_scores[position - 1] && node < candidate_nodes[position - 1]))) {
+    candidate_scores[position] = candidate_scores[position - 1];
+    candidate_nodes[position] = candidate_nodes[position - 1];
+    --position;
+  }
+  candidate_scores[position] = score;
+  candidate_nodes[position] = node;
+}
+
+template <bool EnableExtraEdge1 = false>
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE Witness
+FindWitness(const GraphView& graph, const std::int32_t a, const std::int32_t b,
+            const std::int32_t candidate_limit = 10, const std::int32_t pair_trial_limit = 10,
+            const bool include_two_hop = false) {
   Witness result;
-  if (!Active(graph, a, b) || graph.degree[a] <= 2 || graph.degree[b] <= 2) {
+  if (!Active(graph, a, b) || graph.degree[a] <= 2 || graph.degree[b] <= 2 ||
+      candidate_limit < 2 || candidate_limit > kMaxPotentialNodes || pair_trial_limit < 0) {
     return result;
   }
   std::int32_t candidate_nodes[kMaxPotentialNodes]{};
@@ -470,38 +1081,36 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE Witness FindWitness(const GraphView& g
   std::int32_t candidate_count = 0;
   for (std::int32_t side = 0; side < 2; ++side) {
     const std::int32_t from = side == 0 ? a : b;
-    const std::int32_t other = side == 0 ? b : a;
-    const std::int32_t row = from * graph.dimension;
-    for (std::int32_t edge = 0; edge < graph.degree[from]; ++edge) {
-      const std::int32_t node = graph.neighbors[row + edge];
-      if (node == a || node == b) {
+    for (std::int64_t slot = NeighborBegin(graph, from); slot < NeighborEnd(graph, from);
+         ++slot) {
+      if (!NeighborActive(graph, slot)) {
         continue;
       }
-      bool duplicate = false;
-      for (std::int32_t existing = 0; existing < candidate_count; ++existing) {
-        duplicate = duplicate || candidate_nodes[existing] == node;
+      const std::int32_t node = Neighbor(graph, from, slot);
+      InsertWitnessCandidate(graph, a, b, node, candidate_limit, candidate_nodes,
+                             candidate_scores, &candidate_count);
+    }
+  }
+  if (include_two_hop) {
+    // 对齐 KH 非 -q 路径：把两个端点邻点的邻点也纳入同一 (cost,node)
+    // top-k 集合。仅扩大 witness 搜索，不改变任何局部证明谓词。
+    for (std::int32_t side = 0; side < 2; ++side) {
+      const std::int32_t from = side == 0 ? a : b;
+      for (std::int64_t first = NeighborBegin(graph, from); first < NeighborEnd(graph, from);
+           ++first) {
+        if (!NeighborActive(graph, first)) {
+          continue;
+        }
+        const std::int32_t middle = Neighbor(graph, from, first);
+        for (std::int64_t second = NeighborBegin(graph, middle);
+             second < NeighborEnd(graph, middle); ++second) {
+          if (!NeighborActive(graph, second)) {
+            continue;
+          }
+          InsertWitnessCandidate(graph, a, b, Neighbor(graph, middle, second), candidate_limit,
+                                 candidate_nodes, candidate_scores, &candidate_count);
+        }
       }
-      if (duplicate) {
-        continue;
-      }
-      const std::int64_t score = Distance(graph, from, node) + Distance(graph, node, other);
-      if (candidate_count == kMaxPotentialNodes &&
-          (score > candidate_scores[kMaxPotentialNodes - 1] ||
-           (score == candidate_scores[kMaxPotentialNodes - 1] &&
-            node >= candidate_nodes[kMaxPotentialNodes - 1]))) {
-        continue;
-      }
-      std::int32_t position =
-          candidate_count < kMaxPotentialNodes ? candidate_count++ : kMaxPotentialNodes - 1;
-      while (position > 0 &&
-             (score < candidate_scores[position - 1] ||
-              (score == candidate_scores[position - 1] && node < candidate_nodes[position - 1]))) {
-        candidate_scores[position] = candidate_scores[position - 1];
-        candidate_nodes[position] = candidate_nodes[position - 1];
-        --position;
-      }
-      candidate_scores[position] = score;
-      candidate_nodes[position] = node;
     }
   }
 
@@ -509,12 +1118,13 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE Witness FindWitness(const GraphView& g
   for (std::int32_t first = 1; first < candidate_count; ++first) {
     const std::int32_t c = candidate_nodes[first];
     for (std::int32_t second = 0; second < first; ++second) {
-      if (++pair_trials > 10) {
+      ++pair_trials;
+      if (pair_trial_limit != 0 && pair_trials > pair_trial_limit) {
         return result;
       }
       const std::int32_t d = candidate_nodes[second];
       if (!Compatible(graph, a, b, c, d, Distance(graph, a, b)) &&
-          CanEliminateWithWitness(graph, a, b, c, d)) {
+          CanEliminateWithWitness<EnableExtraEdge1>(graph, a, b, c, d)) {
         result.c = c;
         result.d = d;
         return result;

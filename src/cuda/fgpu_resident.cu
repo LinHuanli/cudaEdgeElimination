@@ -1,8 +1,11 @@
 #include "../fgpu/resident_backend.hpp"
 
+#include "../fgpu/main_edge_predicate.hpp"
 #include "../fgpu/quick_hs_predicate.hpp"
 #include "cuda_edge_elimination/cuda_device_affinity.hpp"
+#include "signed128.cuh"
 
+#include <cub/device/device_scan.cuh>
 #include <cub/device/device_select.cuh>
 #include <cuda_runtime.h>
 #include <math_constants.h>
@@ -17,6 +20,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace cudaee::detail {
@@ -154,37 +158,259 @@ __global__ void InitializeEdgeIdsKernel(const std::int32_t edge_count,
   }
 }
 
-__global__ void BuildAdjacencyKernel(const std::int32_t dimension, const std::uint8_t* const active,
-                                     const std::int64_t* const distance, std::int32_t* const degree,
-                                     std::int32_t* const neighbors) {
+__global__ void CopyDegreeToOffsetsKernel(const std::int32_t dimension,
+                                          const std::int32_t* const degree,
+                                          std::int64_t* const offsets) {
+  const std::int32_t node = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (node < dimension) {
+    offsets[node] = degree[node];
+  } else if (node == dimension) {
+    offsets[node] = 0;
+  }
+}
+
+__global__ void BuildPairCountsKernel(const std::int32_t dimension,
+                                      const std::int32_t* const degree,
+                                      std::int64_t* const counts) {
+  const std::int32_t node = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (node < dimension) {
+    const std::int64_t value = degree[node];
+    counts[node] = value * (value - 1) / 2;
+  } else if (node == dimension) {
+    counts[node] = 0;
+  }
+}
+
+__device__ bool DecodeTriangularPair(const std::int64_t degree, const std::int64_t ordinal,
+                                     std::int64_t* const first, std::int64_t* const second) {
+  std::int64_t low = 0;
+  std::int64_t high = degree - 1;
+  while (low < high) {
+    const std::int64_t middle = low + (high - low + 1) / 2;
+    const std::int64_t prefix = middle * (2 * degree - middle - 1) / 2;
+    if (prefix <= ordinal) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  *first = low;
+  const std::int64_t prefix = low * (2 * degree - low - 1) / 2;
+  *second = low + 1 + ordinal - prefix;
+  return *first >= 0 && *second < degree;
+}
+
+__global__ void CarryNonpairMaskKernel(
+    const std::int32_t dimension, const std::int64_t* const old_row_offsets,
+    const std::int32_t* const old_neighbor_edge_ids, const std::int64_t* const old_pair_offsets,
+    const std::uint8_t* const old_nonpair_mask, const std::int64_t* const new_row_offsets,
+    const std::int32_t* const new_neighbor_edge_ids, const std::int64_t* const new_pair_offsets,
+    std::uint8_t* const new_nonpair_mask, std::int32_t* const invalid) {
+  const std::int32_t center = static_cast<std::int32_t>(blockIdx.x);
+  if (center >= dimension) {
+    return;
+  }
+  const std::int64_t old_begin = old_row_offsets[center];
+  const std::int64_t old_degree = old_row_offsets[center + 1] - old_begin;
+  const std::int64_t new_begin = new_row_offsets[center];
+  const std::int64_t new_degree = new_row_offsets[center + 1] - new_begin;
+  const std::int64_t pair_count = new_degree * (new_degree - 1) / 2;
+  for (std::int64_t ordinal = threadIdx.x; ordinal < pair_count; ordinal += blockDim.x) {
+    std::int64_t new_first = -1;
+    std::int64_t new_second = -1;
+    if (!DecodeTriangularPair(new_degree, ordinal, &new_first, &new_second)) {
+      atomicExch(invalid, 1);
+      continue;
+    }
+    const std::int32_t first_edge = new_neighbor_edge_ids[new_begin + new_first];
+    const std::int32_t second_edge = new_neighbor_edge_ids[new_begin + new_second];
+    std::int64_t old_first = -1;
+    std::int64_t old_second = -1;
+    for (std::int64_t slot = 0; slot < old_degree; ++slot) {
+      const std::int32_t edge = old_neighbor_edge_ids[old_begin + slot];
+      old_first = edge == first_edge ? slot : old_first;
+      old_second = edge == second_edge ? slot : old_second;
+    }
+    if (old_first < 0 || old_second < 0) {
+      // 新 CSR 只能删除旧边；找不到 stable edge id 表示内部不一致。
+      atomicExch(invalid, 1);
+      continue;
+    }
+    if (old_first > old_second) {
+      const std::int64_t temporary = old_first;
+      old_first = old_second;
+      old_second = temporary;
+    }
+    const std::int64_t old_local =
+        old_first * (2 * old_degree - old_first - 1) / 2 + (old_second - old_first - 1);
+    new_nonpair_mask[new_pair_offsets[center] + ordinal] =
+        old_nonpair_mask[old_pair_offsets[center] + old_local];
+  }
+}
+
+__global__ void CommitNonpairMaskKernel(const std::int64_t pair_count,
+                                        const std::uint8_t* const authorized,
+                                        std::uint8_t* const nonpair_mask,
+                                        unsigned long long* const committed_count) {
+  const std::int64_t pair = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (pair < pair_count && authorized[pair] != 0U && nonpair_mask[pair] == 0U) {
+    nonpair_mask[pair] = 1U;
+    atomicAdd(committed_count, 1ULL);
+  }
+}
+
+__global__ void ScatterCompactAdjacencyKernel(const std::int32_t work_count,
+                                              const std::int32_t* const active_edge_ids,
+                                              const std::int32_t* const edge_u,
+                                              const std::int32_t* const edge_v,
+                                              unsigned long long* const cursor,
+                                              std::int32_t* const neighbors,
+                                              std::int32_t* const neighbor_edge_ids) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  const std::int32_t u = edge_u[edge];
+  const std::int32_t v = edge_v[edge];
+  const std::uint64_t u_slot = atomicAdd(&cursor[u], 1ULL);
+  const std::uint64_t v_slot = atomicAdd(&cursor[v], 1ULL);
+  neighbors[u_slot] = v;
+  neighbor_edge_ids[u_slot] = edge;
+  neighbors[v_slot] = u;
+  neighbor_edge_ids[v_slot] = edge;
+}
+
+__global__ void SortCompactAdjacencyKernel(const std::int32_t dimension,
+                                           const std::int64_t* const row_offsets,
+                                           const std::int64_t* const edge_weight,
+                                           std::int32_t* const neighbors,
+                                           std::int32_t* const neighbor_edge_ids) {
+  const std::int32_t node = static_cast<std::int32_t>(blockIdx.x);
+  if (node >= dimension || threadIdx.x != 0U) {
+    return;
+  }
+  const std::int64_t begin = row_offsets[node];
+  const std::int64_t end = row_offsets[node + 1];
+  for (std::int64_t slot = begin + 1; slot < end; ++slot) {
+    const std::int32_t neighbor = neighbors[slot];
+    const std::int32_t edge = neighbor_edge_ids[slot];
+    const std::int64_t weight = edge_weight[edge];
+    std::int64_t position = slot;
+    while (position > begin) {
+      const std::int32_t previous_edge = neighbor_edge_ids[position - 1];
+      const std::int32_t previous_neighbor = neighbors[position - 1];
+      const std::int64_t previous_weight = edge_weight[previous_edge];
+      if (previous_weight < weight || (previous_weight == weight && previous_neighbor < neighbor) ||
+          (previous_weight == weight && previous_neighbor == neighbor && previous_edge < edge)) {
+        break;
+      }
+      neighbors[position] = previous_neighbor;
+      neighbor_edge_ids[position] = previous_edge;
+      --position;
+    }
+    neighbors[position] = neighbor;
+    neighbor_edge_ids[position] = edge;
+  }
+}
+
+__global__ void
+ValidateCompactAdjacencyKernel(const std::int32_t dimension, const std::int64_t slot_count,
+                               const std::int32_t edge_count, const std::int64_t* const row_offsets,
+                               const std::int32_t* const neighbors,
+                               const std::int32_t* const neighbor_edge_ids,
+                               const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+                               const std::uint8_t* const edge_active, std::int32_t* const invalid) {
   const std::int32_t node = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
   if (node >= dimension) {
     return;
   }
-  const std::int64_t row = static_cast<std::int64_t>(node) * dimension;
-  std::int32_t count = 0;
-  for (std::int32_t other = 0; other < dimension; ++other) {
-    if (active[row + other] == 0U) {
-      continue;
-    }
-    std::int32_t position = count++;
-    const std::int64_t cost = distance[row + other];
-    while (position > 0) {
-      const std::int32_t previous = neighbors[row + position - 1];
-      const std::int64_t previous_cost = distance[row + previous];
-      if (previous_cost < cost || (previous_cost == cost && previous < other)) {
-        break;
-      }
-      neighbors[row + position] = previous;
-      --position;
-    }
-    neighbors[row + position] = other;
+  const std::int64_t begin = row_offsets[node];
+  const std::int64_t end = row_offsets[node + 1];
+  if (begin < 0 || end < begin || end > slot_count) {
+    atomicExch(invalid, 1);
+    return;
   }
-  degree[node] = count;
+  for (std::int64_t slot = begin; slot < end; ++slot) {
+    const std::int32_t neighbor = neighbors[slot];
+    const std::int32_t edge = neighbor_edge_ids[slot];
+    if (neighbor < 0 || neighbor >= dimension || edge < 0 || edge >= edge_count ||
+        edge_active[edge] == 0U ||
+        !((edge_u[edge] == node && edge_v[edge] == neighbor) ||
+          (edge_v[edge] == node && edge_u[edge] == neighbor))) {
+      atomicExch(invalid, 1);
+      return;
+    }
+  }
+}
+
+__global__ void ExpandDirtyVerticesKernel(const quick_hs::GraphView graph,
+                                          const std::uint32_t* const dirty,
+                                          std::uint32_t* const expanded) {
+  const std::int32_t node = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (node >= graph.dimension || dirty[node] == 0U) {
+    return;
+  }
+  atomicExch(&expanded[node], 1U);
+  for (std::int64_t slot = quick_hs::NeighborBegin(graph, node);
+       slot < quick_hs::NeighborEnd(graph, node); ++slot) {
+    if (quick_hs::NeighborActive(graph, slot)) {
+      atomicExch(&expanded[quick_hs::Neighbor(graph, node, slot)], 1U);
+    }
+  }
+}
+
+__global__ void
+BuildDirtyRootFlagsKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+                          const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+                          const std::uint32_t* const dirty, std::uint8_t* const flags) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work < work_count) {
+    const std::int32_t edge = active_edge_ids[work];
+    flags[work] = dirty[edge_u[edge]] != 0U || dirty[edge_v[edge]] != 0U ? 1U : 0U;
+  }
+}
+
+__global__ void ValidateMetricKernel(const std::int32_t edge_count,
+                                     const std::int32_t* const edge_u,
+                                     const std::int32_t* const edge_v,
+                                     const std::int64_t* const edge_weight,
+                                     const quick_hs::GraphView graph, std::int32_t* const invalid) {
+  const std::int32_t edge = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (edge < edge_count &&
+      quick_hs::Distance(graph, edge_u[edge], edge_v[edge]) != edge_weight[edge]) {
+    atomicExch(invalid, 1);
+  }
 }
 
 constexpr std::int32_t kMaxGeometryPotential = 32;
 constexpr std::int32_t kGeometryKdStackCapacity = 32;
+constexpr std::int32_t kLocalSecFamilies = 4;
+constexpr std::int32_t kConnectivitySupportLevels = 3;
+// 每条边最多跨 16 个静态 local windows；每个 support 阈值下，它只会
+// 跨两个 endpoint components，因此三层 separator 再增加至多 6 个 incidence。
+constexpr std::int32_t kMaxLocalSecIncidence = 16 + 2 * kConnectivitySupportLevels;
+
+struct LocalSecLayout {
+  std::int32_t dimension{};
+  std::int32_t cut_count{};
+  std::int32_t offset[kLocalSecFamilies + 1]{};
+  std::int32_t size[kLocalSecFamilies]{16, 24, 32, 48};
+  std::int32_t stride[kLocalSecFamilies]{8, 12, 16, 24};
+};
+
+LocalSecLayout BuildLocalSecLayout(const std::int32_t dimension) {
+  LocalSecLayout layout;
+  layout.dimension = dimension;
+  for (std::int32_t family = 0; family < kLocalSecFamilies; ++family) {
+    layout.offset[family] = layout.cut_count;
+    if (dimension - layout.size[family] >= 2) {
+      layout.cut_count += (dimension - layout.size[family]) / layout.stride[family] + 1;
+    }
+  }
+  layout.offset[kLocalSecFamilies] = layout.cut_count;
+  return layout;
+}
 
 struct GeometryKdNode {
   std::int32_t point{-1};
@@ -508,18 +734,115 @@ __device__ bool SelectGeometryCandidates(const std::int32_t p, const std::int32_
   return true;
 }
 
-__global__ void NearestDistanceKernel(const std::int32_t dimension,
-                                      const std::int64_t* const distance,
+__device__ double GeometryPositionScore(const std::int32_t p, const std::int32_t q,
+                                        const std::int32_t node,
+                                        const std::int32_t position_numerator,
+                                        const std::int32_t position_denominator,
+                                        const std::int64_t* const x, const std::int64_t* const y) {
+  const double numerator_x =
+      static_cast<double>(position_denominator - position_numerator) * static_cast<double>(x[p]) +
+      static_cast<double>(position_numerator) * static_cast<double>(x[q]);
+  const double numerator_y =
+      static_cast<double>(position_denominator - position_numerator) * static_cast<double>(y[p]) +
+      static_cast<double>(position_numerator) * static_cast<double>(y[q]);
+  const double dx =
+      static_cast<double>(position_denominator) * static_cast<double>(x[node]) - numerator_x;
+  const double dy =
+      static_cast<double>(position_denominator) * static_cast<double>(y[node]) - numerator_y;
+  return dx * dx + dy * dy;
+}
+
+__device__ double GeometryKdPositionLowerBound(const GeometryKdNode& node, const std::int32_t p,
+                                               const std::int32_t q,
+                                               const std::int32_t position_numerator,
+                                               const std::int32_t position_denominator,
+                                               const std::int64_t* const x,
+                                               const std::int64_t* const y) {
+  const double target_x =
+      static_cast<double>(position_denominator - position_numerator) * static_cast<double>(x[p]) +
+      static_cast<double>(position_numerator) * static_cast<double>(x[q]);
+  const double target_y =
+      static_cast<double>(position_denominator - position_numerator) * static_cast<double>(y[p]) +
+      static_cast<double>(position_numerator) * static_cast<double>(y[q]);
+  const double minimum_x =
+      static_cast<double>(position_denominator) * static_cast<double>(node.min_x);
+  const double maximum_x =
+      static_cast<double>(position_denominator) * static_cast<double>(node.max_x);
+  const double minimum_y =
+      static_cast<double>(position_denominator) * static_cast<double>(node.min_y);
+  const double maximum_y =
+      static_cast<double>(position_denominator) * static_cast<double>(node.max_y);
+  const double dx = target_x < minimum_x   ? minimum_x - target_x
+                    : target_x > maximum_x ? target_x - maximum_x
+                                           : 0.0;
+  const double dy = target_y < minimum_y   ? minimum_y - target_y
+                    : target_y > maximum_y ? target_y - maximum_y
+                                           : 0.0;
+  return __dadd_rd(__dmul_rd(dx, dx), __dmul_rd(dy, dy));
+}
+
+// Step 2 会在一条边的多个等距位置查询邻近点。单独保留该查询，避免改变
+// Step 1 已锁定的 midpoint 候选顺序与历史输出哈希。
+__device__ bool SelectGeometryCandidatesAtPosition(
+    const std::int32_t p, const std::int32_t q, const GeometryKdNode* const kd_nodes,
+    const std::int32_t kd_root, const std::int64_t* const x, const std::int64_t* const y,
+    const std::int32_t position_numerator, const std::int32_t position_denominator,
+    const std::int32_t capacity, std::int32_t* const nodes, double* const scores,
+    std::int32_t* const selected) {
+  std::int32_t stack[kGeometryKdStackCapacity]{};
+  std::int32_t stack_size = 0;
+  stack[stack_size++] = kd_root;
+  while (stack_size != 0) {
+    const std::int32_t tree_index = stack[--stack_size];
+    const GeometryKdNode tree_node = kd_nodes[tree_index];
+    if (*selected == capacity &&
+        GeometryKdPositionLowerBound(tree_node, p, q, position_numerator, position_denominator, x,
+                                     y) > scores[capacity - 1]) {
+      continue;
+    }
+    if (tree_node.point != p && tree_node.point != q) {
+      InsertGeometryCandidate(tree_node.point,
+                              GeometryPositionScore(p, q, tree_node.point, position_numerator,
+                                                    position_denominator, x, y),
+                              capacity, nodes, scores, selected);
+    }
+
+    const std::int32_t first = tree_node.left;
+    const std::int32_t second = tree_node.right;
+    if (first >= 0 && second >= 0) {
+      const double first_bound = GeometryKdPositionLowerBound(
+          kd_nodes[first], p, q, position_numerator, position_denominator, x, y);
+      const double second_bound = GeometryKdPositionLowerBound(
+          kd_nodes[second], p, q, position_numerator, position_denominator, x, y);
+      const std::int32_t near_child =
+          first_bound < second_bound || (first_bound == second_bound && first < second) ? first
+                                                                                        : second;
+      const std::int32_t far_child = near_child == first ? second : first;
+      if (stack_size + 2 > kGeometryKdStackCapacity) {
+        return false;
+      }
+      stack[stack_size++] = far_child;
+      stack[stack_size++] = near_child;
+    } else if (first >= 0 || second >= 0) {
+      if (stack_size + 1 > kGeometryKdStackCapacity) {
+        return false;
+      }
+      stack[stack_size++] = first >= 0 ? first : second;
+    }
+  }
+  return true;
+}
+
+__global__ void NearestDistanceKernel(const quick_hs::GraphView graph,
                                       std::int64_t* const nearest) {
   const std::int32_t node = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
-  if (node >= dimension) {
+  if (node >= graph.dimension) {
     return;
   }
   std::int64_t best = INT64_MAX;
-  const std::int64_t row = static_cast<std::int64_t>(node) * dimension;
-  for (std::int32_t other = 0; other < dimension; ++other) {
+  for (std::int32_t other = 0; other < graph.dimension; ++other) {
     if (other != node) {
-      best = min(best, distance[row + other]);
+      best = min(best, quick_hs::Distance(graph, node, other));
     }
   }
   nearest[node] = best;
@@ -597,9 +920,12 @@ __device__ bool IsJvWitness(const quick_hs::GraphView& graph, const std::int32_t
   const std::int64_t cab = quick_hs::Distance(graph, a, b);
   const std::int64_t cac = quick_hs::Distance(graph, a, c);
   const std::int64_t cbc = quick_hs::Distance(graph, b, c);
-  const std::int32_t row = c * graph.dimension;
-  for (std::int32_t index = 0; index < graph.degree[c]; ++index) {
-    const std::int32_t d = graph.neighbors[row + index];
+  for (std::int64_t slot = quick_hs::NeighborBegin(graph, c);
+       slot < quick_hs::NeighborEnd(graph, c); ++slot) {
+    if (!quick_hs::NeighborActive(graph, slot)) {
+      continue;
+    }
+    const std::int32_t d = quick_hs::Neighbor(graph, c, slot);
     if (d == a || d == b) {
       continue;
     }
@@ -620,9 +946,12 @@ __device__ std::int32_t FindJvWitness(const quick_hs::GraphView& graph, const st
   for (std::int32_t side = 0; side < 2; ++side) {
     const std::int32_t from = side == 0 ? a : b;
     const std::int32_t other = side == 0 ? b : a;
-    const std::int32_t row = from * graph.dimension;
-    for (std::int32_t index = 0; index < graph.degree[from]; ++index) {
-      const std::int32_t node = graph.neighbors[row + index];
+    for (std::int64_t slot = quick_hs::NeighborBegin(graph, from);
+         slot < quick_hs::NeighborEnd(graph, from); ++slot) {
+      if (!quick_hs::NeighborActive(graph, slot)) {
+        continue;
+      }
+      const std::int32_t node = quick_hs::Neighbor(graph, from, slot);
       if (node == a || node == b) {
         continue;
       }
@@ -691,27 +1020,1350 @@ __global__ void JvKernel(const std::int32_t work_count, const std::int32_t* cons
   }
 }
 
-__global__ void
-QuickHsKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
-              const std::int32_t* const edge_u, const std::int32_t* const edge_v,
-              const std::uint8_t* const edge_active, const std::uint8_t* const protected_edge,
-              const quick_hs::GraphView graph, std::uint8_t* const proposed,
-              std::int32_t* const first_witness, std::int32_t* const second_witness) {
-  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+__device__ bool DecodeNeighborPair(const quick_hs::GraphView graph, const std::int32_t center,
+                                   const std::uint64_t ordinal, std::int32_t* const first_node,
+                                   std::int32_t* const second_node,
+                                   std::int32_t* const first_edge = nullptr,
+                                   std::int32_t* const second_edge = nullptr) {
+  const std::int64_t begin = quick_hs::NeighborBegin(graph, center);
+  const std::int64_t degree = quick_hs::NeighborEnd(graph, center) - begin;
+  std::int64_t low = 0;
+  std::int64_t high = degree - 1;
+  while (low < high) {
+    const std::int64_t middle = low + (high - low + 1) / 2;
+    const std::uint64_t prefix = static_cast<std::uint64_t>(middle * (2 * degree - middle - 1) / 2);
+    if (prefix <= ordinal) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  const std::int64_t first = low;
+  const std::uint64_t prefix = static_cast<std::uint64_t>(first * (2 * degree - first - 1) / 2);
+  const std::int64_t second = first + 1 + static_cast<std::int64_t>(ordinal - prefix);
+  if (first < 0 || second >= degree) {
+    return false;
+  }
+  const std::int64_t first_slot = begin + first;
+  const std::int64_t second_slot = begin + second;
+  if (!quick_hs::NeighborActive(graph, first_slot) ||
+      !quick_hs::NeighborActive(graph, second_slot) ||
+      quick_hs::PairForbiddenBySlots(graph, center, first_slot, second_slot)) {
+    return false;
+  }
+  *first_node = quick_hs::Neighbor(graph, center, first_slot);
+  *second_node = quick_hs::Neighbor(graph, center, second_slot);
+  if (first_edge != nullptr) {
+    *first_edge = graph.neighbor_edge_ids == nullptr ? -1 : graph.neighbor_edge_ids[first_slot];
+  }
+  if (second_edge != nullptr) {
+    *second_edge = graph.neighbor_edge_ids == nullptr ? -1 : graph.neighbor_edge_ids[second_slot];
+  }
+  return true;
+}
+
+__device__ std::uint64_t CountSurvivingPairsCta(const quick_hs::GraphView graph,
+                                                const std::int32_t a, const std::int32_t b,
+                                                const std::int32_t center) {
+  const std::uint64_t degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, center) -
+                                                          quick_hs::NeighborBegin(graph, center));
+  const std::uint64_t pair_count = degree < 2U ? 0U : degree * (degree - 1U) / 2U;
+  std::uint64_t surviving = 0U;
+  for (std::uint64_t window = 0U; window < pair_count; window += blockDim.x) {
+    const std::uint64_t ordinal = window + threadIdx.x;
+    bool allowed = false;
+    if (ordinal < pair_count) {
+      std::int32_t first = -1;
+      std::int32_t second = -1;
+      allowed = DecodeNeighborPair(graph, center, ordinal, &first, &second) &&
+                main_edge::Compatible(graph, a, b, center, first) &&
+                main_edge::Compatible(graph, a, b, center, second) &&
+                main_edge::ThreeCompatible(graph, a, b, first, center, second);
+    }
+    surviving += static_cast<std::uint64_t>(__syncthreads_count(allowed ? 1 : 0));
+  }
+  return surviving;
+}
+
+constexpr std::int32_t kMaxQuickCandidatePairs =
+    quick_hs::kMaxPotentialNodes * (quick_hs::kMaxPotentialNodes - 1) / 2;
+constexpr std::int32_t kQuickPairSortCapacity = 512;
+static_assert(kMaxQuickCandidatePairs <= kQuickPairSortCapacity);
+
+__device__ void DecodeQuickCandidatePair(const std::int32_t candidate_count,
+                                         const std::int32_t ordinal, std::int32_t* const first,
+                                         std::int32_t* const second) {
+  std::int32_t remaining = ordinal;
+  for (std::int32_t upper = 1; upper < candidate_count; ++upper) {
+    if (remaining < upper) {
+      *first = upper;
+      *second = remaining;
+      return;
+    }
+    remaining -= upper;
+  }
+  *first = -1;
+  *second = -1;
+}
+
+__device__ bool QuickPairOrderAfter(const std::uint64_t lhs_product,
+                                    const std::int64_t lhs_distance, const std::int32_t lhs_ordinal,
+                                    const std::uint64_t rhs_product,
+                                    const std::int64_t rhs_distance,
+                                    const std::int32_t rhs_ordinal) {
+  return lhs_product > rhs_product || (lhs_product == rhs_product && lhs_distance > rhs_distance) ||
+         (lhs_product == rhs_product && lhs_distance == rhs_distance && lhs_ordinal > rhs_ordinal);
+}
+
+__device__ std::uint64_t SaturatingProduct(const std::uint64_t lhs, const std::uint64_t rhs) {
+  return rhs != 0U && lhs > ULLONG_MAX / rhs ? ULLONG_MAX : lhs * rhs;
+}
+
+__device__ std::int32_t FindActiveEdgeId(const quick_hs::GraphView graph, const std::int32_t first,
+                                         const std::int32_t second) {
+  if (first == second) {
+    return -1;
+  }
+  const std::int32_t u = first < second ? first : second;
+  const std::int32_t v = first < second ? second : first;
+  std::int64_t edge = 0;
+  if (graph.complete_graph) {
+    edge = static_cast<std::int64_t>(u) * (2LL * graph.dimension - u - 1) / 2 + (v - u - 1);
+  } else {
+    std::int64_t low = 0;
+    std::int64_t high = graph.edge_count;
+    while (low < high) {
+      const std::int64_t middle = low + (high - low) / 2;
+      if (graph.edge_u[middle] < u || (graph.edge_u[middle] == u && graph.edge_v[middle] < v)) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    edge = low;
+  }
+  return edge >= 0 && edge < graph.edge_count && graph.edge_u[edge] == u &&
+                 graph.edge_v[edge] == v && graph.edge_active[edge] != 0U
+             ? static_cast<std::int32_t>(edge)
+             : -1;
+}
+
+__device__ bool LpClosesReplyWarp(const quick_hs::GraphView graph, const std::int32_t a,
+                                  const std::int32_t b, const std::int32_t c1, const std::int32_t c,
+                                  const std::int32_t c2, const std::int32_t d1,
+                                  const std::int32_t d, const std::int32_t d2,
+                                  const std::int64_t* const reduced_cost,
+                                  const Signed128* const lower_bound,
+                                  const std::int64_t incumbent_numerator,
+                                  unsigned long long* const closed_replies) {
+  constexpr unsigned kFullWarp = 0xffffffffU;
+  if (reduced_cost == nullptr || lower_bound == nullptr) {
+    return false;
+  }
+  const std::int32_t lane = static_cast<std::int32_t>(threadIdx.x & 31U);
+  std::int32_t closed = 0;
+  if (lane == 0) {
+    const std::int32_t endpoint[5][2] = {{a, b}, {c1, c}, {c, c2}, {d1, d}, {d, d2}};
+    std::int32_t edge_ids[5]{};
+    std::int32_t unique_count = 0;
+    bool complete = true;
+    for (std::int32_t path_edge = 0; path_edge < 5; ++path_edge) {
+      const std::int32_t edge =
+          FindActiveEdgeId(graph, endpoint[path_edge][0], endpoint[path_edge][1]);
+      if (edge < 0) {
+        complete = false;
+        break;
+      }
+      bool duplicate = false;
+      for (std::int32_t previous = 0; previous < unique_count; ++previous) {
+        duplicate = duplicate || edge_ids[previous] == edge;
+      }
+      if (!duplicate) {
+        edge_ids[unique_count++] = edge;
+      }
+    }
+    if (complete) {
+      Signed128 forced = *lower_bound;
+      for (std::int32_t index = 0; index < unique_count; ++index) {
+        const std::int64_t reduced = reduced_cost[edge_ids[index]];
+        forced = Signed128AddInt64(forced, reduced > 0 ? reduced : 0);
+      }
+      closed = Signed128GreaterThanInt64(forced, incumbent_numerator) ? 1 : 0;
+      if (closed != 0 && closed_replies != nullptr) {
+        atomicAdd(closed_replies, 1ULL);
+      }
+    }
+  }
+  return __shfl_sync(kFullWarp, closed, 0) != 0;
+}
+
+__device__ bool
+LpClosesPointReplyWarp(const std::int32_t root_first_edge, const std::int32_t root_second_edge,
+                       const std::int32_t point_first_edge, const std::int32_t point_second_edge,
+                       const std::int64_t* const reduced_cost, const Signed128* const lower_bound,
+                       const std::int64_t incumbent_numerator,
+                       unsigned long long* const closed_replies) {
+  constexpr unsigned kFullWarp = 0xffffffffU;
+  if (reduced_cost == nullptr || lower_bound == nullptr) {
+    return false;
+  }
+  const std::int32_t lane = static_cast<std::int32_t>(threadIdx.x & 31U);
+  std::int32_t closed = 0;
+  if (lane == 0) {
+    const std::int32_t source_edge_ids[4] = {root_first_edge, root_second_edge, point_first_edge,
+                                             point_second_edge};
+    std::int32_t edge_ids[4]{};
+    std::int32_t unique_count = 0;
+    bool complete = true;
+    for (std::int32_t path_edge = 0; path_edge < 4; ++path_edge) {
+      const std::int32_t edge = source_edge_ids[path_edge];
+      if (edge < 0) {
+        complete = false;
+        break;
+      }
+      bool duplicate = false;
+      for (std::int32_t previous = 0; previous < unique_count; ++previous) {
+        duplicate = duplicate || edge_ids[previous] == edge;
+      }
+      if (!duplicate) {
+        edge_ids[unique_count++] = edge;
+      }
+    }
+    if (complete) {
+      Signed128 forced = *lower_bound;
+      for (std::int32_t index = 0; index < unique_count; ++index) {
+        const std::int64_t reduced = reduced_cost[edge_ids[index]];
+        forced = Signed128AddInt64(forced, reduced > 0 ? reduced : 0);
+      }
+      closed = Signed128GreaterThanInt64(forced, incumbent_numerator) ? 1 : 0;
+      if (closed != 0 && closed_replies != nullptr) {
+        atomicAdd(closed_replies, 1ULL);
+      }
+    }
+  }
+  return __shfl_sync(kFullWarp, closed, 0) != 0;
+}
+
+__device__ std::int32_t SmallFactorial(const std::int32_t value) {
+  std::int32_t result = 1;
+  for (std::int32_t factor = 2; factor <= value; ++factor) {
+    result *= factor;
+  }
+  return result;
+}
+
+__device__ void UnrankSmallPermutation(std::int32_t rank, const std::int32_t count,
+                                       std::uint8_t* const permutation) {
+  std::uint8_t available[quick_hs::kMaxPathNodes - 2]{};
+  for (std::int32_t index = 0; index < count; ++index) {
+    available[index] = static_cast<std::uint8_t>(index);
+  }
+  std::int32_t remaining = count;
+  for (std::int32_t position = 0; position < count; ++position) {
+    const std::int32_t block = SmallFactorial(remaining - 1);
+    const std::int32_t choice = block == 0 ? 0 : rank / block;
+    rank = block == 0 ? 0 : rank % block;
+    permutation[position] = available[choice];
+    for (std::int32_t move = choice; move + 1 < remaining; ++move) {
+      available[move] = available[move + 1];
+    }
+    --remaining;
+  }
+}
+
+constexpr std::int32_t kMaximumWarpPathDistances =
+    quick_hs::kMaxPathNodes * (quick_hs::kMaxPathNodes - 1) / 2;
+constexpr std::int32_t kMaximumDynamicPathNodes = quick_hs::kMaxPathNodes - 2;
+constexpr std::int32_t kMaximumWarpSubsetDpStates =
+    (1 << kMaximumDynamicPathNodes) * kMaximumDynamicPathNodes;
+
+__device__ std::int32_t WarpPathDistanceIndex(const std::int32_t node_count, std::int32_t first,
+                                              std::int32_t second) {
+  if (first > second) {
+    const std::int32_t saved = first;
+    first = second;
+    second = saved;
+  }
+  return first * (2 * node_count - first - 1) / 2 + (second - first - 1);
+}
+
+__device__ std::int64_t WarpPathDistance(const std::int64_t* const cache,
+                                         const std::int32_t node_count, const std::int32_t first,
+                                         const std::int32_t second) {
+  return first == second ? 0 : cache[WarpPathDistanceIndex(node_count, first, second)];
+}
+
+__device__ std::int64_t WarpPathTransitionCost(const std::int64_t* const cache,
+                                               const std::int32_t node_count,
+                                               const std::uint8_t* const fixed_after,
+                                               const std::int32_t first, const std::int32_t second,
+                                               const std::int64_t forced_cost) {
+  const std::int32_t difference = first - second;
+  if (difference == 1 || difference == -1) {
+    const std::int32_t lower = first < second ? first : second;
+    if (fixed_after[lower] != 0U) {
+      return forced_cost;
+    }
+  }
+  return WarpPathDistance(cache, node_count, first, second);
+}
+
+__device__ bool
+PathOrderIsOptWarp(const quick_hs::GraphView graph, const quick_hs::SmallPath* const paths,
+                   const std::int32_t path_count, const std::int32_t* const path_permutation,
+                   const std::uint32_t reverse_mask, std::int64_t* const distance_cache,
+                   std::int64_t* const subset_dp_cache) {
+  constexpr unsigned kFullWarp = 0xffffffffU;
+  const std::int32_t lane = static_cast<std::int32_t>(threadIdx.x & 31U);
+  std::int32_t order[quick_hs::kMaxPathNodes]{};
+  std::uint8_t fixed_after[quick_hs::kMaxPathNodes]{};
+  std::int32_t total = 0;
+  for (std::int32_t position = 0; position < path_count; ++position) {
+    const quick_hs::SmallPath& path = paths[path_permutation[position]];
+    const bool reverse = position > 0 && ((reverse_mask >> (position - 1)) & 1U) != 0U;
+    for (std::int32_t index = 0; index < path.size; ++index) {
+      order[total++] = path.node[reverse ? path.size - 1 - index : index];
+    }
+    fixed_after[total - 1] = 1U;
+  }
+  fixed_after[total - 1] = 0U;
+  if (total < 3 || total > quick_hs::kMaxPathNodes) {
+    return true;
+  }
+  std::int32_t distance_index = 0;
+  for (std::int32_t first = 0; first < total; ++first) {
+    for (std::int32_t second = first + 1; second < total; ++second, ++distance_index) {
+      if ((distance_index & 31) == lane) {
+        distance_cache[distance_index] = quick_hs::Distance(graph, order[first], order[second]);
+      }
+    }
+  }
+  __syncwarp(kFullWarp);
+  const std::int32_t dynamic_nodes = total - 2;
+  const std::int64_t forced_cost = static_cast<std::int64_t>(INT_MIN) / (total - 1);
+  std::int64_t original = WarpPathDistance(distance_cache, total, 0, 1);
+  for (std::int32_t position = 1; position < total - 1; ++position) {
+    original += fixed_after[position] != 0U
+                    ? forced_cost
+                    : WarpPathDistance(distance_cache, total, position, position + 1);
+  }
+
+  if (subset_dp_cache != nullptr) {
+    // -e2 的 10 点谓词若直接枚举会为每个 path orientation 扫描 8! 个
+    // 顺序。这里由一个 warp 协作执行同一 Hamilton-path 最短路：状态
+    // (mask,last) 按基数分层，层内无依赖，因此只需每层一次 warp 同步。
+    // 负哨兵和严格小于比较均与 KH 的排列定义保持一致。
+    constexpr std::int64_t kInfinity = LLONG_MAX / 4;
+    const std::int32_t subset_count = 1 << dynamic_nodes;
+    const std::int32_t state_count = subset_count * kMaximumDynamicPathNodes;
+    for (std::int32_t state_index = lane; state_index < state_count; state_index += 32) {
+      subset_dp_cache[state_index] = kInfinity;
+    }
+    __syncwarp(kFullWarp);
+    if (lane < dynamic_nodes) {
+      subset_dp_cache[(1 << lane) * kMaximumDynamicPathNodes + lane] =
+          WarpPathDistance(distance_cache, total, lane + 1, 0);
+    }
+    __syncwarp(kFullWarp);
+
+    for (std::int32_t cardinality = 2; cardinality <= dynamic_nodes; ++cardinality) {
+      for (std::int32_t state_index = lane; state_index < state_count; state_index += 32) {
+        const std::int32_t mask = state_index / kMaximumDynamicPathNodes;
+        const std::int32_t last = state_index % kMaximumDynamicPathNodes;
+        if (last >= dynamic_nodes || (mask & (1 << last)) == 0 ||
+            __popc(static_cast<unsigned>(mask)) != cardinality) {
+          continue;
+        }
+        const std::int32_t previous_mask = mask ^ (1 << last);
+        std::int64_t best = kInfinity;
+        for (std::int32_t previous = 0; previous < dynamic_nodes; ++previous) {
+          if ((previous_mask & (1 << previous)) == 0) {
+            continue;
+          }
+          const std::int64_t prefix =
+              subset_dp_cache[previous_mask * kMaximumDynamicPathNodes + previous];
+          const std::int64_t candidate =
+              prefix + WarpPathTransitionCost(distance_cache, total, fixed_after, previous + 1,
+                                              last + 1, forced_cost);
+          best = candidate < best ? candidate : best;
+        }
+        subset_dp_cache[state_index] = best;
+      }
+      __syncwarp(kFullWarp);
+    }
+
+    const std::int32_t full_mask = subset_count - 1;
+    std::int64_t best = kInfinity;
+    if (lane < dynamic_nodes) {
+      best = subset_dp_cache[full_mask * kMaximumDynamicPathNodes + lane] +
+             WarpPathTransitionCost(distance_cache, total, fixed_after, lane + 1, total - 1,
+                                    forced_cost);
+    }
+    for (std::int32_t offset = 16; offset > 0; offset >>= 1) {
+      const std::int64_t other = __shfl_down_sync(kFullWarp, best, offset);
+      best = other < best ? other : best;
+    }
+    best = __shfl_sync(kFullWarp, best, 0);
+    const bool is_opt = best >= original;
+    // 下一种 path orientation 会复用同一 warp 的 shared distance cache。
+    // shuffle/vote 只同步寄存器通信，不能替代 shared-memory 的 WAR 屏障。
+    __syncwarp(kFullWarp);
+    return is_opt;
+  }
+
+  const std::int32_t permutation_count = SmallFactorial(dynamic_nodes);
+  for (std::int32_t window = 0; window < permutation_count; window += 32) {
+    const std::int32_t rank = window + lane;
+    bool improving = false;
+    if (rank < permutation_count) {
+      std::uint8_t dynamic_order[quick_hs::kMaxPathNodes - 2]{};
+      UnrankSmallPermutation(rank, dynamic_nodes, dynamic_order);
+      std::int64_t candidate = WarpPathDistance(distance_cache, total, dynamic_order[0] + 1, 0);
+      for (std::int32_t position = 1; position < dynamic_nodes; ++position) {
+        candidate += WarpPathTransitionCost(
+            distance_cache, total, fixed_after,
+            static_cast<std::int32_t>(dynamic_order[position - 1]) + 1,
+            static_cast<std::int32_t>(dynamic_order[position]) + 1, forced_cost);
+      }
+      candidate += WarpPathTransitionCost(
+          distance_cache, total, fixed_after,
+          static_cast<std::int32_t>(dynamic_order[dynamic_nodes - 1]) + 1, total - 1, forced_cost);
+      improving = candidate < original;
+    }
+    if (__any_sync(kFullWarp, improving)) {
+      __syncwarp(kFullWarp);
+      return false;
+    }
+  }
+  __syncwarp(kFullWarp);
+  return true;
+}
+
+__device__ bool PathSystemOptWarp(const quick_hs::GraphView graph,
+                                  const quick_hs::SmallPath* const source_paths,
+                                  const std::int32_t source_path_count, bool* const supported,
+                                  std::int64_t* const distance_cache,
+                                  std::int64_t* const subset_dp_cache = nullptr) {
+  // 与 quick_hs::Opt/作者 opt 完全相同的 fixed-endpoint 合并。每个 lane
+  // 复制并执行同一小数组状态机，随后共同进入距离缓存和 subset DP；这样
+  // 度数为 2 或端点重合不再退化为 lane 0 的串行阶乘枚举。
+  *supported = true;
+  quick_hs::SmallPath paths[quick_hs::kMaxPathCount]{};
+  if (source_path_count <= 0 || source_path_count > quick_hs::kMaxPathCount) {
+    *supported = false;
+    return true;
+  }
+  std::int32_t path_count = source_path_count;
+  for (std::int32_t path = 0; path < path_count; ++path) {
+    paths[path] = source_paths[path];
+  }
+
+  bool merged = true;
+  while (merged) {
+    merged = false;
+    for (std::int32_t i = 1; i < path_count && !merged; ++i) {
+      const std::int32_t b1 = paths[i].node[0];
+      const std::int32_t b2 = paths[i].node[paths[i].size - 1];
+      if ((b1 == b2 && paths[i].size > 1) ||
+          (paths[i].size > 2 && quick_hs::Fixed(graph, b1, b2))) {
+        return false;
+      }
+      for (std::int32_t j = 0; j < i && !merged; ++j) {
+        const std::int32_t a1 = paths[j].node[0];
+        const std::int32_t a2 = paths[j].node[paths[j].size - 1];
+        if (j == 0 && ((a1 == a2 && paths[j].size > 1) ||
+                       (paths[j].size > 2 && quick_hs::Fixed(graph, a1, a2)))) {
+          return false;
+        }
+
+        std::int32_t first_direction = 1;
+        std::int32_t second_direction = 1;
+        bool join = false;
+        bool shared = false;
+        if (a2 == b1 || (a2 != b2 && b1 != a1 && quick_hs::Fixed(graph, a2, b1))) {
+          if (a1 == b2) {
+            return false;
+          }
+          join = true;
+          shared = a2 == b1;
+        } else if (a2 == b2 || (a2 != b1 && b2 != a1 && quick_hs::Fixed(graph, a2, b2))) {
+          if (a1 == b1) {
+            return false;
+          }
+          join = true;
+          shared = a2 == b2;
+          second_direction = -1;
+        } else if (a1 == b1 || (a1 != b2 && b1 != a2 && quick_hs::Fixed(graph, a1, b1))) {
+          if (a2 == b2) {
+            return false;
+          }
+          join = true;
+          shared = a1 == b1;
+          first_direction = -1;
+        } else if (a1 == b2 || (a1 != b1 && b2 != a2 && quick_hs::Fixed(graph, a1, b2))) {
+          if (a2 == b1) {
+            return false;
+          }
+          join = true;
+          shared = a1 == b2;
+          first_direction = -1;
+          second_direction = -1;
+        }
+        if (!join) {
+          continue;
+        }
+
+        quick_hs::SmallPath combined{};
+        for (std::int32_t index = 0; index < paths[j].size; ++index) {
+          combined.node[combined.size++] =
+              paths[j].node[first_direction > 0 ? index : paths[j].size - 1 - index];
+        }
+        const std::int32_t start = shared ? 1 : 0;
+        for (std::int32_t index = start; index < paths[i].size; ++index) {
+          if (combined.size >= quick_hs::kMaxPathNodes) {
+            return true;
+          }
+          combined.node[combined.size++] =
+              paths[i].node[second_direction > 0 ? index : paths[i].size - 1 - index];
+        }
+        if (i != path_count - 1) {
+          paths[i] = paths[path_count - 1];
+        }
+        paths[j] = combined;
+        --path_count;
+        merged = true;
+      }
+    }
+  }
+
+  if (quick_hs::HasAmbiguousPathOverlap(paths, path_count)) {
+    // 未被 endpoint normalization 消除的内部重叠不属于 path-order
+    // oracle 的支持域；保持 reply 开放，禁止以“unsupported”授权删除。
+    return true;
+  }
+
+  std::int32_t endpoints[2 * quick_hs::kMaxPathCount]{};
+  for (std::int32_t path = 0; path < path_count; ++path) {
+    endpoints[2 * path] = paths[path].node[0];
+    endpoints[2 * path + 1] = paths[path].node[paths[path].size - 1];
+  }
+  if (quick_hs::HasCycle(endpoints, path_count)) {
+    return false;
+  }
+
+  std::int32_t path_permutation[quick_hs::kMaxPathCount]{0, 1, 2};
+  const std::int32_t permutation_count = path_count == 3 ? 2 : 1;
+  const std::uint32_t orientation_count = 1U << (path_count > 0 ? path_count - 1 : 0);
+  for (std::int32_t permutation = 0; permutation < permutation_count; ++permutation) {
+    if (permutation == 1) {
+      path_permutation[1] = 2;
+      path_permutation[2] = 1;
+    }
+    for (std::uint32_t reverse = 0U; reverse < orientation_count; ++reverse) {
+      if (PathOrderIsOptWarp(graph, paths, path_count, path_permutation, reverse, distance_cache,
+                             subset_dp_cache)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+__device__ bool Opt243Warp(const quick_hs::GraphView graph, const std::int32_t a,
+                           const std::int32_t b, const std::int32_t c1, const std::int32_t c,
+                           const std::int32_t c2, const std::int32_t c3, const std::int32_t d1,
+                           const std::int32_t d, const std::int32_t d2,
+                           std::int64_t* const distance_cache) {
+  constexpr unsigned kFullWarp = 0xffffffffU;
+  // 与作者 opt243 相同的五组必要条件属于证明语义，不能因为后面使用
+  // 精确 path-order DP 就省略。
+  if (!quick_hs::Opt23(graph, c1, c, c, c2, c3, quick_hs::Distance(graph, c1, c),
+                       quick_hs::Distance(graph, c, c2), quick_hs::Distance(graph, c2, c3)) ||
+      !quick_hs::Opt23(graph, c1, c, d1, d, d2, quick_hs::Distance(graph, c1, c),
+                       quick_hs::Distance(graph, d1, d), quick_hs::Distance(graph, d, d2)) ||
+      !quick_hs::Opt23(graph, d1, d, c1, c, c2, quick_hs::Distance(graph, d1, d),
+                       quick_hs::Distance(graph, c1, c), quick_hs::Distance(graph, c, c2)) ||
+      !quick_hs::Opt23(graph, d, d2, c1, c, c2, quick_hs::Distance(graph, d, d2),
+                       quick_hs::Distance(graph, c1, c), quick_hs::Distance(graph, c, c2)) ||
+      !quick_hs::Opt23(graph, a, b, c1, c, c2, quick_hs::Distance(graph, a, b),
+                       quick_hs::Distance(graph, c1, c), quick_hs::Distance(graph, c, c2))) {
+    return false;
+  }
+  const quick_hs::SmallPath paths[3] = {
+      {.size = 2, .node = {a, b}},
+      {.size = 4, .node = {c1, c, c2, c3}},
+      {.size = 3, .node = {d1, d, d2}},
+  };
+  bool supported = false;
+  bool result = PathSystemOptWarp(graph, paths, 3, &supported, distance_cache);
+  if (!supported) {
+    result =
+        (threadIdx.x & 31U) == 0U ? quick_hs::Opt243(graph, a, b, c1, c, c2, c3, d1, d, d2) : false;
+    result = __shfl_sync(kFullWarp, result, 0);
+  }
+  return result;
+}
+
+__device__ bool Opt333Warp(const quick_hs::GraphView graph, const std::int32_t a,
+                           const std::int32_t b, const std::int32_t b2, const std::int32_t c1,
+                           const std::int32_t c2, const std::int32_t c3, const std::int32_t d1,
+                           const std::int32_t d2, const std::int32_t d3,
+                           std::int64_t* const distance_cache) {
+  constexpr unsigned kFullWarp = 0xffffffffU;
+  const quick_hs::SmallPath paths[3] = {
+      {.size = 3, .node = {a, b, b2}},
+      {.size = 3, .node = {c1, c2, c3}},
+      {.size = 3, .node = {d1, d2, d3}},
+  };
+  bool supported = false;
+  bool result = PathSystemOptWarp(graph, paths, 3, &supported, distance_cache);
+  if (!supported) {
+    result = (threadIdx.x & 31U) == 0U ? quick_hs::Opt333(graph, a, b, b2, c1, c2, c3, d1, d2, d3)
+                                       : false;
+    result = __shfl_sync(kFullWarp, result, 0);
+  }
+  return result;
+}
+
+__device__ bool Opt244Warp(const quick_hs::GraphView graph, const std::int32_t a,
+                           const std::int32_t b, const std::int32_t c1, const std::int32_t c2,
+                           const std::int32_t c3, const std::int32_t c4, const std::int32_t d1,
+                           const std::int32_t d2, const std::int32_t d3, const std::int32_t d4,
+                           std::int64_t* const distance_cache,
+                           std::int64_t* const subset_dp_cache) {
+  constexpr unsigned kFullWarp = 0xffffffffU;
+  const std::int32_t roles[10] = {a, b, c1, c2, c3, c4, d1, d2, d3, d4};
+  if (!quick_hs::AllNodesDistinct(roles, 10)) {
+    return true;
+  }
+  if (!quick_hs::Opt23(graph, c1, c2, c2, c3, c4, quick_hs::Distance(graph, c1, c2),
+                       quick_hs::Distance(graph, c2, c3), quick_hs::Distance(graph, c3, c4)) ||
+      !quick_hs::Opt23(graph, c1, c2, d1, d2, d3, quick_hs::Distance(graph, c1, c2),
+                       quick_hs::Distance(graph, d1, d2), quick_hs::Distance(graph, d2, d3)) ||
+      !quick_hs::Opt23(graph, c1, c2, d2, d3, d4, quick_hs::Distance(graph, c1, c2),
+                       quick_hs::Distance(graph, d2, d3), quick_hs::Distance(graph, d3, d4)) ||
+      !quick_hs::Opt23(graph, d1, d2, c1, c2, c3, quick_hs::Distance(graph, d1, d2),
+                       quick_hs::Distance(graph, c1, c2), quick_hs::Distance(graph, c2, c3)) ||
+      !quick_hs::Opt23(graph, d2, d3, c1, c2, c3, quick_hs::Distance(graph, d2, d3),
+                       quick_hs::Distance(graph, c1, c2), quick_hs::Distance(graph, c2, c3)) ||
+      !quick_hs::Opt23(graph, d3, d4, c1, c2, c3, quick_hs::Distance(graph, d3, d4),
+                       quick_hs::Distance(graph, c1, c2), quick_hs::Distance(graph, c2, c3)) ||
+      !quick_hs::Opt23(graph, a, b, c1, c2, c3, quick_hs::Distance(graph, a, b),
+                       quick_hs::Distance(graph, c1, c2), quick_hs::Distance(graph, c2, c3))) {
+    return false;
+  }
+  const quick_hs::SmallPath paths[3] = {
+      {.size = 2, .node = {a, b}},
+      {.size = 4, .node = {c1, c2, c3, c4}},
+      {.size = 4, .node = {d1, d2, d3, d4}},
+  };
+  bool supported = false;
+  bool result = PathSystemOptWarp(graph, paths, 3, &supported, distance_cache, subset_dp_cache);
+  if (!supported) {
+    result = (threadIdx.x & 31U) == 0U
+                 ? quick_hs::Opt244(graph, a, b, c1, c2, c3, c4, d1, d2, d3, d4)
+                 : false;
+    result = __shfl_sync(kFullWarp, result, 0);
+  }
+  return result;
+}
+
+__device__ bool Opt253Warp(const quick_hs::GraphView graph, const std::int32_t a,
+                           const std::int32_t b, const std::int32_t c1, const std::int32_t c2,
+                           const std::int32_t c3, const std::int32_t c4, const std::int32_t c5,
+                           const std::int32_t d1, const std::int32_t d2, const std::int32_t d3,
+                           std::int64_t* const distance_cache,
+                           std::int64_t* const subset_dp_cache) {
+  constexpr unsigned kFullWarp = 0xffffffffU;
+  const std::int32_t roles[10] = {a, b, c1, c2, c3, c4, c5, d1, d2, d3};
+  if (!quick_hs::AllNodesDistinct(roles, 10)) {
+    return true;
+  }
+  if (!quick_hs::Opt23(graph, c1, c2, c2, c3, c4, quick_hs::Distance(graph, c1, c2),
+                       quick_hs::Distance(graph, c2, c3), quick_hs::Distance(graph, c3, c4)) ||
+      !quick_hs::Opt23(graph, c1, c2, c3, c4, c5, quick_hs::Distance(graph, c1, c2),
+                       quick_hs::Distance(graph, c3, c4), quick_hs::Distance(graph, c4, c5)) ||
+      !quick_hs::Opt23(graph, c1, c2, d1, d2, d3, quick_hs::Distance(graph, c1, c2),
+                       quick_hs::Distance(graph, d1, d2), quick_hs::Distance(graph, d2, d3)) ||
+      !quick_hs::Opt23(graph, d1, d2, c1, c2, c3, quick_hs::Distance(graph, d1, d2),
+                       quick_hs::Distance(graph, c1, c2), quick_hs::Distance(graph, c2, c3)) ||
+      !quick_hs::Opt23(graph, d2, d3, c1, c2, c3, quick_hs::Distance(graph, d2, d3),
+                       quick_hs::Distance(graph, c1, c2), quick_hs::Distance(graph, c2, c3)) ||
+      !quick_hs::Opt23(graph, a, b, c1, c2, c3, quick_hs::Distance(graph, a, b),
+                       quick_hs::Distance(graph, c1, c2), quick_hs::Distance(graph, c2, c3))) {
+    return false;
+  }
+  const quick_hs::SmallPath paths[3] = {
+      {.size = 2, .node = {a, b}},
+      {.size = 5, .node = {c1, c2, c3, c4, c5}},
+      {.size = 3, .node = {d1, d2, d3}},
+  };
+  bool supported = false;
+  bool result = PathSystemOptWarp(graph, paths, 3, &supported, distance_cache, subset_dp_cache);
+  if (!supported) {
+    result = (threadIdx.x & 31U) == 0U
+                 ? quick_hs::Opt253(graph, a, b, c1, c2, c3, c4, c5, d1, d2, d3)
+                 : false;
+    result = __shfl_sync(kFullWarp, result, 0);
+  }
+  return result;
+}
+
+__device__ bool Opt343Warp(const quick_hs::GraphView graph, const std::int32_t a1,
+                           const std::int32_t a2, const std::int32_t a3, const std::int32_t b1,
+                           const std::int32_t b2, const std::int32_t b3, const std::int32_t b4,
+                           const std::int32_t c1, const std::int32_t c2, const std::int32_t c3,
+                           std::int64_t* const distance_cache,
+                           std::int64_t* const subset_dp_cache) {
+  constexpr unsigned kFullWarp = 0xffffffffU;
+  const std::int32_t roles[10] = {a1, a2, a3, b1, b2, b3, b4, c1, c2, c3};
+  if (!quick_hs::AllNodesDistinct(roles, 10)) {
+    return true;
+  }
+  if (!quick_hs::Opt23(graph, b1, b2, b2, b3, b4, quick_hs::Distance(graph, b1, b2),
+                       quick_hs::Distance(graph, b2, b3), quick_hs::Distance(graph, b3, b4)) ||
+      !quick_hs::Opt23(graph, b1, b2, a1, a2, a3, quick_hs::Distance(graph, b1, b2),
+                       quick_hs::Distance(graph, a1, a2), quick_hs::Distance(graph, a2, a3)) ||
+      !quick_hs::Opt23(graph, b1, b2, c1, c2, c3, quick_hs::Distance(graph, b1, b2),
+                       quick_hs::Distance(graph, c1, c2), quick_hs::Distance(graph, c2, c3)) ||
+      !quick_hs::Opt23(graph, a1, a2, b1, b2, b3, quick_hs::Distance(graph, a1, a2),
+                       quick_hs::Distance(graph, b1, b2), quick_hs::Distance(graph, b2, b3)) ||
+      !quick_hs::Opt23(graph, a2, a3, b1, b2, b3, quick_hs::Distance(graph, a2, a3),
+                       quick_hs::Distance(graph, b1, b2), quick_hs::Distance(graph, b2, b3)) ||
+      !quick_hs::Opt23(graph, c1, c2, b1, b2, b3, quick_hs::Distance(graph, c1, c2),
+                       quick_hs::Distance(graph, b1, b2), quick_hs::Distance(graph, b2, b3)) ||
+      !quick_hs::Opt23(graph, c2, c3, b1, b2, b3, quick_hs::Distance(graph, c2, c3),
+                       quick_hs::Distance(graph, b1, b2), quick_hs::Distance(graph, b2, b3)) ||
+      !quick_hs::Opt23(graph, a2, a3, b2, b3, b4, quick_hs::Distance(graph, a2, a3),
+                       quick_hs::Distance(graph, b2, b3), quick_hs::Distance(graph, b3, b4)) ||
+      !quick_hs::Opt23(graph, a2, a3, c1, c2, c3, quick_hs::Distance(graph, a2, a3),
+                       quick_hs::Distance(graph, c1, c2), quick_hs::Distance(graph, c2, c3))) {
+    return false;
+  }
+  const quick_hs::SmallPath paths[3] = {
+      {.size = 3, .node = {a1, a2, a3}},
+      {.size = 4, .node = {b1, b2, b3, b4}},
+      {.size = 3, .node = {c1, c2, c3}},
+  };
+  bool supported = false;
+  bool result = PathSystemOptWarp(graph, paths, 3, &supported, distance_cache, subset_dp_cache);
+  if (!supported) {
+    result = (threadIdx.x & 31U) == 0U
+                 ? quick_hs::Opt343(graph, a1, a2, a3, b1, b2, b3, b4, c1, c2, c3)
+                 : false;
+    result = __shfl_sync(kFullWarp, result, 0);
+  }
+  return result;
+}
+
+__device__ bool Opt233Warp(const quick_hs::GraphView graph, const std::int32_t a,
+                           const std::int32_t b, const std::int32_t c1, const std::int32_t c,
+                           const std::int32_t c2, const std::int32_t d1, const std::int32_t d,
+                           const std::int32_t d2, std::int64_t* const distance_cache) {
+  constexpr unsigned kFullWarp = 0xffffffffU;
+  const quick_hs::SmallPath paths[3] = {
+      {.size = 2, .node = {a, b}},
+      {.size = 3, .node = {c1, c, c2}},
+      {.size = 3, .node = {d1, d, d2}},
+  };
+  bool supported = false;
+  bool result = PathSystemOptWarp(graph, paths, 3, &supported, distance_cache);
+  if (!supported) {
+    result =
+        (threadIdx.x & 31U) == 0U ? quick_hs::Opt233(graph, a, b, c1, c, c2, d1, d, d2) : false;
+    result = __shfl_sync(kFullWarp, result, 0);
+  }
+  return result;
+}
+
+__device__ bool Opt33Warp(const quick_hs::GraphView graph, const std::int32_t a1,
+                          const std::int32_t a2, const std::int32_t a3, const std::int32_t b1,
+                          const std::int32_t b2, const std::int32_t b3,
+                          std::int64_t* const distance_cache) {
+  constexpr unsigned kFullWarp = 0xffffffffU;
+  const std::int32_t nodes[6] = {a1, a2, a3, b1, b2, b3};
+  bool all_distinct = true;
+  for (std::int32_t first = 0; first < 6; ++first) {
+    for (std::int32_t second = first + 1; second < 6; ++second) {
+      all_distinct = all_distinct && nodes[first] != nodes[second];
+    }
+  }
+  if (all_distinct &&
+      (!quick_hs::Opt23(graph, a1, a2, b1, b2, b3, quick_hs::Distance(graph, a1, a2),
+                        quick_hs::Distance(graph, b1, b2), quick_hs::Distance(graph, b2, b3)) ||
+       !quick_hs::Opt23(graph, a2, a3, b1, b2, b3, quick_hs::Distance(graph, a2, a3),
+                        quick_hs::Distance(graph, b1, b2), quick_hs::Distance(graph, b2, b3)) ||
+       !quick_hs::Opt23(graph, b1, b2, a1, a2, a3, quick_hs::Distance(graph, b1, b2),
+                        quick_hs::Distance(graph, a1, a2), quick_hs::Distance(graph, a2, a3)) ||
+       !quick_hs::Opt23(graph, b2, b3, a1, a2, a3, quick_hs::Distance(graph, b2, b3),
+                        quick_hs::Distance(graph, a1, a2), quick_hs::Distance(graph, a2, a3)))) {
+    return false;
+  }
+  // 通过作者门禁后，再由 cooperative warp-DP 精确求解 3+3 path
+  // system；共享端点仍交给通用合并逻辑处理，避免改变重叠路径语义。
+  const quick_hs::SmallPath paths[quick_hs::kMaxPathCount] = {
+      {.size = 3, .node = {a1, a2, a3}},
+      {.size = 3, .node = {b1, b2, b3}},
+  };
+  bool supported = false;
+  bool result = PathSystemOptWarp(graph, paths, 2, &supported, distance_cache);
+  if (!supported) {
+    result = (threadIdx.x & 31U) == 0U ? quick_hs::Opt33(graph, a1, a2, a3, b1, b2, b3) : false;
+    result = __shfl_sync(kFullWarp, result, 0);
+  }
+  return result;
+}
+
+// KH -e2 的第二层 endpoint reveal。state 保留原实现的规范顺序：第一层
+// 已经处理过的 endpoint 不重复展开，后续 endpoint 仍保持完整 AND 语义。
+__device__ bool ExtraExtraEdge243Warp(const quick_hs::GraphView graph, const std::int32_t a,
+                                      const std::int32_t b, const std::int32_t c1,
+                                      const std::int32_t c2, const std::int32_t c3,
+                                      const std::int32_t c4, const std::int32_t d1,
+                                      const std::int32_t d2, const std::int32_t d3,
+                                      const std::int32_t state, std::int64_t* const distance_cache,
+                                      std::int64_t* const subset_dp_cache) {
+  std::int32_t current_state = 0;
+  const std::int32_t c_path[2][4] = {{c1, c2, c3, c4}, {c4, c3, c2, c1}};
+  for (std::int32_t orientation = 0; orientation < 2; ++orientation) {
+    if (++current_state < state) {
+      continue;
+    }
+    const std::int32_t endpoint = c_path[orientation][0];
+    if (endpoint == a || endpoint == b || endpoint == d1 || endpoint == d3) {
+      continue;
+    }
+    bool unresolved = false;
+    for (std::int64_t slot = quick_hs::NeighborBegin(graph, endpoint);
+         slot < quick_hs::NeighborEnd(graph, endpoint); ++slot) {
+      if (!quick_hs::NeighborActive(graph, slot)) {
+        continue;
+      }
+      const std::int32_t extension = quick_hs::Neighbor(graph, endpoint, slot);
+      if (extension == c_path[orientation][1] || extension == c_path[orientation][2] ||
+          extension == c_path[orientation][3] || extension == d2 ||
+          quick_hs::PairForbidden(graph, endpoint, c_path[orientation][1], extension)) {
+        continue;
+      }
+      if (Opt253Warp(graph, a, b, extension, c_path[orientation][0], c_path[orientation][1],
+                     c_path[orientation][2], c_path[orientation][3], d1, d2, d3, distance_cache,
+                     subset_dp_cache)) {
+        unresolved = true;
+        break;
+      }
+    }
+    if (!unresolved) {
+      return false;
+    }
+  }
+
+  const std::int32_t d_path[2][3] = {{d1, d2, d3}, {d3, d2, d1}};
+  for (std::int32_t orientation = 0; orientation < 2; ++orientation) {
+    if (++current_state < state) {
+      continue;
+    }
+    const std::int32_t endpoint = d_path[orientation][0];
+    if (endpoint == a || endpoint == b || endpoint == c1 || endpoint == c4) {
+      continue;
+    }
+    bool unresolved = false;
+    for (std::int64_t slot = quick_hs::NeighborBegin(graph, endpoint);
+         slot < quick_hs::NeighborEnd(graph, endpoint); ++slot) {
+      if (!quick_hs::NeighborActive(graph, slot)) {
+        continue;
+      }
+      const std::int32_t extension = quick_hs::Neighbor(graph, endpoint, slot);
+      if (extension == d_path[orientation][1] || extension == d_path[orientation][2] ||
+          extension == c2 || extension == c3 ||
+          quick_hs::PairForbidden(graph, endpoint, d_path[orientation][1], extension)) {
+        continue;
+      }
+      if (Opt244Warp(graph, a, b, extension, d_path[orientation][0], d_path[orientation][1],
+                     d_path[orientation][2], c1, c2, c3, c4, distance_cache, subset_dp_cache)) {
+        unresolved = true;
+        break;
+      }
+    }
+    if (!unresolved) {
+      return false;
+    }
+  }
+
+  const std::int32_t target[2][2] = {{a, b}, {b, a}};
+  for (std::int32_t orientation = 0; orientation < 2; ++orientation) {
+    if (++current_state < state) {
+      continue;
+    }
+    const std::int32_t opposite = target[orientation][0];
+    const std::int32_t endpoint = target[orientation][1];
+    if (endpoint == c1 || endpoint == c4 || endpoint == d1 || endpoint == d3) {
+      continue;
+    }
+    bool unresolved = false;
+    for (std::int64_t slot = quick_hs::NeighborBegin(graph, endpoint);
+         slot < quick_hs::NeighborEnd(graph, endpoint); ++slot) {
+      if (!quick_hs::NeighborActive(graph, slot)) {
+        continue;
+      }
+      const std::int32_t extension = quick_hs::Neighbor(graph, endpoint, slot);
+      if (extension == opposite || extension == c2 || extension == c3 || extension == d2 ||
+          quick_hs::PairForbidden(graph, endpoint, opposite, extension)) {
+        continue;
+      }
+      if (Opt343Warp(graph, opposite, endpoint, extension, c1, c2, c3, c4, d1, d2, d3,
+                     distance_cache, subset_dp_cache)) {
+        unresolved = true;
+        break;
+      }
+    }
+    if (!unresolved) {
+      return false;
+    }
+  }
+  return true;
+}
+
+__device__ bool ExtraExtraEdge333Warp(const quick_hs::GraphView graph, const std::int32_t a1,
+                                      const std::int32_t a2, const std::int32_t a3,
+                                      const std::int32_t c1, const std::int32_t c2,
+                                      const std::int32_t c3, const std::int32_t d1,
+                                      const std::int32_t d2, const std::int32_t d3,
+                                      const std::int32_t state, std::int64_t* const distance_cache,
+                                      std::int64_t* const subset_dp_cache) {
+  std::int32_t current_state = 0;
+  const std::int32_t c_path[2][3] = {{c1, c2, c3}, {c3, c2, c1}};
+  for (std::int32_t orientation = 0; orientation < 2; ++orientation) {
+    if (++current_state < state) {
+      continue;
+    }
+    const std::int32_t endpoint = c_path[orientation][0];
+    if (endpoint == a1 || endpoint == a3 || endpoint == d1 || endpoint == d3) {
+      continue;
+    }
+    bool unresolved = false;
+    for (std::int64_t slot = quick_hs::NeighborBegin(graph, endpoint);
+         slot < quick_hs::NeighborEnd(graph, endpoint); ++slot) {
+      if (!quick_hs::NeighborActive(graph, slot)) {
+        continue;
+      }
+      const std::int32_t extension = quick_hs::Neighbor(graph, endpoint, slot);
+      if (extension == c_path[orientation][1] || extension == c_path[orientation][2] ||
+          extension == a2 || extension == d2 ||
+          quick_hs::PairForbidden(graph, endpoint, c_path[orientation][1], extension)) {
+        continue;
+      }
+      if (Opt343Warp(graph, a1, a2, a3, extension, c_path[orientation][0], c_path[orientation][1],
+                     c_path[orientation][2], d1, d2, d3, distance_cache, subset_dp_cache)) {
+        unresolved = true;
+        break;
+      }
+    }
+    if (!unresolved) {
+      return false;
+    }
+  }
+
+  const std::int32_t d_path[2][3] = {{d1, d2, d3}, {d3, d2, d1}};
+  for (std::int32_t orientation = 0; orientation < 2; ++orientation) {
+    if (++current_state < state) {
+      continue;
+    }
+    const std::int32_t endpoint = d_path[orientation][0];
+    if (endpoint == a1 || endpoint == a3 || endpoint == c1 || endpoint == c3) {
+      continue;
+    }
+    bool unresolved = false;
+    for (std::int64_t slot = quick_hs::NeighborBegin(graph, endpoint);
+         slot < quick_hs::NeighborEnd(graph, endpoint); ++slot) {
+      if (!quick_hs::NeighborActive(graph, slot)) {
+        continue;
+      }
+      const std::int32_t extension = quick_hs::Neighbor(graph, endpoint, slot);
+      if (extension == d_path[orientation][1] || extension == d_path[orientation][2] ||
+          extension == a2 || extension == c2 ||
+          quick_hs::PairForbidden(graph, endpoint, d_path[orientation][1], extension)) {
+        continue;
+      }
+      if (Opt343Warp(graph, a1, a2, a3, extension, d_path[orientation][0], d_path[orientation][1],
+                     d_path[orientation][2], c1, c2, c3, distance_cache, subset_dp_cache)) {
+        unresolved = true;
+        break;
+      }
+    }
+    if (!unresolved) {
+      return false;
+    }
+  }
+
+  const std::int32_t a_path[2][3] = {{a1, a2, a3}, {a3, a2, a1}};
+  for (std::int32_t orientation = 0; orientation < 2; ++orientation) {
+    if (++current_state < state) {
+      continue;
+    }
+    const std::int32_t endpoint = a_path[orientation][0];
+    if (endpoint == c1 || endpoint == c3 || endpoint == d1 || endpoint == d3) {
+      continue;
+    }
+    bool unresolved = false;
+    for (std::int64_t slot = quick_hs::NeighborBegin(graph, endpoint);
+         slot < quick_hs::NeighborEnd(graph, endpoint); ++slot) {
+      if (!quick_hs::NeighborActive(graph, slot)) {
+        continue;
+      }
+      const std::int32_t extension = quick_hs::Neighbor(graph, endpoint, slot);
+      if (extension == a_path[orientation][1] || extension == a_path[orientation][2] ||
+          extension == c2 || extension == d2 ||
+          quick_hs::PairForbidden(graph, endpoint, a_path[orientation][1], extension)) {
+        continue;
+      }
+      if (Opt343Warp(graph, c1, c2, c3, extension, a_path[orientation][0], a_path[orientation][1],
+                     a_path[orientation][2], d1, d2, d3, distance_cache, subset_dp_cache)) {
+        unresolved = true;
+        break;
+      }
+    }
+    if (!unresolved) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <bool EnableExtraEdge2>
+__device__ bool
+ExtraEdgeOpt1Warp(const quick_hs::GraphView graph, const std::int32_t a, const std::int32_t b,
+                  const std::int32_t c1, const std::int32_t c, const std::int32_t c2,
+                  const std::int32_t d1, const std::int32_t d, const std::int32_t d2,
+                  std::int64_t* const distance_cache, std::int64_t* const subset_dp_cache) {
+  const std::int32_t path_endpoints[2][2] = {{c1, c2}, {d1, d2}};
+  const std::int32_t path_centers[2] = {c, d};
+  std::int32_t state = 0;
+  for (std::int32_t path = 0; path < 2; ++path) {
+    const std::int32_t other = 1 - path;
+    for (std::int32_t side = 0; side < 2; ++side) {
+      ++state;
+      const std::int32_t endpoint = path_endpoints[path][side];
+      const std::int32_t opposite = path_endpoints[path][1 - side];
+      if (endpoint == a || endpoint == b || endpoint == path_endpoints[other][0] ||
+          endpoint == path_endpoints[other][1]) {
+        continue;
+      }
+      bool unresolved = false;
+      const std::int64_t begin = quick_hs::NeighborBegin(graph, endpoint);
+      const std::int64_t end = quick_hs::NeighborEnd(graph, endpoint);
+      for (std::int64_t slot = begin; slot < end; ++slot) {
+        if (!quick_hs::NeighborActive(graph, slot)) {
+          continue;
+        }
+        const std::int32_t extension = quick_hs::Neighbor(graph, endpoint, slot);
+        if (extension == path_centers[path] || extension == opposite ||
+            extension == path_centers[other] ||
+            quick_hs::PairForbidden(graph, endpoint, path_centers[path], extension)) {
+          continue;
+        }
+        bool admits = Opt243Warp(graph, a, b, extension, endpoint, path_centers[path], opposite,
+                                 path_endpoints[other][0], path_centers[other],
+                                 path_endpoints[other][1], distance_cache);
+        if constexpr (EnableExtraEdge2) {
+          admits = admits && ExtraExtraEdge243Warp(
+                                 graph, a, b, extension, endpoint, path_centers[path], opposite,
+                                 path_endpoints[other][0], path_centers[other],
+                                 path_endpoints[other][1], state, distance_cache, subset_dp_cache);
+        }
+        if (admits) {
+          unresolved = true;
+          break;
+        }
+      }
+      if (!unresolved) {
+        return false;
+      }
+    }
+  }
+
+  const std::int32_t target_endpoints[2] = {b, a};
+  const std::int32_t target_opposites[2] = {a, b};
+  for (std::int32_t side = 0; side < 2; ++side) {
+    ++state;
+    const std::int32_t endpoint = target_endpoints[side];
+    const std::int32_t opposite = target_opposites[side];
+    if (endpoint == c1 || endpoint == c2 || endpoint == d1 || endpoint == d2) {
+      continue;
+    }
+    bool unresolved = false;
+    const std::int64_t begin = quick_hs::NeighborBegin(graph, endpoint);
+    const std::int64_t end = quick_hs::NeighborEnd(graph, endpoint);
+    for (std::int64_t slot = begin; slot < end; ++slot) {
+      if (!quick_hs::NeighborActive(graph, slot)) {
+        continue;
+      }
+      const std::int32_t extension = quick_hs::Neighbor(graph, endpoint, slot);
+      if (extension == opposite || extension == c || extension == d ||
+          quick_hs::PairForbidden(graph, endpoint, opposite, extension)) {
+        continue;
+      }
+      bool admits =
+          Opt333Warp(graph, opposite, endpoint, extension, c1, c, c2, d1, d, d2, distance_cache);
+      if constexpr (EnableExtraEdge2) {
+        admits = admits && ExtraExtraEdge333Warp(graph, opposite, endpoint, extension, c1, c, c2,
+                                                 d1, d, d2, state, distance_cache, subset_dp_cache);
+      }
+      if (admits) {
+        unresolved = true;
+        break;
+      }
+    }
+    if (!unresolved) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// AND replies 在 CTA 内按 warp 并行：一个 warp 负责一个基础 reply，
+// lane 再并行其六个 endpoint 的 extension 枚举。OR 候选仍严格顺序短路。
+template <std::int32_t ExtraEdgeDepth>
+__device__ bool
+RepliesClosedCta(const quick_hs::GraphView graph, const std::int32_t a, const std::int32_t b,
+                 const std::int32_t c, const std::int32_t d, const std::int64_t* const reduced_cost,
+                 const Signed128* const lower_bound, const std::int64_t incumbent_numerator,
+                 unsigned long long* const lp_closed_replies) {
+  const std::uint64_t c_degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, c) -
+                                                            quick_hs::NeighborBegin(graph, c));
+  const std::uint64_t d_degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, d) -
+                                                            quick_hs::NeighborBegin(graph, d));
+  const std::uint64_t c_pairs = c_degree < 2U ? 0U : c_degree * (c_degree - 1U) / 2U;
+  const std::uint64_t d_pairs = d_degree < 2U ? 0U : d_degree * (d_degree - 1U) / 2U;
+  if (d_pairs != 0U && c_pairs > ULLONG_MAX / d_pairs) {
+    // 极端高度数下不能完整编号 reply 空间，保守地不授权。
+    return false;
+  }
+  const std::uint64_t reply_count = c_pairs * d_pairs;
+  // 深度 2 每个活动 warp 需要 16 KiB 精确 subset-DP 工作区。保留两个
+  // 活动 warp 后，连同候选排序共享内存仍低于默认 48 KiB 上限；其余线程
+  // 继续参加 CTA barrier，但不领取 reply。
+  constexpr std::uint32_t kWarpsPerBlock = ExtraEdgeDepth >= 2 ? 2U : 4U;
+  constexpr std::int32_t kSubsetDpStatesPerBlock =
+      ExtraEdgeDepth >= 2 ? static_cast<std::int32_t>(kWarpsPerBlock) * kMaximumWarpSubsetDpStates
+                          : 1;
+  __shared__ std::int64_t path_distance_cache[kWarpsPerBlock * kMaximumWarpPathDistances];
+  __shared__ std::int64_t subset_dp_cache[kSubsetDpStatesPerBlock];
+  const std::uint32_t warp = threadIdx.x >> 5U;
+  const std::uint32_t lane = threadIdx.x & 31U;
+  for (std::uint64_t window = 0; window < reply_count; window += kWarpsPerBlock) {
+    const std::uint64_t reply = warp < kWarpsPerBlock ? window + warp : reply_count;
+    std::int32_t c1 = -1;
+    std::int32_t c2 = -1;
+    std::int32_t d1 = -1;
+    std::int32_t d2 = -1;
+    std::int32_t decoded = 0;
+    if (lane == 0U && reply < reply_count) {
+      const std::uint64_t c_ordinal = reply / d_pairs;
+      const std::uint64_t d_ordinal = reply % d_pairs;
+      decoded = DecodeNeighborPair(graph, c, c_ordinal, &c1, &c2) &&
+                DecodeNeighborPair(graph, d, d_ordinal, &d1, &d2);
+    }
+    constexpr unsigned kFullWarp = 0xffffffffU;
+    decoded = __shfl_sync(kFullWarp, decoded, 0);
+    c1 = __shfl_sync(kFullWarp, c1, 0);
+    c2 = __shfl_sync(kFullWarp, c2, 0);
+    d1 = __shfl_sync(kFullWarp, d1, 0);
+    d2 = __shfl_sync(kFullWarp, d2, 0);
+    const bool passes_fast =
+        decoded != 0 &&
+        quick_hs::ReplyPassesFastFilters<(ExtraEdgeDepth >= 1)>(graph, a, b, c1, c, c2, d1, d, d2);
+    const bool lp_closed =
+        passes_fast && LpClosesReplyWarp(graph, a, b, c1, c, c2, d1, d, d2, reduced_cost,
+                                         lower_bound, incumbent_numerator, lp_closed_replies);
+    bool admits_tour = passes_fast && !lp_closed &&
+                       Opt233Warp(graph, a, b, c1, c, c2, d1, d, d2,
+                                  path_distance_cache + warp * kMaximumWarpPathDistances);
+    if constexpr (ExtraEdgeDepth >= 1) {
+      if (admits_tour) {
+        std::int64_t* warp_subset_dp = nullptr;
+        if constexpr (ExtraEdgeDepth >= 2) {
+          warp_subset_dp = subset_dp_cache + warp * kMaximumWarpSubsetDpStates;
+        }
+        admits_tour = ExtraEdgeOpt1Warp<(ExtraEdgeDepth >= 2)>(
+            graph, a, b, c1, c, c2, d1, d, d2,
+            path_distance_cache + warp * kMaximumWarpPathDistances, warp_subset_dp);
+      }
+    }
+    if (__syncthreads_or(lane == 0U && admits_tour ? 1 : 0) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// 深层 -e1 使用 CTA-per-target continuation，避免旧实现由单线程串行
+// 扫描 |R(c)|*|R(d)| 产生的长尾。
+template <std::int32_t ExtraEdgeDepth>
+__global__ void QuickHsContinuationKernel(
+    const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+    const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+    const std::uint8_t* const edge_active, const std::uint8_t* const protected_edge,
+    const quick_hs::GraphView graph, std::uint8_t* const proposed,
+    std::int32_t* const first_witness, std::int32_t* const second_witness,
+    const std::int32_t candidate_limit, const std::int32_t pair_trial_limit,
+    const bool include_two_hop, const std::int64_t* const reduced_cost,
+    const Signed128* const lower_bound, const std::int64_t incumbent_numerator,
+    unsigned long long* const lp_closed_replies) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x);
   if (work >= work_count) {
     return;
   }
+  __shared__ std::int32_t candidates[quick_hs::kMaxPotentialNodes];
+  __shared__ std::int64_t scores[quick_hs::kMaxPotentialNodes];
+  __shared__ std::uint64_t surviving_pairs[quick_hs::kMaxPotentialNodes];
+  __shared__ std::uint64_t pair_product[kQuickPairSortCapacity];
+  __shared__ std::int64_t pair_distance[kQuickPairSortCapacity];
+  __shared__ std::int32_t pair_ordinal[kQuickPairSortCapacity];
+  __shared__ std::int32_t candidate_count;
+  __shared__ std::int32_t candidate_pair_count;
+  __shared__ std::int32_t enabled;
+  __shared__ std::int32_t found;
+  __shared__ std::int32_t candidate_eligible;
+
   const std::int32_t edge = active_edge_ids[work];
-  if (edge_active[edge] == 0U || protected_edge[edge] != 0U) {
-    return;
-  }
   const std::int32_t a = edge_u[edge];
   const std::int32_t b = edge_v[edge];
-  const quick_hs::Witness witness = quick_hs::FindWitness(graph, a, b);
-  if (witness.c >= 0) {
-    proposed[edge] = 1U;
-    first_witness[edge] = witness.c;
-    second_witness[edge] = witness.d;
+  if (threadIdx.x == 0U) {
+    candidate_count = 0;
+    found = 0;
+    enabled = edge_active[edge] != 0U && protected_edge[edge] == 0U && graph.degree[a] > 2 &&
+              graph.degree[b] > 2;
+    if (enabled != 0) {
+      for (std::int32_t side = 0; side < 2; ++side) {
+        const std::int32_t from = side == 0 ? a : b;
+        for (std::int64_t slot = quick_hs::NeighborBegin(graph, from);
+             slot < quick_hs::NeighborEnd(graph, from); ++slot) {
+          if (quick_hs::NeighborActive(graph, slot)) {
+            quick_hs::InsertWitnessCandidate(graph, a, b, quick_hs::Neighbor(graph, from, slot),
+                                             candidate_limit, candidates, scores, &candidate_count);
+          }
+        }
+      }
+      if (include_two_hop) {
+        for (std::int32_t side = 0; side < 2; ++side) {
+          const std::int32_t from = side == 0 ? a : b;
+          for (std::int64_t first = quick_hs::NeighborBegin(graph, from);
+               first < quick_hs::NeighborEnd(graph, from); ++first) {
+            if (!quick_hs::NeighborActive(graph, first)) {
+              continue;
+            }
+            const std::int32_t middle = quick_hs::Neighbor(graph, from, first);
+            for (std::int64_t second = quick_hs::NeighborBegin(graph, middle);
+                 second < quick_hs::NeighborEnd(graph, middle); ++second) {
+              if (quick_hs::NeighborActive(graph, second)) {
+                quick_hs::InsertWitnessCandidate(
+                    graph, a, b, quick_hs::Neighbor(graph, middle, second), candidate_limit,
+                    candidates, scores, &candidate_count);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  __syncthreads();
+  if (enabled == 0) {
+    return;
+  }
+
+  if (threadIdx.x == 0U) {
+    candidate_pair_count = candidate_count * (candidate_count - 1) / 2;
+  }
+  __syncthreads();
+
+  if (pair_trial_limit != 0) {
+    // P6：预算受限时，先用 Direct/Main-Edge 快规则统计每个中心仍允许的
+    // 邻边对数，再按 |R(c)|*|R(d)| 排序 OR 候选。全量 sweep 最终会访问
+    // 所有失败候选，排序只增加物理工作，因此保留规范顺序。
+    for (std::int32_t candidate = 0; candidate < candidate_count; ++candidate) {
+      const std::uint64_t surviving = CountSurvivingPairsCta(graph, a, b, candidates[candidate]);
+      if (threadIdx.x == 0U) {
+        surviving_pairs[candidate] = surviving;
+      }
+    }
+    for (std::int32_t slot = static_cast<std::int32_t>(threadIdx.x); slot < kQuickPairSortCapacity;
+         slot += static_cast<std::int32_t>(blockDim.x)) {
+      if (slot < candidate_pair_count) {
+        std::int32_t first = -1;
+        std::int32_t second = -1;
+        DecodeQuickCandidatePair(candidate_count, slot, &first, &second);
+        pair_product[slot] = SaturatingProduct(surviving_pairs[first], surviving_pairs[second]);
+        pair_distance[slot] = scores[first] + scores[second];
+        pair_ordinal[slot] = slot;
+      } else {
+        pair_product[slot] = ULLONG_MAX;
+        pair_distance[slot] = INT64_MAX;
+        pair_ordinal[slot] = INT_MAX;
+      }
+    }
+    __syncthreads();
+
+    // 固定 512 项 bitonic 网络避免 thread-0 插入排序成为每个 target 的串行瓶颈。
+    for (std::int32_t width = 2; width <= kQuickPairSortCapacity; width <<= 1) {
+      for (std::int32_t stride = width >> 1; stride > 0; stride >>= 1) {
+        for (std::int32_t slot = static_cast<std::int32_t>(threadIdx.x);
+             slot < kQuickPairSortCapacity; slot += static_cast<std::int32_t>(blockDim.x)) {
+          const std::int32_t partner = slot ^ stride;
+          if (partner <= slot) {
+            continue;
+          }
+          const bool ascending = (slot & width) == 0;
+          const bool lhs_after_rhs = QuickPairOrderAfter(
+              pair_product[slot], pair_distance[slot], pair_ordinal[slot], pair_product[partner],
+              pair_distance[partner], pair_ordinal[partner]);
+          const bool rhs_after_lhs = QuickPairOrderAfter(
+              pair_product[partner], pair_distance[partner], pair_ordinal[partner],
+              pair_product[slot], pair_distance[slot], pair_ordinal[slot]);
+          if ((ascending && lhs_after_rhs) || (!ascending && rhs_after_lhs)) {
+            const std::uint64_t saved_product = pair_product[slot];
+            const std::int64_t saved_distance = pair_distance[slot];
+            const std::int32_t saved_ordinal = pair_ordinal[slot];
+            pair_product[slot] = pair_product[partner];
+            pair_distance[slot] = pair_distance[partner];
+            pair_ordinal[slot] = pair_ordinal[partner];
+            pair_product[partner] = saved_product;
+            pair_distance[partner] = saved_distance;
+            pair_ordinal[partner] = saved_ordinal;
+          }
+        }
+        __syncthreads();
+      }
+    }
+  }
+
+  for (std::int32_t trial = 0; trial < candidate_pair_count; ++trial) {
+    if (pair_trial_limit != 0 && trial >= pair_trial_limit) {
+      return;
+    }
+    std::int32_t first = -1;
+    std::int32_t second = -1;
+    const std::int32_t ordinal = pair_trial_limit == 0 ? trial : pair_ordinal[trial];
+    DecodeQuickCandidatePair(candidate_count, ordinal, &first, &second);
+    const std::int32_t c = candidates[first];
+    const std::int32_t d = candidates[second];
+    if (threadIdx.x == 0U) {
+      candidate_eligible =
+          !quick_hs::Compatible(graph, a, b, c, d, quick_hs::Distance(graph, a, b));
+    }
+    __syncthreads();
+    const bool closed = candidate_eligible != 0 && RepliesClosedCta<ExtraEdgeDepth>(
+                                                       graph, a, b, c, d, reduced_cost, lower_bound,
+                                                       incumbent_numerator, lp_closed_replies);
+    if (threadIdx.x == 0U && closed) {
+      proposed[edge] = 1U;
+      first_witness[edge] = c;
+      second_witness[edge] = d;
+      found = 1;
+    }
+    __syncthreads();
+    if (found != 0) {
+      return;
+    }
   }
 }
 
@@ -730,6 +2382,187 @@ __global__ void ActiveCostSummaryKernel(const std::int32_t work_count,
     atomicAdd(active_count, 1ULL);
     atomicAdd(cost_sum, static_cast<unsigned long long>(edge_weight[edge]));
   }
+}
+
+__device__ void InsertLocalSecIncidence(const LocalSecLayout layout, const std::int32_t family,
+                                        const std::int32_t window, const std::int32_t rank_u,
+                                        const std::int32_t rank_v, std::int32_t* const cut_ids,
+                                        std::uint8_t* const count) {
+  const std::int32_t family_count = layout.offset[family + 1] - layout.offset[family];
+  if (window < 0 || window >= family_count) {
+    return;
+  }
+  const std::int32_t begin = window * layout.stride[family];
+  const std::int32_t end = begin + layout.size[family];
+  const bool contains_u = rank_u >= begin && rank_u < end;
+  const bool contains_v = rank_v >= begin && rank_v < end;
+  if (contains_u == contains_v) {
+    return;
+  }
+  const std::int32_t cut = layout.offset[family] + window;
+  for (std::uint8_t index = 0U; index < *count; ++index) {
+    if (cut_ids[index] == cut) {
+      return;
+    }
+  }
+  if (*count < kMaxLocalSecIncidence) {
+    cut_ids[(*count)++] = cut;
+  }
+}
+
+__global__ void BuildLocalSecIncidenceKernel(
+    const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+    const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+    const std::int32_t* const geometry_rank, const LocalSecLayout layout,
+    std::uint8_t* const incidence_count, std::int32_t* const incidence_ids) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  std::int32_t* const output =
+      incidence_ids + static_cast<std::int64_t>(edge) * kMaxLocalSecIncidence;
+  std::uint8_t count = 0U;
+  const std::int32_t u = edge_u[edge];
+  const std::int32_t v = edge_v[edge];
+  const std::int32_t rank_u = geometry_rank[u];
+  const std::int32_t rank_v = geometry_rank[v];
+  for (std::int32_t family = 0; family < kLocalSecFamilies; ++family) {
+    const std::int32_t stride = layout.stride[family];
+    const std::int32_t u_window = rank_u / stride;
+    const std::int32_t v_window = rank_v / stride;
+    InsertLocalSecIncidence(layout, family, u_window, rank_u, rank_v, output, &count);
+    InsertLocalSecIncidence(layout, family, u_window - 1, rank_u, rank_v, output, &count);
+    InsertLocalSecIncidence(layout, family, v_window, rank_u, rank_v, output, &count);
+    InsertLocalSecIncidence(layout, family, v_window - 1, rank_u, rank_v, output, &count);
+  }
+  incidence_count[edge] = count;
+}
+
+__global__ void InitializeSupportLabelsKernel(const std::int32_t dimension,
+                                              std::int32_t* const label) {
+  const std::int32_t vertex = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (vertex < dimension) {
+    label[vertex] = vertex;
+  }
+}
+
+__global__ void RelaxSupportLabelsKernel(
+    const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+    const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+    const std::uint8_t* const edge_active, const std::int64_t* const reduced_cost,
+    const std::int64_t support_threshold, std::int32_t* const label, std::int32_t* const changed) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] == 0U || reduced_cost[edge] >= support_threshold) {
+    return;
+  }
+  const std::int32_t u = edge_u[edge];
+  const std::int32_t v = edge_v[edge];
+  // label 同时被其他 support edge 的 atomicMin 更新；用原子零加读取，
+  // 避免普通 load 与原子写混用造成 CUDA 内存模型中的数据竞争。
+  const std::int32_t minimum = min(atomicAdd(&label[u], 0), atomicAdd(&label[v], 0));
+  if (atomicMin(&label[u], minimum) > minimum) {
+    atomicExch(changed, 1);
+  }
+  if (atomicMin(&label[v], minimum) > minimum) {
+    atomicExch(changed, 1);
+  }
+}
+
+__global__ void CompressSupportLabelsKernel(const std::int32_t dimension, std::int32_t* const label,
+                                            std::int32_t* const changed) {
+  const std::int32_t vertex = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (vertex >= dimension) {
+    return;
+  }
+  const std::int32_t old_label = atomicAdd(&label[vertex], 0);
+  std::int32_t root = old_label;
+  for (;;) {
+    const std::int32_t parent = atomicAdd(&label[root], 0);
+    if (parent >= root) {
+      break;
+    }
+    root = parent;
+  }
+  if (root < old_label) {
+    if (atomicMin(&label[vertex], root) > root) {
+      atomicExch(changed, 1);
+    }
+  }
+}
+
+__global__ void CountSupportComponentsKernel(const std::int32_t dimension,
+                                             const std::int32_t* const label,
+                                             std::int32_t* const component_size) {
+  const std::int32_t vertex = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (vertex < dimension) {
+    atomicAdd(&component_size[label[vertex]], 1);
+  }
+}
+
+__global__ void ActivateConnectivityCutsKernel(const std::int32_t dimension,
+                                               const std::int32_t dynamic_cut_offset,
+                                               const std::int32_t* const label,
+                                               const std::int32_t* const component_size,
+                                               std::uint8_t* const cut_active,
+                                               unsigned long long* const connectivity_cut_count) {
+  const std::int32_t root = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (root >= dimension) {
+    return;
+  }
+  const std::int32_t size = component_size[root];
+  const bool active = label[root] == root && size >= 2 && size <= dimension - 2;
+  cut_active[dynamic_cut_offset + root] = active ? 1U : 0U;
+  if (active) {
+    atomicAdd(connectivity_cut_count, 1ULL);
+  }
+}
+
+__device__ void AppendCutIncidence(const std::int32_t cut, std::int32_t* const cut_ids,
+                                   std::uint8_t* const count, std::int32_t* const invalid) {
+  if (*count >= kMaxLocalSecIncidence) {
+    atomicExch(invalid, 1);
+    return;
+  }
+  cut_ids[(*count)++] = cut;
+}
+
+__global__ void AppendConnectivityCutIncidenceKernel(
+    const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+    const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+    const std::uint8_t* const edge_active, const std::int32_t dynamic_cut_offset,
+    const std::int32_t* const label, const std::uint8_t* const cut_active,
+    std::uint8_t* const incidence_count, std::int32_t* const incidence_ids,
+    std::int32_t* const invalid) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] == 0U) {
+    return;
+  }
+  const std::int32_t first_root = label[edge_u[edge]];
+  const std::int32_t second_root = label[edge_v[edge]];
+  if (first_root == second_root) {
+    return;
+  }
+  std::int32_t* const output =
+      incidence_ids + static_cast<std::int64_t>(edge) * kMaxLocalSecIncidence;
+  std::uint8_t count = incidence_count[edge];
+  const std::int32_t first_cut = dynamic_cut_offset + first_root;
+  const std::int32_t second_cut = dynamic_cut_offset + second_root;
+  if (cut_active[first_cut] != 0U) {
+    AppendCutIncidence(first_cut, output, &count, invalid);
+  }
+  if (cut_active[second_cut] != 0U) {
+    AppendCutIncidence(second_cut, output, &count, invalid);
+  }
+  incidence_count[edge] = count;
 }
 
 __global__ void
@@ -753,6 +2586,38 @@ SelectDegreeBoxKernel(const std::int32_t work_count, const std::int32_t* const a
   }
 }
 
+__global__ void
+SelectStrongBoxKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+                      const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+                      const std::int64_t* const edge_weight, const std::uint8_t* const edge_active,
+                      const double* const vertex_dual, const double* const cut_dual,
+                      const std::uint8_t* const incidence_count,
+                      const std::int32_t* const incidence_ids, std::int32_t* const selected_degree,
+                      std::int32_t* const selected_cut) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] == 0U) {
+    return;
+  }
+  double reduced = static_cast<double>(edge_weight[edge]) - vertex_dual[edge_u[edge]] -
+                   vertex_dual[edge_v[edge]];
+  const std::int32_t* const cuts =
+      incidence_ids + static_cast<std::int64_t>(edge) * kMaxLocalSecIncidence;
+  for (std::uint8_t index = 0U; index < incidence_count[edge]; ++index) {
+    reduced -= cut_dual[cuts[index]];
+  }
+  if (reduced < 0.0) {
+    atomicAdd(&selected_degree[edge_u[edge]], 1);
+    atomicAdd(&selected_degree[edge_v[edge]], 1);
+    for (std::uint8_t index = 0U; index < incidence_count[edge]; ++index) {
+      atomicAdd(&selected_cut[cuts[index]], 1);
+    }
+  }
+}
+
 __global__ void UpdateResidentDualKernel(const std::int32_t dimension,
                                          const std::int32_t* const selected_degree,
                                          const double step, const double dual_limit,
@@ -764,6 +2629,25 @@ __global__ void UpdateResidentDualKernel(const std::int32_t dimension,
   const double gradient = 2.0 - static_cast<double>(selected_degree[vertex]);
   dual[vertex] = fmin(dual_limit, fmax(-dual_limit, dual[vertex] + step * gradient));
   average[vertex] += dual[vertex];
+}
+
+__global__ void UpdateLocalSecDualKernel(const std::int32_t cut_count,
+                                         const std::int32_t* const selected_cut,
+                                         const std::uint8_t* const cut_active, const double step,
+                                         const double dual_limit, double* const dual,
+                                         double* const average) {
+  const std::int32_t cut = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (cut >= cut_count) {
+    return;
+  }
+  if (cut_active[cut] == 0U) {
+    dual[cut] = 0.0;
+    average[cut] = 0.0;
+    return;
+  }
+  const double gradient = 2.0 - static_cast<double>(selected_cut[cut]);
+  dual[cut] = fmin(dual_limit, fmax(0.0, dual[cut] + step * gradient));
+  average[cut] += dual[cut];
 }
 
 __global__ void QuantizeResidentDualKernel(const std::int32_t dimension,
@@ -787,16 +2671,26 @@ __global__ void QuantizeResidentDualKernel(const std::int32_t dimension,
       static_cast<std::int64_t>(scaled >= 0.0 ? floor(scaled + 0.5) : ceil(scaled - 0.5));
 }
 
-__global__ void DegreeConstantKernel(const std::int32_t dimension,
-                                     const std::int64_t* const quantized,
-                                     long long* const lower_bound) {
-  const std::int32_t vertex = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
-  if (vertex < dimension) {
-    // CUDA 的 64 位 atomicAdd 只暴露 unsigned overload；在已做无溢出门禁后，
-    // 二补码模加与有符号精确和的位模式一致。
-    atomicAdd(reinterpret_cast<unsigned long long*>(lower_bound),
-              static_cast<unsigned long long>(2 * quantized[vertex]));
+__global__ void
+QuantizeLocalSecDualKernel(const std::int32_t cut_count, const double inverse_iterations,
+                           const double denominator, const double maximum_scaled,
+                           const double* const average, const std::uint8_t* const cut_active,
+                           std::int64_t* const quantized, std::int32_t* const invalid) {
+  const std::int32_t cut = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (cut >= cut_count) {
+    return;
   }
+  if (cut_active[cut] == 0U) {
+    quantized[cut] = 0;
+    return;
+  }
+  const double scaled = average[cut] * inverse_iterations * denominator;
+  if (!isfinite(scaled) || scaled < 0.0 || scaled > maximum_scaled) {
+    atomicExch(invalid, 1);
+    quantized[cut] = 0;
+    return;
+  }
+  quantized[cut] = static_cast<std::int64_t>(floor(scaled + 0.5));
 }
 
 __global__ void
@@ -804,7 +2698,9 @@ ReducedCostKernel(const std::int32_t work_count, const std::int32_t* const activ
                   const std::int32_t* const edge_u, const std::int32_t* const edge_v,
                   const std::int64_t* const edge_weight, const std::uint8_t* const edge_active,
                   const std::int64_t denominator, const std::int64_t* const quantized,
-                  std::int64_t* const reduced_cost, long long* const lower_bound) {
+                  const std::int64_t* const quantized_cut,
+                  const std::uint8_t* const incidence_count,
+                  const std::int32_t* const incidence_ids, std::int64_t* const reduced_cost) {
   const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
   if (work >= work_count) {
     return;
@@ -814,12 +2710,132 @@ ReducedCostKernel(const std::int32_t work_count, const std::int32_t* const activ
     reduced_cost[edge] = 0;
     return;
   }
-  const std::int64_t reduced =
+  std::int64_t reduced =
       edge_weight[edge] * denominator - quantized[edge_u[edge]] - quantized[edge_v[edge]];
+  const std::int32_t* const cuts =
+      incidence_ids + static_cast<std::int64_t>(edge) * kMaxLocalSecIncidence;
+  for (std::uint8_t index = 0U; index < incidence_count[edge]; ++index) {
+    reduced -= quantized_cut[cuts[index]];
+  }
   reduced_cost[edge] = reduced;
-  if (reduced < 0) {
-    atomicAdd(reinterpret_cast<unsigned long long*>(lower_bound),
-              static_cast<unsigned long long>(reduced));
+}
+
+template <std::int32_t Threads>
+__global__ void
+ExactBoxBoundPartialsKernel(const std::int32_t dimension, const std::int32_t work_count,
+                            const std::int32_t* const active_edge_ids,
+                            const std::uint8_t* const edge_active,
+                            const std::int64_t* const quantized, const std::int32_t cut_count,
+                            const std::int64_t* const quantized_cut,
+                            const std::int64_t* const reduced_cost, Signed128* const partials) {
+  __shared__ Signed128 reduction[Threads];
+  const std::int64_t total = static_cast<std::int64_t>(dimension) + cut_count + work_count;
+  const std::int64_t thread = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;
+  Signed128 local{};
+  for (std::int64_t index = thread; index < total; index += stride) {
+    if (index < dimension) {
+      local = Signed128AddInt64(local, 2 * quantized[index]);
+      continue;
+    }
+    const std::int64_t cut_index = index - dimension;
+    if (cut_index < cut_count) {
+      local = Signed128AddInt64(local, 2 * quantized_cut[cut_index]);
+      continue;
+    }
+    const std::int32_t work = static_cast<std::int32_t>(cut_index - cut_count);
+    const std::int32_t edge = active_edge_ids[work];
+    if (edge_active[edge] != 0U && reduced_cost[edge] < 0) {
+      local = Signed128AddInt64(local, reduced_cost[edge]);
+    }
+  }
+  reduction[threadIdx.x] = local;
+  __syncthreads();
+  for (std::int32_t offset = Threads / 2; offset != 0; offset /= 2) {
+    if (static_cast<std::int32_t>(threadIdx.x) < offset) {
+      reduction[threadIdx.x] =
+          Signed128Add(reduction[threadIdx.x], reduction[threadIdx.x + offset]);
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0U) {
+    partials[blockIdx.x] = reduction[0];
+  }
+}
+
+template <std::int32_t Threads>
+__global__ void ExactBoxBoundFinalizeKernel(const std::int32_t partial_count,
+                                            const Signed128* const partials,
+                                            Signed128* const lower_bound) {
+  __shared__ Signed128 reduction[Threads];
+  Signed128 local{};
+  for (std::int32_t index = static_cast<std::int32_t>(threadIdx.x); index < partial_count;
+       index += Threads) {
+    local = Signed128Add(local, partials[index]);
+  }
+  reduction[threadIdx.x] = local;
+  __syncthreads();
+  for (std::int32_t offset = Threads / 2; offset != 0; offset /= 2) {
+    if (static_cast<std::int32_t>(threadIdx.x) < offset) {
+      reduction[threadIdx.x] =
+          Signed128Add(reduction[threadIdx.x], reduction[threadIdx.x + offset]);
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0U) {
+    *lower_bound = reduction[0];
+  }
+}
+
+__global__ void DecideBetterLpSnapshotKernel(const Signed128* const candidate_lower_bound,
+                                             Signed128* const selected_lower_bound,
+                                             const std::int32_t candidate_kind,
+                                             const bool force_candidate,
+                                             std::int32_t* const selected_kind,
+                                             std::int32_t* const apply_candidate) {
+  if (blockIdx.x != 0U || threadIdx.x != 0U) {
+    return;
+  }
+  const bool choose_candidate =
+      force_candidate || Signed128Greater(*candidate_lower_bound, *selected_lower_bound);
+  if (choose_candidate) {
+    *selected_lower_bound = *candidate_lower_bound;
+    *selected_kind = candidate_kind;
+  }
+  *apply_candidate = choose_candidate ? 1 : 0;
+}
+
+__global__ void ApplyBetterLpSnapshotKernel(
+    const std::int32_t dimension, const std::int32_t work_count,
+    const std::int32_t* const active_edge_ids, const std::int32_t cut_count,
+    const std::int64_t* const candidate_quantized,
+    const std::int64_t* const candidate_quantized_cut,
+    const std::int64_t* const candidate_reduced_cost, std::int64_t* const selected_quantized,
+    std::int64_t* const selected_quantized_cut, std::int64_t* const selected_reduced_cost,
+    const std::int32_t* const apply_candidate) {
+  if (*apply_candidate == 0) {
+    return;
+  }
+  const std::int32_t thread = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  const std::int32_t stride = static_cast<std::int32_t>(gridDim.x * blockDim.x);
+  for (std::int32_t vertex = thread; vertex < dimension; vertex += stride) {
+    selected_quantized[vertex] = candidate_quantized[vertex];
+  }
+  for (std::int32_t cut = thread; cut < cut_count; cut += stride) {
+    selected_quantized_cut[cut] = candidate_quantized_cut[cut];
+  }
+  for (std::int32_t work = thread; work < work_count; work += stride) {
+    const std::int32_t edge = active_edge_ids[work];
+    selected_reduced_cost[edge] = candidate_reduced_cost[edge];
+  }
+}
+
+__global__ void ValidateLpReplayBoundKernel(const Signed128* const proposed,
+                                            const Signed128* const replayed,
+                                            std::int32_t* const invalid) {
+  if (blockIdx.x == 0U && threadIdx.x == 0U &&
+      (proposed->high != replayed->high || proposed->low != replayed->low)) {
+    *invalid = 1;
   }
 }
 
@@ -828,7 +2844,7 @@ LpForcedOneKernel(const std::int32_t edge_count, const std::int32_t* const edge_
                   const std::int32_t* const active_edge_ids, const std::int32_t* const edge_v,
                   const std::uint8_t* const edge_active, const std::uint8_t* const protected_edge,
                   const std::int32_t* const degree, const std::int64_t* const reduced_cost,
-                  const long long* const lower_bound, const std::int64_t incumbent_numerator,
+                  const Signed128* const lower_bound, const std::int64_t incumbent_numerator,
                   std::uint8_t* const proposed) {
   const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
   if (work >= edge_count) {
@@ -840,56 +2856,1362 @@ LpForcedOneKernel(const std::int32_t edge_count, const std::int32_t* const edge_
     return;
   }
   const std::int64_t positive_reduced = reduced_cost[edge] > 0 ? reduced_cost[edge] : 0;
-  if (*lower_bound + positive_reduced > incumbent_numerator) {
+  if (Signed128GreaterThanInt64(Signed128AddInt64(*lower_bound, positive_reduced),
+                                incumbent_numerator)) {
     proposed[edge] = 1U;
   }
 }
 
-// 候选在同一只读快照生成；提交仍按 stable edge id 串行执行最小度门禁。
-// 该 kernel 的工作远小于组合搜索，单线程可保证与 CPU replayer 完全同序。
-__global__ void CommitKernel(const std::int32_t dimension, const std::int32_t work_count,
-                             const std::int32_t* const active_edge_ids,
-                             const std::int32_t* const edge_u, const std::int32_t* const edge_v,
-                             std::uint8_t* const edge_active, std::uint8_t* const active_matrix,
-                             const std::uint8_t* const protected_edge,
-                             const std::uint8_t* const proposed, std::int32_t* const degree,
-                             std::uint8_t* const committed,
-                             unsigned long long* const committed_count) {
-  if (blockIdx.x != 0U || threadIdx.x != 0U) {
+__device__ void RecordReplayResult(bool proposed, bool valid, std::uint8_t* verified,
+                                   std::int32_t edge, unsigned long long* replayed,
+                                   unsigned long long* rejected);
+
+__global__ void
+LpForcedZeroKernel(const std::int32_t edge_count, const std::int32_t* const active_edge_ids,
+                   const std::uint8_t* const edge_active, const std::uint8_t* const protected_edge,
+                   const std::int64_t* const reduced_cost, const Signed128* const lower_bound,
+                   const std::int64_t incumbent_numerator, std::uint8_t* const proposed_fixed) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= edge_count) {
     return;
   }
-  unsigned long long count = 0U;
-  for (std::int32_t work = 0; work < work_count; ++work) {
-    const std::int32_t edge = active_edge_ids[work];
-    if (edge_active[edge] == 0U || proposed[edge] == 0U || protected_edge[edge] != 0U) {
-      continue;
-    }
-    const std::int32_t u = edge_u[edge];
-    const std::int32_t v = edge_v[edge];
-    if (degree[u] <= 2 || degree[v] <= 2) {
-      continue;
-    }
-    edge_active[edge] = 0U;
-    active_matrix[static_cast<std::int64_t>(u) * dimension + v] = 0U;
-    active_matrix[static_cast<std::int64_t>(v) * dimension + u] = 0U;
-    --degree[u];
-    --degree[v];
-    committed[edge] = 1U;
-    ++count;
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] == 0U || protected_edge[edge] != 0U) {
+    return;
   }
-  *committed_count = count;
+  const std::int64_t negative_reduced = reduced_cost[edge] < 0 ? -reduced_cost[edge] : 0;
+  if (Signed128GreaterThanInt64(Signed128AddInt64(*lower_bound, negative_reduced),
+                                incumbent_numerator)) {
+    proposed_fixed[edge] = 1U;
+  }
 }
 
-std::vector<std::int64_t> BuildDistanceMatrix(const GraphSnapshot& graph) {
-  const std::size_t dimension = static_cast<std::size_t>(graph.dimension);
-  std::vector<std::int64_t> result(dimension * dimension);
-  for (std::int32_t u = 0; u < graph.dimension; ++u) {
-    for (std::int32_t v = 0; v < graph.dimension; ++v) {
-      result[static_cast<std::size_t>(u) * dimension + static_cast<std::size_t>(v)] =
-          graph.Distance(u, v);
+__device__ bool NonpairsForceEdgeAtEndpoint(const quick_hs::GraphView graph,
+                                            const std::int32_t edge, const std::int32_t center) {
+  if (graph.pair_offsets == nullptr || graph.nonpair_mask == nullptr || edge < 0 ||
+      edge >= graph.edge_count || graph.edge_active[edge] == 0U) {
+    return false;
+  }
+  const std::int32_t other = graph.edge_u[edge] == center ? graph.edge_v[edge] : graph.edge_u[edge];
+  const std::int64_t begin = quick_hs::NeighborBegin(graph, center);
+  const std::int64_t end = quick_hs::NeighborEnd(graph, center);
+  std::int64_t edge_slot = -1;
+  for (std::int64_t slot = begin; slot < end; ++slot) {
+    if (quick_hs::Neighbor(graph, center, slot) == other) {
+      edge_slot = slot;
+      break;
+    }
+  }
+  if (edge_slot < 0) {
+    return false;
+  }
+  // 如果 center 的所有可行 Hamilton 邻边对都含该边，则任何
+  // 最优 tour 都必须使用它。只有已授权 non-pair 可排除替代对。
+  for (std::int64_t first = begin; first + 1 < end; ++first) {
+    if (first == edge_slot) {
+      continue;
+    }
+    for (std::int64_t second = first + 1; second < end; ++second) {
+      if (second != edge_slot && !quick_hs::PairForbiddenBySlots(graph, center, first, second)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+__global__ void
+NonpairImpliedFixKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+                        const quick_hs::GraphView graph, const std::uint8_t* const protected_edge,
+                        std::uint8_t* const proposed_fixed, std::uint8_t* const fixed_from_nonpair,
+                        unsigned long long* const proposal_count) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (graph.edge_active[edge] == 0U || protected_edge[edge] != 0U || proposed_fixed[edge] != 0U) {
+    return;
+  }
+  if (NonpairsForceEdgeAtEndpoint(graph, edge, graph.edge_u[edge]) ||
+      NonpairsForceEdgeAtEndpoint(graph, edge, graph.edge_v[edge])) {
+    proposed_fixed[edge] = 1U;
+    fixed_from_nonpair[edge] = 1U;
+    atomicAdd(proposal_count, 1ULL);
+  }
+}
+
+constexpr std::uint8_t kFixedReasonLp = 0U;
+constexpr std::uint8_t kFixedReasonNonpair = 1U;
+constexpr std::uint8_t kFixedReasonDirect = 2U;
+constexpr std::uint32_t kDirectFixWarpsPerBlock = 4U;
+
+// 若 tour 不使用 edge=(a,b)，它必须分别在 a、b 选择一对不含 edge 的
+// incident edges。这里完整枚举两个 endpoint pair 集的笛卡尔积；每个
+// 3+3 path system 都被严格重连或 LP path bound 关闭时，edge 才可固定。
+__device__ bool DirectFixProvesEdgeCta(const quick_hs::GraphView graph, const std::int32_t edge,
+                                       const std::int64_t* const reduced_cost,
+                                       const Signed128* const lower_bound,
+                                       const std::int64_t incumbent_numerator,
+                                       unsigned long long* const lp_closed_replies) {
+  const std::int32_t a = graph.edge_u[edge];
+  const std::int32_t b = graph.edge_v[edge];
+  const std::uint64_t a_degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, a) -
+                                                            quick_hs::NeighborBegin(graph, a));
+  const std::uint64_t b_degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, b) -
+                                                            quick_hs::NeighborBegin(graph, b));
+  const std::uint64_t a_pairs = a_degree < 2U ? 0U : a_degree * (a_degree - 1U) / 2U;
+  const std::uint64_t b_pairs = b_degree < 2U ? 0U : b_degree * (b_degree - 1U) / 2U;
+  if (a_pairs == 0U || b_pairs == 0U || (b_pairs != 0U && a_pairs > ULLONG_MAX / b_pairs)) {
+    return false;
+  }
+  const std::uint64_t reply_count = a_pairs * b_pairs;
+  __shared__ std::int64_t distance_cache[kDirectFixWarpsPerBlock * kMaximumWarpPathDistances];
+  const std::uint32_t warp = threadIdx.x >> 5U;
+  const std::uint32_t lane = threadIdx.x & 31U;
+  for (std::uint64_t window = 0U; window < reply_count; window += kDirectFixWarpsPerBlock) {
+    const std::uint64_t reply = window + warp;
+    std::int32_t a1 = -1;
+    std::int32_t a2 = -1;
+    std::int32_t b1 = -1;
+    std::int32_t b2 = -1;
+    std::int32_t a1_edge = -1;
+    std::int32_t a2_edge = -1;
+    std::int32_t b1_edge = -1;
+    std::int32_t b2_edge = -1;
+    std::int32_t allowed = 0;
+    if (lane == 0U && warp < kDirectFixWarpsPerBlock && reply < reply_count) {
+      allowed = DecodeNeighborPair(graph, a, reply / b_pairs, &a1, &a2, &a1_edge, &a2_edge) &&
+                DecodeNeighborPair(graph, b, reply % b_pairs, &b1, &b2, &b1_edge, &b2_edge) &&
+                a1 != b && a2 != b && b1 != a && b2 != a;
+    }
+    constexpr unsigned kFullWarp = 0xffffffffU;
+    allowed = __shfl_sync(kFullWarp, allowed, 0);
+    a1 = __shfl_sync(kFullWarp, a1, 0);
+    a2 = __shfl_sync(kFullWarp, a2, 0);
+    b1 = __shfl_sync(kFullWarp, b1, 0);
+    b2 = __shfl_sync(kFullWarp, b2, 0);
+    a1_edge = __shfl_sync(kFullWarp, a1_edge, 0);
+    a2_edge = __shfl_sync(kFullWarp, a2_edge, 0);
+    b1_edge = __shfl_sync(kFullWarp, b1_edge, 0);
+    b2_edge = __shfl_sync(kFullWarp, b2_edge, 0);
+    const bool lp_closed =
+        allowed != 0 && LpClosesPointReplyWarp(a1_edge, a2_edge, b1_edge, b2_edge, reduced_cost,
+                                               lower_bound, incumbent_numerator, lp_closed_replies);
+    const bool admits =
+        allowed != 0 && !lp_closed &&
+        Opt33Warp(graph, a1, a, a2, b1, b, b2, distance_cache + warp * kMaximumWarpPathDistances);
+    if (__syncthreads_or(lane == 0U && admits ? 1 : 0) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+__global__ void
+DirectFixKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+                const quick_hs::GraphView graph, const std::uint8_t* const protected_edge,
+                const std::int64_t* const reduced_cost, const Signed128* const lower_bound,
+                const std::int64_t incumbent_numerator, std::uint8_t* const proposed_fixed,
+                std::uint8_t* const fixed_reason, unsigned long long* const lp_closed_replies,
+                unsigned long long* const proposal_count) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  __shared__ std::int32_t enabled;
+  if (threadIdx.x == 0U) {
+    enabled = graph.edge_active[edge] != 0U && graph.fixed_edge[edge] == 0U &&
+                      protected_edge[edge] == 0U && proposed_fixed[edge] == 0U
+                  ? 1
+                  : 0;
+  }
+  __syncthreads();
+  if (enabled == 0) {
+    return;
+  }
+  const bool proved = DirectFixProvesEdgeCta(graph, edge, reduced_cost, lower_bound,
+                                             incumbent_numerator, lp_closed_replies);
+  if (threadIdx.x == 0U && proved) {
+    proposed_fixed[edge] = 1U;
+    fixed_reason[edge] = kFixedReasonDirect;
+    atomicAdd(proposal_count, 1ULL);
+  }
+}
+
+__global__ void
+LpNonpairKernel(const quick_hs::GraphView graph, const std::int64_t* const reduced_cost,
+                const Signed128* const lower_bound, const std::int64_t incumbent_numerator,
+                const std::int64_t* const pair_offsets, const std::uint8_t* const existing_nonpair,
+                std::uint8_t* const proposed_nonpair, unsigned long long* const proposal_count) {
+  const std::int32_t center = static_cast<std::int32_t>(blockIdx.x);
+  if (center >= graph.dimension) {
+    return;
+  }
+  const std::int64_t begin = quick_hs::NeighborBegin(graph, center);
+  const std::int64_t degree = quick_hs::NeighborEnd(graph, center) - begin;
+  const std::int64_t pair_begin = pair_offsets[center];
+  for (std::int64_t first = threadIdx.x; first + 1 < degree; first += blockDim.x) {
+    const std::int32_t first_edge = graph.neighbor_edge_ids[begin + first];
+    const std::int64_t first_reduced = reduced_cost[first_edge];
+    for (std::int64_t second = first + 1; second < degree; ++second) {
+      const std::int32_t second_edge = graph.neighbor_edge_ids[begin + second];
+      const std::int64_t second_reduced = reduced_cost[second_edge];
+      Signed128 forced = *lower_bound;
+      forced = Signed128AddInt64(forced, first_reduced > 0 ? first_reduced : 0);
+      forced = Signed128AddInt64(forced, second_reduced > 0 ? second_reduced : 0);
+      const std::int64_t local = first * (2 * degree - first - 1) / 2 + (second - first - 1);
+      const std::int64_t pair = pair_begin + local;
+      if (existing_nonpair[pair] == 0U && Signed128GreaterThanInt64(forced, incumbent_numerator)) {
+        proposed_nonpair[pair] = 1U;
+        atomicAdd(proposal_count, 1ULL);
+      }
+    }
+  }
+}
+
+__device__ bool
+FixedAnchorProvesNonpair(const quick_hs::GraphView graph, const std::int32_t center,
+                         const std::int64_t first_slot, const std::int64_t second_slot,
+                         const std::int32_t fixed_edge, const std::int32_t* const edge_u,
+                         const std::int32_t* const edge_v, const std::uint8_t* const edge_active,
+                         const std::uint8_t* const fixed_bits) {
+  if (fixed_edge < 0 || fixed_edge >= graph.edge_count || edge_active[fixed_edge] == 0U ||
+      fixed_bits[fixed_edge] == 0U) {
+    return false;
+  }
+  const std::int32_t first = quick_hs::Neighbor(graph, center, first_slot);
+  const std::int32_t second = quick_hs::Neighbor(graph, center, second_slot);
+  const std::int32_t p = edge_u[fixed_edge];
+  const std::int32_t q = edge_v[fixed_edge];
+  // opt23 的两条输入路径必须顶点不交；共享端点需要先规范化为另一类
+  // path system，不能把该返回值直接解释成 non-pair 证明。
+  if (p == center || p == first || p == second || q == center || q == first || q == second) {
+    return false;
+  }
+  return !quick_hs::Opt23(graph, p, q, first, center, second, quick_hs::Distance(graph, p, q),
+                          quick_hs::Distance(graph, first, center),
+                          quick_hs::Distance(graph, center, second));
+}
+
+// 若固定边 pq 与二边路径 x-center-y 不可能同时属于最优 tour，则该邻边对
+// 是严格 non-pair。每个输出保存 stable fixed-edge id，replay 只复核该 witness。
+__global__ void FixedAnchorNonpairKernel(
+    const quick_hs::GraphView graph, const std::int32_t* const edge_u,
+    const std::int32_t* const edge_v, const std::uint8_t* const edge_active,
+    const std::uint8_t* const fixed_bits, const std::int32_t* const fixed_edge_ids,
+    const std::int32_t* const fixed_edge_count, const std::int64_t* const pair_offsets,
+    const std::uint8_t* const existing_nonpair, std::uint8_t* const proposed_nonpair,
+    std::int32_t* const fixed_witness, unsigned long long* const proposal_count) {
+  const std::int32_t center = static_cast<std::int32_t>(blockIdx.x);
+  if (center >= graph.dimension) {
+    return;
+  }
+  const std::int64_t begin = quick_hs::NeighborBegin(graph, center);
+  const std::int64_t degree = quick_hs::NeighborEnd(graph, center) - begin;
+  const std::int64_t pair_begin = pair_offsets[center];
+  for (std::int64_t first = threadIdx.x; first + 1 < degree; first += blockDim.x) {
+    for (std::int64_t second = first + 1; second < degree; ++second) {
+      const std::int64_t local = first * (2 * degree - first - 1) / 2 + (second - first - 1);
+      const std::int64_t pair = pair_begin + local;
+      if (existing_nonpair[pair] != 0U || proposed_nonpair[pair] != 0U) {
+        continue;
+      }
+      for (std::int32_t fixed = 0; fixed < *fixed_edge_count; ++fixed) {
+        const std::int32_t witness = fixed_edge_ids[fixed];
+        if (FixedAnchorProvesNonpair(graph, center, begin + first, begin + second, witness, edge_u,
+                                     edge_v, edge_active, fixed_bits)) {
+          fixed_witness[pair] = witness;
+          proposed_nonpair[pair] = 1U;
+          atomicAdd(proposal_count, 1ULL);
+          break;
+        }
+      }
+    }
+  }
+}
+
+constexpr std::uint32_t kNonpairPointWarpsPerBlock = 4U;
+
+// Hamilton--Tutte point move：若某个路径外点 point 的每个可能
+// Hamilton 邻边对都能与 first-center-second 一起被精确路径重连
+// 排除，则根邻边对是 non-pair。这是一层完整 AND reply，不使用
+// 启发式阴性结果授权。
+__device__ bool PointProvesNonpairCta(const quick_hs::GraphView graph, const std::int32_t first,
+                                      const std::int32_t center, const std::int32_t second,
+                                      const std::int32_t root_first_edge,
+                                      const std::int32_t root_second_edge, const std::int32_t point,
+                                      const std::int64_t* const reduced_cost,
+                                      const Signed128* const lower_bound,
+                                      const std::int64_t incumbent_numerator,
+                                      unsigned long long* const lp_closed_replies) {
+  if (point < 0 || point >= graph.dimension || point == first || point == center ||
+      point == second) {
+    return false;
+  }
+  const std::int64_t point_begin = quick_hs::NeighborBegin(graph, point);
+  const std::int64_t point_degree = quick_hs::NeighborEnd(graph, point) - point_begin;
+  if (point_degree < 2) {
+    return false;
+  }
+  const std::uint64_t reply_count =
+      static_cast<std::uint64_t>(point_degree) * static_cast<std::uint64_t>(point_degree - 1) / 2U;
+  __shared__ std::int64_t
+      path_distance_cache[kNonpairPointWarpsPerBlock * kMaximumWarpPathDistances];
+  const std::uint32_t warp = threadIdx.x >> 5U;
+  const std::uint32_t lane = threadIdx.x & 31U;
+  for (std::uint64_t window = 0; window < reply_count; window += kNonpairPointWarpsPerBlock) {
+    const std::uint64_t reply = window + warp;
+    std::int32_t point_first = -1;
+    std::int32_t point_second = -1;
+    std::int32_t point_first_edge = -1;
+    std::int32_t point_second_edge = -1;
+    std::int32_t decoded = 0;
+    if (lane == 0U && warp < kNonpairPointWarpsPerBlock && reply < reply_count) {
+      decoded = DecodeNeighborPair(graph, point, reply, &point_first, &point_second,
+                                   &point_first_edge, &point_second_edge);
+    }
+    constexpr unsigned kFullWarp = 0xffffffffU;
+    decoded = __shfl_sync(kFullWarp, decoded, 0);
+    point_first = __shfl_sync(kFullWarp, point_first, 0);
+    point_second = __shfl_sync(kFullWarp, point_second, 0);
+    point_first_edge = __shfl_sync(kFullWarp, point_first_edge, 0);
+    point_second_edge = __shfl_sync(kFullWarp, point_second_edge, 0);
+    // 两条二边路径在四节点实例上可能恰好拼成完整 Hamilton 环；通用
+    // local path oracle 会把任何闭环视为局部无效，因此这里显式保留这个
+    // 唯一不能按“真子环”关闭的边界情形。
+    const bool full_four_cycle = decoded != 0 && graph.dimension == 4 &&
+                                 ((point_first == first && point_second == second) ||
+                                  (point_first == second && point_second == first));
+    const bool lp_closed =
+        decoded != 0 && !full_four_cycle &&
+        LpClosesPointReplyWarp(root_first_edge, root_second_edge, point_first_edge,
+                               point_second_edge, reduced_cost, lower_bound, incumbent_numerator,
+                               lp_closed_replies);
+    const bool admits = decoded != 0 && !lp_closed &&
+                        (full_four_cycle ||
+                         Opt33Warp(graph, first, center, second, point_first, point, point_second,
+                                   path_distance_cache + warp * kMaximumWarpPathDistances));
+    if (__syncthreads_or(lane == 0U && admits ? 1 : 0) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+__device__ bool
+LpClosesPointReplyThread(const std::int32_t root_first_edge, const std::int32_t root_second_edge,
+                         const std::int32_t point_first_edge, const std::int32_t point_second_edge,
+                         const std::int64_t* const reduced_cost, const Signed128* const lower_bound,
+                         const std::int64_t incumbent_numerator,
+                         unsigned long long* const closed_replies) {
+  if (reduced_cost == nullptr || lower_bound == nullptr) {
+    return false;
+  }
+  const std::int32_t source_edge_ids[4] = {root_first_edge, root_second_edge, point_first_edge,
+                                           point_second_edge};
+  std::int32_t edge_ids[4]{};
+  std::int32_t unique_count = 0;
+  for (std::int32_t path_edge = 0; path_edge < 4; ++path_edge) {
+    const std::int32_t edge = source_edge_ids[path_edge];
+    if (edge < 0) {
+      return false;
+    }
+    bool duplicate = false;
+    for (std::int32_t previous = 0; previous < unique_count; ++previous) {
+      duplicate = duplicate || edge_ids[previous] == edge;
+    }
+    if (!duplicate) {
+      edge_ids[unique_count++] = edge;
+    }
+  }
+  Signed128 forced = *lower_bound;
+  for (std::int32_t index = 0; index < unique_count; ++index) {
+    const std::int64_t reduced = reduced_cost[edge_ids[index]];
+    forced = Signed128AddInt64(forced, reduced > 0 ? reduced : 0);
+  }
+  const bool closed = Signed128GreaterThanInt64(forced, incumbent_numerator);
+  if (closed && closed_replies != nullptr) {
+    atomicAdd(closed_replies, 1ULL);
+  }
+  return closed;
+}
+
+// replay 与 proposer 使用不同的物理枚举：proposer 一个 warp 协作判定
+// 一个 reply；replay 则每线程独立判定一个 reply。两者都穷举完整 AND
+// 空间，可在不复用执行轨迹的情况下捕获 warp-DP 或映射错误。
+__device__ bool PointProvesNonpairReplayCta(
+    const quick_hs::GraphView graph, const std::int32_t first, const std::int32_t center,
+    const std::int32_t second, const std::int32_t root_first_edge,
+    const std::int32_t root_second_edge, const std::int32_t point,
+    const std::int64_t* const reduced_cost, const Signed128* const lower_bound,
+    const std::int64_t incumbent_numerator, unsigned long long* const lp_closed_replies) {
+  if (point < 0 || point >= graph.dimension || point == first || point == center ||
+      point == second) {
+    return false;
+  }
+  const std::int64_t degree =
+      quick_hs::NeighborEnd(graph, point) - quick_hs::NeighborBegin(graph, point);
+  if (degree < 2) {
+    return false;
+  }
+  const std::uint64_t reply_count =
+      static_cast<std::uint64_t>(degree) * static_cast<std::uint64_t>(degree - 1) / 2U;
+  for (std::uint64_t window = 0; window < reply_count; window += blockDim.x) {
+    const std::uint64_t reply = window + threadIdx.x;
+    std::int32_t point_first = -1;
+    std::int32_t point_second = -1;
+    std::int32_t point_first_edge = -1;
+    std::int32_t point_second_edge = -1;
+    const bool decoded =
+        reply < reply_count && DecodeNeighborPair(graph, point, reply, &point_first, &point_second,
+                                                  &point_first_edge, &point_second_edge);
+    const bool full_four_cycle = decoded && graph.dimension == 4 &&
+                                 ((point_first == first && point_second == second) ||
+                                  (point_first == second && point_second == first));
+    const bool lp_closed =
+        decoded && !full_four_cycle &&
+        LpClosesPointReplyThread(root_first_edge, root_second_edge, point_first_edge,
+                                 point_second_edge, reduced_cost, lower_bound, incumbent_numerator,
+                                 lp_closed_replies);
+    const bool admits = decoded && !lp_closed &&
+                        (full_four_cycle || quick_hs::Opt33(graph, first, center, second,
+                                                            point_first, point, point_second));
+    if (__syncthreads_or(admits ? 1 : 0) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// direct fixing 的 replay 改用 thread-per-pair-product，并调用通用 Opt33，
+// 与 proposer 的 warp distance cache/枚举映射相互独立。
+__device__ bool DirectFixProvesEdgeReplayCta(const quick_hs::GraphView graph,
+                                             const std::int32_t edge,
+                                             const std::int64_t* const reduced_cost,
+                                             const Signed128* const lower_bound,
+                                             const std::int64_t incumbent_numerator) {
+  const std::int32_t a = graph.edge_u[edge];
+  const std::int32_t b = graph.edge_v[edge];
+  const std::uint64_t a_degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, a) -
+                                                            quick_hs::NeighborBegin(graph, a));
+  const std::uint64_t b_degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, b) -
+                                                            quick_hs::NeighborBegin(graph, b));
+  const std::uint64_t a_pairs = a_degree < 2U ? 0U : a_degree * (a_degree - 1U) / 2U;
+  const std::uint64_t b_pairs = b_degree < 2U ? 0U : b_degree * (b_degree - 1U) / 2U;
+  if (a_pairs == 0U || b_pairs == 0U || (b_pairs != 0U && a_pairs > ULLONG_MAX / b_pairs)) {
+    return false;
+  }
+  const std::uint64_t reply_count = a_pairs * b_pairs;
+  for (std::uint64_t window = 0U; window < reply_count; window += blockDim.x) {
+    const std::uint64_t reply = window + threadIdx.x;
+    std::int32_t a1 = -1;
+    std::int32_t a2 = -1;
+    std::int32_t b1 = -1;
+    std::int32_t b2 = -1;
+    std::int32_t a1_edge = -1;
+    std::int32_t a2_edge = -1;
+    std::int32_t b1_edge = -1;
+    std::int32_t b2_edge = -1;
+    const bool allowed =
+        reply < reply_count &&
+        DecodeNeighborPair(graph, a, reply / b_pairs, &a1, &a2, &a1_edge, &a2_edge) &&
+        DecodeNeighborPair(graph, b, reply % b_pairs, &b1, &b2, &b1_edge, &b2_edge) && a1 != b &&
+        a2 != b && b1 != a && b2 != a;
+    const bool lp_closed =
+        allowed && LpClosesPointReplyThread(a1_edge, a2_edge, b1_edge, b2_edge, reduced_cost,
+                                            lower_bound, incumbent_numerator, nullptr);
+    const bool admits = allowed && !lp_closed && quick_hs::Opt33(graph, a1, a, a2, b1, b, b2);
+    if (__syncthreads_or(admits ? 1 : 0) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+__global__ void
+ReplayDirectFixKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+                      const quick_hs::GraphView graph, const std::uint8_t* const protected_edge,
+                      const std::uint8_t* const proposed_fixed,
+                      const std::uint8_t* const fixed_reason,
+                      const std::int64_t* const reduced_cost, const Signed128* const lower_bound,
+                      const std::int64_t incumbent_numerator, std::uint8_t* const verified_fixed,
+                      unsigned long long* const replayed, unsigned long long* const rejected) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  __shared__ std::int32_t enabled;
+  if (threadIdx.x == 0U) {
+    enabled = proposed_fixed[edge] != 0U && fixed_reason[edge] == kFixedReasonDirect &&
+                      graph.edge_active[edge] != 0U && graph.fixed_edge[edge] == 0U &&
+                      protected_edge[edge] == 0U
+                  ? 1
+                  : 0;
+  }
+  __syncthreads();
+  if (enabled == 0) {
+    return;
+  }
+  const bool valid =
+      DirectFixProvesEdgeReplayCta(graph, edge, reduced_cost, lower_bound, incumbent_numerator);
+  if (threadIdx.x == 0U) {
+    RecordReplayResult(true, valid, verified_fixed, edge, replayed, rejected);
+  }
+}
+
+__device__ bool DecodeGlobalNeighborPair(const quick_hs::GraphView graph,
+                                         const std::int64_t* const pair_offsets,
+                                         const std::int64_t pair, std::int32_t* const center,
+                                         std::int32_t* const first, std::int32_t* const second,
+                                         std::int32_t* const first_edge,
+                                         std::int32_t* const second_edge) {
+  std::int32_t low = 0;
+  std::int32_t high = graph.dimension;
+  while (low < high) {
+    const std::int32_t middle = low + (high - low) / 2;
+    if (pair_offsets[middle + 1] <= pair) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  if (low < 0 || low >= graph.dimension || pair < pair_offsets[low] ||
+      pair >= pair_offsets[low + 1]) {
+    return false;
+  }
+  *center = low;
+  return DecodeNeighborPair(graph, low, static_cast<std::uint64_t>(pair - pair_offsets[low]), first,
+                            second, first_edge, second_edge);
+}
+
+__global__ void
+PointNonpairKernel(const std::int64_t pair_count, const quick_hs::GraphView graph,
+                   const std::int64_t* const pair_offsets,
+                   const std::uint8_t* const existing_nonpair, std::uint8_t* const proposed_nonpair,
+                   std::int32_t* const point_witness, const std::int64_t* const reduced_cost,
+                   const Signed128* const lower_bound, const std::int64_t incumbent_numerator,
+                   unsigned long long* const lp_closed_replies,
+                   unsigned long long* const proposal_count) {
+  __shared__ std::int32_t center;
+  __shared__ std::int32_t first;
+  __shared__ std::int32_t second;
+  __shared__ std::int32_t first_edge;
+  __shared__ std::int32_t second_edge;
+  __shared__ std::int32_t valid_root;
+  __shared__ std::int32_t selected_point;
+  for (std::int64_t pair = static_cast<std::int64_t>(blockIdx.x); pair < pair_count;
+       pair += static_cast<std::int64_t>(gridDim.x)) {
+    if (threadIdx.x == 0U) {
+      valid_root = existing_nonpair[pair] == 0U && proposed_nonpair[pair] == 0U &&
+                           DecodeGlobalNeighborPair(graph, pair_offsets, pair, &center, &first,
+                                                    &second, &first_edge, &second_edge)
+                       ? 1
+                       : 0;
+    }
+    __syncthreads();
+    if (valid_root != 0) {
+      // 扫描全部路径外点，只在找到一个完整关闭所有 replies
+      // 的 point 时提案。未找到始终保留 pair。
+      if (threadIdx.x == 0U) {
+        selected_point = -1;
+      }
+      __syncthreads();
+      // AND reply 数是 C(deg(point), 2)。按真实活动度数分桶后仍完整访问
+      // 所有 point，但先尝试代价最低、最容易首成功的 witness；桶内保持
+      // node-id 规范顺序，结果确定且不把启发式顺序当成完整性假设。
+      for (std::int32_t degree_bucket = 0; degree_bucket < 4 && selected_point < 0;
+           ++degree_bucket) {
+        for (std::int32_t point = 0; point < graph.dimension; ++point) {
+          const std::int32_t point_degree = graph.degree[point];
+          const std::int32_t point_bucket =
+              point_degree <= 2 ? 0 : (point_degree <= 4 ? 1 : (point_degree <= 8 ? 2 : 3));
+          const bool proved = point_bucket == degree_bucket &&
+                              PointProvesNonpairCta(graph, first, center, second, first_edge,
+                                                    second_edge, point, reduced_cost, lower_bound,
+                                                    incumbent_numerator, lp_closed_replies);
+          if (threadIdx.x == 0U && proved) {
+            selected_point = point;
+          }
+          __syncthreads();
+          if (selected_point >= 0) {
+            break;
+          }
+        }
+      }
+      if (threadIdx.x == 0U && selected_point >= 0) {
+        point_witness[pair] = selected_point;
+        proposed_nonpair[pair] = 1U;
+        atomicAdd(proposal_count, 1ULL);
+      }
+    }
+    __syncthreads();
+  }
+}
+
+__global__ void ReplayPointNonpairKernel(
+    const std::int64_t pair_count, const quick_hs::GraphView graph,
+    const std::int64_t* const pair_offsets, const std::uint8_t* const proposed_nonpair,
+    const std::int32_t* const point_witness, const std::int64_t* const reduced_cost,
+    const Signed128* const lower_bound, const std::int64_t incumbent_numerator,
+    std::uint8_t* const verified_nonpair, unsigned long long* const replayed,
+    unsigned long long* const rejected) {
+  __shared__ std::int32_t center;
+  __shared__ std::int32_t first;
+  __shared__ std::int32_t second;
+  __shared__ std::int32_t first_edge;
+  __shared__ std::int32_t second_edge;
+  __shared__ std::int32_t witness;
+  __shared__ std::int32_t valid_root;
+  for (std::int64_t pair = static_cast<std::int64_t>(blockIdx.x); pair < pair_count;
+       pair += static_cast<std::int64_t>(gridDim.x)) {
+    if (threadIdx.x == 0U) {
+      witness = point_witness[pair];
+      valid_root = proposed_nonpair[pair] != 0U && witness >= 0 &&
+                           DecodeGlobalNeighborPair(graph, pair_offsets, pair, &center, &first,
+                                                    &second, &first_edge, &second_edge)
+                       ? 1
+                       : 0;
+    }
+    __syncthreads();
+    if (valid_root != 0) {
+      const bool valid = PointProvesNonpairReplayCta(graph, first, center, second, first_edge,
+                                                     second_edge, witness, reduced_cost,
+                                                     lower_bound, incumbent_numerator, nullptr);
+      if (threadIdx.x == 0U) {
+        atomicAdd(replayed, 1ULL);
+        if (valid) {
+          verified_nonpair[pair] = 1U;
+        } else {
+          atomicAdd(rejected, 1ULL);
+        }
+      }
+    }
+    __syncthreads();
+  }
+}
+
+__device__ std::int64_t ReplayReducedCost(
+    const std::int32_t edge, const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+    const std::int64_t* const edge_weight, const std::int64_t denominator,
+    const std::int64_t* const quantized, const std::int64_t* const quantized_cut,
+    const std::uint8_t* const incidence_count, const std::int32_t* const incidence_ids) {
+  std::int64_t reduced =
+      edge_weight[edge] * denominator - quantized[edge_u[edge]] - quantized[edge_v[edge]];
+  const std::int32_t* const cuts =
+      incidence_ids + static_cast<std::int64_t>(edge) * kMaxLocalSecIncidence;
+  for (std::uint8_t index = 0U; index < incidence_count[edge]; ++index) {
+    reduced -= quantized_cut[cuts[index]];
+  }
+  return reduced;
+}
+
+__global__ void ReplayLpNonpairKernel(
+    const quick_hs::GraphView graph, const std::int32_t* const edge_u,
+    const std::int32_t* const edge_v, const std::int64_t* const edge_weight,
+    const std::int64_t denominator, const std::int64_t* const quantized,
+    const std::int64_t* const quantized_cut, const std::uint8_t* const incidence_count,
+    const std::int32_t* const incidence_ids, const Signed128* const lower_bound,
+    const std::int64_t incumbent_numerator, const std::int64_t* const pair_offsets,
+    const std::uint8_t* const proposed_nonpair, const std::int32_t* const fixed_witness,
+    const std::int32_t* const point_witness, const std::uint8_t* const fixed_bits,
+    std::uint8_t* const verified_nonpair, unsigned long long* const replayed,
+    unsigned long long* const rejected) {
+  const std::int32_t center = static_cast<std::int32_t>(blockIdx.x);
+  if (center >= graph.dimension) {
+    return;
+  }
+  const std::int64_t begin = quick_hs::NeighborBegin(graph, center);
+  const std::int64_t degree = quick_hs::NeighborEnd(graph, center) - begin;
+  const std::int64_t pair_begin = pair_offsets[center];
+  for (std::int64_t first = threadIdx.x; first + 1 < degree; first += blockDim.x) {
+    const std::int32_t first_edge = graph.neighbor_edge_ids[begin + first];
+    for (std::int64_t second = first + 1; second < degree; ++second) {
+      const std::int64_t local = first * (2 * degree - first - 1) / 2 + (second - first - 1);
+      const std::int64_t pair = pair_begin + local;
+      if (proposed_nonpair[pair] == 0U || point_witness[pair] >= 0) {
+        continue;
+      }
+      const std::int32_t second_edge = graph.neighbor_edge_ids[begin + second];
+      bool valid = false;
+      if (fixed_witness[pair] >= 0) {
+        valid = FixedAnchorProvesNonpair(graph, center, begin + first, begin + second,
+                                         fixed_witness[pair], edge_u, edge_v, graph.edge_active,
+                                         fixed_bits);
+      } else {
+        const std::int64_t first_reduced =
+            ReplayReducedCost(first_edge, edge_u, edge_v, edge_weight, denominator, quantized,
+                              quantized_cut, incidence_count, incidence_ids);
+        const std::int64_t second_reduced =
+            ReplayReducedCost(second_edge, edge_u, edge_v, edge_weight, denominator, quantized,
+                              quantized_cut, incidence_count, incidence_ids);
+        Signed128 forced = *lower_bound;
+        forced = Signed128AddInt64(forced, first_reduced > 0 ? first_reduced : 0);
+        forced = Signed128AddInt64(forced, second_reduced > 0 ? second_reduced : 0);
+        valid = Signed128GreaterThanInt64(forced, incumbent_numerator);
+      }
+      atomicAdd(replayed, 1ULL);
+      if (valid) {
+        verified_nonpair[pair] = 1U;
+      } else {
+        atomicAdd(rejected, 1ULL);
+      }
+    }
+  }
+}
+
+__global__ void ReplayLpFixedKernel(
+    const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+    const quick_hs::GraphView graph, const std::int32_t* const edge_u,
+    const std::int32_t* const edge_v, const std::int64_t* const edge_weight,
+    const std::uint8_t* const edge_active, const std::uint8_t* const protected_edge,
+    const std::int64_t denominator, const std::int64_t* const quantized,
+    const std::int64_t* const quantized_cut, const std::uint8_t* const incidence_count,
+    const std::int32_t* const incidence_ids, const Signed128* const lower_bound,
+    const std::int64_t incumbent_numerator, const std::uint8_t* const proposed_fixed,
+    const std::uint8_t* const fixed_reason, std::uint8_t* const verified_fixed,
+    unsigned long long* const replayed, unsigned long long* const rejected) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  const std::uint8_t reason = fixed_reason[edge];
+  const bool candidate = proposed_fixed[edge] != 0U && reason != kFixedReasonDirect;
+  if (!candidate) {
+    return;
+  }
+  std::int64_t reduced =
+      edge_weight[edge] * denominator - quantized[edge_u[edge]] - quantized[edge_v[edge]];
+  const std::int32_t* const cuts =
+      incidence_ids + static_cast<std::int64_t>(edge) * kMaxLocalSecIncidence;
+  for (std::uint8_t index = 0U; index < incidence_count[edge]; ++index) {
+    reduced -= quantized_cut[cuts[index]];
+  }
+  const bool active_candidate = edge_active[edge] != 0U && protected_edge[edge] == 0U;
+  const bool valid = active_candidate &&
+                     (reason == kFixedReasonNonpair
+                          ? (NonpairsForceEdgeAtEndpoint(graph, edge, edge_u[edge]) ||
+                             NonpairsForceEdgeAtEndpoint(graph, edge, edge_v[edge]))
+                          : reason == kFixedReasonLp &&
+                                Signed128GreaterThanInt64(
+                                    Signed128AddInt64(*lower_bound, reduced < 0 ? -reduced : 0),
+                                    incumbent_numerator));
+  RecordReplayResult(true, valid, verified_fixed, edge, replayed, rejected);
+}
+
+__global__ void ApplyFixedKernel(const std::int32_t work_count,
+                                 const std::int32_t* const active_edge_ids,
+                                 const std::uint8_t* const proposed_delete,
+                                 const std::uint8_t* const authorized_fixed,
+                                 std::uint8_t* const protected_edge, std::uint8_t* const fixed_edge,
+                                 unsigned long long* const fixed_count,
+                                 std::int32_t* const invalid) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (authorized_fixed[edge] == 0U) {
+    return;
+  }
+  if (proposed_delete[edge] != 0U) {
+    atomicExch(invalid, 1);
+    return;
+  }
+  fixed_edge[edge] = 1U;
+  protected_edge[edge] = 1U;
+  atomicAdd(fixed_count, 1ULL);
+}
+
+__global__ void
+CountFixedDegreeKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+                       const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+                       const std::uint8_t* const edge_active, const std::uint8_t* const fixed_edge,
+                       std::int32_t* const fixed_degree) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] != 0U && fixed_edge[edge] != 0U) {
+    atomicAdd(&fixed_degree[edge_u[edge]], 1);
+    atomicAdd(&fixed_degree[edge_v[edge]], 1);
+  }
+}
+
+__global__ void ValidateFixedDegreeKernel(const std::int32_t dimension,
+                                          const std::int32_t* const fixed_degree,
+                                          std::int32_t* const invalid) {
+  const std::int32_t vertex = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (vertex < dimension && fixed_degree[vertex] > 2) {
+    // bit 1：与普通 degree-floor（bit 0）分开，便于 fail-closed 诊断。
+    atomicOr(invalid, 2);
+  }
+}
+
+__global__ void
+FixedPropagationKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+                       const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+                       const std::uint8_t* const edge_active,
+                       const std::uint8_t* const protected_edge,
+                       const std::int32_t* const fixed_degree, std::uint8_t* const proposed) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] != 0U && protected_edge[edge] == 0U &&
+      (fixed_degree[edge_u[edge]] >= 2 || fixed_degree[edge_v[edge]] >= 2)) {
+    proposed[edge] = 1U;
+  }
+}
+
+__global__ void ReplayFixedPropagationKernel(
+    const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+    const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+    const std::uint8_t* const edge_active, const std::uint8_t* const protected_edge,
+    const std::int32_t* const fixed_degree, const std::uint8_t* const proposed,
+    std::uint8_t* const verified, unsigned long long* const replayed,
+    unsigned long long* const rejected) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  const bool candidate = proposed[edge] != 0U;
+  const bool valid = edge_active[edge] != 0U && protected_edge[edge] == 0U &&
+                     (fixed_degree[edge_u[edge]] >= 2 || fixed_degree[edge_v[edge]] >= 2);
+  RecordReplayResult(candidate, valid, verified, edge, replayed, rejected);
+}
+
+__device__ void RecordReplayResult(const bool proposed, const bool valid,
+                                   std::uint8_t* const verified, const std::int32_t edge,
+                                   unsigned long long* const replayed,
+                                   unsigned long long* const rejected) {
+  if (!proposed) {
+    return;
+  }
+  atomicAdd(replayed, 1ULL);
+  if (valid) {
+    verified[edge] = 1U;
+  } else {
+    atomicAdd(rejected, 1ULL);
+  }
+}
+
+__global__ void
+ReplayJvKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+               const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+               const std::uint8_t* const edge_active, const std::uint8_t* const protected_edge,
+               const quick_hs::GraphView graph, const std::uint8_t* const proposed,
+               const std::int32_t* const witness, std::uint8_t* const verified,
+               unsigned long long* const replayed, unsigned long long* const rejected) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  const bool candidate = proposed[edge] != 0U;
+  const std::int32_t c = witness[edge];
+  const bool valid = edge_active[edge] != 0U && protected_edge[edge] == 0U && c >= 0 &&
+                     c < graph.dimension && graph.degree[edge_u[edge]] > 2 &&
+                     graph.degree[edge_v[edge]] > 2 &&
+                     IsJvWitness(graph, edge_u[edge], edge_v[edge], c);
+  RecordReplayResult(candidate, valid, verified, edge, replayed, rejected);
+}
+
+template <std::int32_t ExtraEdgeDepth>
+__global__ void ReplayQuickHsContinuationKernel(
+    const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+    const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+    const std::uint8_t* const edge_active, const std::uint8_t* const protected_edge,
+    const quick_hs::GraphView graph, const std::uint8_t* const proposed,
+    const std::int32_t* const first_witness, const std::int32_t* const second_witness,
+    std::uint8_t* const verified, unsigned long long* const replayed,
+    unsigned long long* const rejected, const std::int64_t* const reduced_cost,
+    const Signed128* const lower_bound, const std::int64_t incumbent_numerator) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  __shared__ std::int32_t enabled;
+  const std::int32_t edge = active_edge_ids[work];
+  const std::int32_t a = edge_u[edge];
+  const std::int32_t b = edge_v[edge];
+  const std::int32_t c = first_witness[edge];
+  const std::int32_t d = second_witness[edge];
+  if (threadIdx.x == 0U) {
+    enabled = proposed[edge] != 0U && edge_active[edge] != 0U && protected_edge[edge] == 0U &&
+              c >= 0 && d >= 0 && c < graph.dimension && d < graph.dimension && c != d &&
+              graph.degree[a] > 2 && graph.degree[b] > 2;
+    if (enabled != 0) {
+      enabled = !quick_hs::Compatible(graph, a, b, c, d, quick_hs::Distance(graph, a, b));
+    }
+  }
+  __syncthreads();
+  const bool valid =
+      enabled != 0 && RepliesClosedCta<ExtraEdgeDepth>(graph, a, b, c, d, reduced_cost, lower_bound,
+                                                       incumbent_numerator, nullptr);
+  if (threadIdx.x == 0U) {
+    RecordReplayResult(proposed[edge] != 0U, valid, verified, edge, replayed, rejected);
+  }
+}
+
+__global__ void
+ReplayGeometryKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+                     const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+                     const std::uint8_t* const edge_active,
+                     const std::uint8_t* const protected_edge, const quick_hs::GraphView graph,
+                     const std::int64_t* const x, const std::int64_t* const y,
+                     const std::int64_t* const nearest, const std::uint8_t* const proposed,
+                     const std::int32_t* const first_witness,
+                     const std::int32_t* const second_witness, std::uint8_t* const verified,
+                     unsigned long long* const replayed, unsigned long long* const rejected) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  const bool candidate = proposed[edge] != 0U;
+  const std::int32_t p = edge_u[edge];
+  const std::int32_t q = edge_v[edge];
+  const std::int32_t r = first_witness[edge];
+  const std::int32_t s = second_witness[edge];
+  bool valid = edge_active[edge] != 0U && protected_edge[edge] == 0U && r >= 0 && s >= 0 &&
+               r < graph.dimension && s < graph.dimension && r != s && r != p && r != q && s != p &&
+               s != q && graph.degree[p] > 2 && graph.degree[q] > 2;
+  IntervalGeometryPotential first;
+  IntervalGeometryPotential second;
+  if (valid) {
+    valid = IntervalPotentialBounds(graph, p, q, r, nearest[r], x, y, &first) &&
+            IntervalPotentialBounds(graph, p, q, s, nearest[s], x, y, &second);
+  }
+  if (valid) {
+    const std::int64_t original = quick_hs::Distance(graph, p, q) + quick_hs::Distance(graph, r, s);
+    valid = quick_hs::Distance(graph, p, r) + quick_hs::Distance(graph, q, s) < original &&
+            quick_hs::Distance(graph, p, s) + quick_hs::Distance(graph, q, r) < original;
+    const DeviceInterval lpq = IntervalInteger(quick_hs::Distance(graph, p, q));
+    const DeviceInterval lrs = IntervalInteger(quick_hs::Distance(graph, r, s));
+    const DeviceInterval first_bound =
+        IntervalSubtract(IntervalAdd(IntervalAdd(lpq, second.min_p), first.min_q), lrs);
+    const DeviceInterval second_bound =
+        IntervalSubtract(IntervalAdd(IntervalAdd(lpq, first.min_p), second.min_q), lrs);
+    valid = valid && IntervalPositive(first_bound) && IntervalPositive(second_bound);
+  }
+  RecordReplayResult(candidate, valid, verified, edge, replayed, rejected);
+}
+
+__device__ bool MainPotentialHasAllowedPairCta(const quick_hs::GraphView graph,
+                                               const std::int32_t p, const std::int32_t q,
+                                               const std::int32_t middle,
+                                               const bool enable_strong_metric) {
+  const std::uint64_t degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, middle) -
+                                                          quick_hs::NeighborBegin(graph, middle));
+  const std::uint64_t pair_count = degree < 2U ? 0U : degree * (degree - 1U) / 2U;
+  for (std::uint64_t window = 0; window < pair_count; window += blockDim.x) {
+    const std::uint64_t ordinal = window + threadIdx.x;
+    bool allowed = false;
+    if (ordinal < pair_count) {
+      std::int32_t first = -1;
+      std::int32_t second = -1;
+      allowed =
+          DecodeNeighborPair(graph, middle, ordinal, &first, &second) &&
+          (enable_strong_metric ? main_edge::AllowedPair(graph, p, q, middle, first, second)
+                                : main_edge::BasicAllowedPair(graph, p, q, middle, first, second));
+    }
+    if (__syncthreads_or(allowed ? 1 : 0) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+__device__ bool MainPotentialPairAdmitsTourCta(const quick_hs::GraphView graph,
+                                               const std::int32_t p, const std::int32_t q,
+                                               const std::int32_t r, const std::int32_t s,
+                                               const bool enable_strong_metric) {
+  const std::uint64_t r_degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, r) -
+                                                            quick_hs::NeighborBegin(graph, r));
+  const std::uint64_t s_degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, s) -
+                                                            quick_hs::NeighborBegin(graph, s));
+  const std::uint64_t r_pairs = r_degree < 2U ? 0U : r_degree * (r_degree - 1U) / 2U;
+  const std::uint64_t s_pairs = s_degree < 2U ? 0U : s_degree * (s_degree - 1U) / 2U;
+  if (s_pairs != 0U && r_pairs > ULLONG_MAX / s_pairs) {
+    return true;
+  }
+  const std::uint64_t reply_count = r_pairs * s_pairs;
+  for (std::uint64_t window = 0; window < reply_count; window += blockDim.x) {
+    const std::uint64_t reply = window + threadIdx.x;
+    bool admits = false;
+    if (reply < reply_count) {
+      std::int32_t r1 = -1;
+      std::int32_t r2 = -1;
+      std::int32_t s1 = -1;
+      std::int32_t s2 = -1;
+      const bool decoded = DecodeNeighborPair(graph, r, reply / s_pairs, &r1, &r2) &&
+                           DecodeNeighborPair(graph, s, reply % s_pairs, &s1, &s2);
+      const bool r_allowed =
+          decoded && (enable_strong_metric ? main_edge::AllowedPair(graph, p, q, r, r1, r2)
+                                           : main_edge::BasicAllowedPair(graph, p, q, r, r1, r2));
+      const bool s_allowed =
+          decoded && (enable_strong_metric ? main_edge::AllowedPair(graph, p, q, s, s1, s2)
+                                           : main_edge::BasicAllowedPair(graph, p, q, s, s1, s2));
+      admits = decoded && r_allowed && s_allowed &&
+               !main_edge::MainEdgeEliminates(graph, p, q, r1, r, r2, s1, s, s2);
+    }
+    if (__syncthreads_or(admits ? 1 : 0) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+template <bool Replay>
+__global__ void MainEdgeContinuationKernel(
+    const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+    const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+    const std::uint8_t* const edge_active, const std::uint8_t* const protected_edge,
+    const quick_hs::GraphView graph, const std::int64_t* const x, const std::int64_t* const y,
+    const GeometryKdNode* const kd_nodes, const std::int32_t kd_root,
+    const std::int32_t potential_count, const std::int32_t position_numerator,
+    const std::int32_t position_denominator, const bool enable_strong_metric,
+    const std::uint8_t* const replay_proposed, std::uint8_t* const output,
+    std::int32_t* const first_witness, std::int32_t* const second_witness,
+    unsigned long long* const replayed, unsigned long long* const rejected) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  __shared__ std::int32_t potentials[kMaxGeometryPotential];
+  __shared__ double scores[kMaxGeometryPotential];
+  __shared__ std::int32_t selected;
+  __shared__ std::int32_t enabled;
+  __shared__ std::int32_t proven;
+  __shared__ std::int32_t proof_first;
+  __shared__ std::int32_t proof_second;
+
+  const std::int32_t edge = active_edge_ids[work];
+  const std::int32_t p = edge_u[edge];
+  const std::int32_t q = edge_v[edge];
+  if (threadIdx.x == 0U) {
+    selected = 0;
+    proven = 0;
+    proof_first = -1;
+    proof_second = -1;
+    const bool requested = !Replay || replay_proposed[edge] != 0U;
+    enabled = requested && edge_active[edge] != 0U && protected_edge[edge] == 0U &&
+              graph.degree[p] > 2 && graph.degree[q] > 2 &&
+              SelectGeometryCandidatesAtPosition(p, q, kd_nodes, kd_root, x, y, position_numerator,
+                                                 position_denominator, potential_count, potentials,
+                                                 scores, &selected);
+  }
+  __syncthreads();
+  if (enabled != 0) {
+    for (std::int32_t index = 0; index < selected; ++index) {
+      const bool allowed =
+          MainPotentialHasAllowedPairCta(graph, p, q, potentials[index], enable_strong_metric);
+      if (threadIdx.x == 0U && !allowed) {
+        proven = 1;
+        proof_first = potentials[index];
+      }
+      __syncthreads();
+      if (proven != 0) {
+        break;
+      }
+    }
+    if (proven == 0) {
+      for (std::int32_t first = 0; first < selected && proven == 0; ++first) {
+        for (std::int32_t second = first + 1; second < selected; ++second) {
+          const bool admits = MainPotentialPairAdmitsTourCta(
+              graph, p, q, potentials[first], potentials[second], enable_strong_metric);
+          if (threadIdx.x == 0U && !admits) {
+            proven = 1;
+            proof_first = potentials[first];
+            proof_second = potentials[second];
+          }
+          __syncthreads();
+          if (proven != 0) {
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (threadIdx.x == 0U) {
+    if constexpr (Replay) {
+      RecordReplayResult(replay_proposed[edge] != 0U, enabled != 0 && proven != 0, output, edge,
+                         replayed, rejected);
+    } else if (proven != 0) {
+      output[edge] = 1U;
+      first_witness[edge] = proof_first;
+      second_witness[edge] = proof_second;
+    }
+  }
+}
+
+__global__ void
+ReplayLpKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+               const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+               const std::int64_t* const edge_weight, const std::uint8_t* const edge_active,
+               const std::uint8_t* const protected_edge, const std::int32_t* const degree,
+               const std::int64_t denominator, const std::int64_t* const quantized,
+               const std::int64_t* const quantized_cut, const std::uint8_t* const incidence_count,
+               const std::int32_t* const incidence_ids, const Signed128* const lower_bound,
+               const std::int64_t incumbent_numerator, const std::uint8_t* const proposed,
+               std::uint8_t* const verified, unsigned long long* const replayed,
+               unsigned long long* const rejected) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  const bool candidate = proposed[edge] != 0U;
+  const std::int32_t u = edge_u[edge];
+  const std::int32_t v = edge_v[edge];
+  std::int64_t reduced = edge_weight[edge] * denominator - quantized[u] - quantized[v];
+  const std::int32_t* const cuts =
+      incidence_ids + static_cast<std::int64_t>(edge) * kMaxLocalSecIncidence;
+  for (std::uint8_t index = 0U; index < incidence_count[edge]; ++index) {
+    reduced -= quantized_cut[cuts[index]];
+  }
+  const bool valid =
+      edge_active[edge] != 0U && protected_edge[edge] == 0U && degree[u] > 2 && degree[v] > 2 &&
+      Signed128GreaterThanInt64(Signed128AddInt64(*lower_bound, reduced > 0 ? reduced : 0),
+                                incumbent_numerator);
+  RecordReplayResult(candidate, valid, verified, edge, replayed, rejected);
+}
+
+// stable edge id 定义了冲突优先级。对每个端点，只选中该点前
+// degree-2 个候选；因此所有选中边可在下一个 kernel 并行提交，
+// 且与 CTA 调度无关。被另一端点拒绝的边会在下一 epoch 重新竞争。
+__global__ void SelectDegreeFloorCommitKernel(const std::int32_t work_count,
+                                              const std::int32_t* const active_edge_ids,
+                                              const quick_hs::GraphView graph,
+                                              const std::uint8_t* const protected_edge,
+                                              const std::uint8_t* const authorized,
+                                              std::uint8_t* const committed) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (graph.edge_active[edge] == 0U || authorized[edge] == 0U || protected_edge[edge] != 0U) {
+    return;
+  }
+  const std::int32_t endpoints[2]{graph.edge_u[edge], graph.edge_v[edge]};
+  for (const std::int32_t node : endpoints) {
+    const std::int32_t capacity = graph.degree[node] - 2;
+    if (capacity <= 0) {
+      return;
+    }
+    std::int32_t rank = 0;
+    for (std::int64_t slot = quick_hs::NeighborBegin(graph, node);
+         slot < quick_hs::NeighborEnd(graph, node); ++slot) {
+      const std::int32_t candidate = graph.neighbor_edge_ids[slot];
+      if (candidate >= edge) {
+        continue;
+      }
+      if (graph.edge_active[candidate] != 0U && authorized[candidate] != 0U &&
+          protected_edge[candidate] == 0U) {
+        ++rank;
+      }
+    }
+    if (rank >= capacity) {
+      return;
+    }
+  }
+  committed[edge] = 1U;
+}
+
+__global__ void SelectProtectedFloorCommitKernel(const std::int32_t work_count,
+                                                 const std::int32_t* const active_edge_ids,
+                                                 const std::uint8_t* const edge_active,
+                                                 const std::uint8_t* const protected_edge,
+                                                 const std::uint8_t* const authorized,
+                                                 std::uint8_t* const committed) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] != 0U && protected_edge[edge] == 0U && authorized[edge] != 0U) {
+    committed[edge] = 1U;
+  }
+}
+
+__global__ void ApplyCommitKernel(const std::int32_t work_count,
+                                  const std::int32_t* const active_edge_ids,
+                                  const std::int32_t* const edge_u,
+                                  const std::int32_t* const edge_v, std::uint8_t* const edge_active,
+                                  const std::uint8_t* const committed, std::int32_t* const degree,
+                                  unsigned long long* const committed_count,
+                                  std::uint32_t* const dirty_vertex) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (committed[edge] == 0U) {
+    return;
+  }
+  edge_active[edge] = 0U;
+  atomicSub(&degree[edge_u[edge]], 1);
+  atomicSub(&degree[edge_v[edge]], 1);
+  atomicExch(&dirty_vertex[edge_u[edge]], 1U);
+  atomicExch(&dirty_vertex[edge_v[edge]], 1U);
+  atomicAdd(committed_count, 1ULL);
+}
+
+__global__ void
+MarkDegreeTwoFixedKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+                         const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+                         const std::uint8_t* const edge_active, const std::int32_t* const degree,
+                         std::uint8_t* const protected_edge, std::uint8_t* const fixed_edge) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] != 0U && (degree[edge_u[edge]] == 2 || degree[edge_v[edge]] == 2)) {
+    // 每条 stable edge 只有一个线程写，赋值幂等；显式 fixed state 随后
+    // 被 propagation、non-pair 与所有 HT 谓词共同消费。
+    fixed_edge[edge] = 1U;
+    protected_edge[edge] = 1U;
+  }
+}
+
+__global__ void ValidateDegreeFloorKernel(const std::int32_t dimension,
+                                          const std::int32_t* const degree,
+                                          std::int32_t* const invalid) {
+  const std::int32_t node = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (node < dimension && degree[node] < 2) {
+    atomicOr(invalid, 1);
+  }
+}
+
+constexpr std::int32_t kQuickHsDifferentialDimension = 12;
+constexpr std::uint32_t kQuickHsDifferentialWarpsPerBlock = 2U;
+
+__global__ void
+QuickHsPathDifferentialKernel(const std::uint32_t sample_count, const std::int64_t* const distance,
+                              const std::uint8_t* const active, const std::int32_t* const degree,
+                              const quick_hs::SmallPath* const paths, std::uint8_t* const result) {
+  const std::uint32_t warp = threadIdx.x >> 5U;
+  const std::uint32_t lane = threadIdx.x & 31U;
+  const std::uint32_t sample = blockIdx.x * kQuickHsDifferentialWarpsPerBlock + warp;
+  if (sample >= sample_count) {
+    return;
+  }
+
+  constexpr std::size_t kMatrixSize =
+      static_cast<std::size_t>(kQuickHsDifferentialDimension) * kQuickHsDifferentialDimension;
+  quick_hs::GraphView graph{
+      .dimension = kQuickHsDifferentialDimension,
+      .degree = degree + static_cast<std::size_t>(sample) * kQuickHsDifferentialDimension,
+      .neighbors = nullptr,
+      .distance = distance + static_cast<std::size_t>(sample) * kMatrixSize,
+      .active = active + static_cast<std::size_t>(sample) * kMatrixSize,
+      .row_offsets = nullptr,
+      .neighbor_edge_ids = nullptr,
+      .pair_offsets = nullptr,
+      .nonpair_mask = nullptr,
+      .edge_u = nullptr,
+      .edge_v = nullptr,
+      .edge_active = nullptr,
+      .fixed_edge = nullptr,
+      .coordinate_x = nullptr,
+      .coordinate_y = nullptr,
+      .edge_count = 0,
+      .distance_type = 0U,
+      .complete_graph = true,
+  };
+  __shared__ std::int64_t
+      distance_cache[kQuickHsDifferentialWarpsPerBlock * kMaximumWarpPathDistances];
+  __shared__ std::int64_t
+      subset_dp_cache[kQuickHsDifferentialWarpsPerBlock * kMaximumWarpSubsetDpStates];
+  bool supported = false;
+  const bool value = PathSystemOptWarp(
+      graph, paths + static_cast<std::size_t>(sample) * quick_hs::kMaxPathCount,
+      quick_hs::kMaxPathCount, &supported, distance_cache + warp * kMaximumWarpPathDistances,
+      subset_dp_cache + warp * kMaximumWarpSubsetDpStates);
+  if (lane == 0U) {
+    // supported=false 意味 GPU 未完整覆盖该状态；测试将其记为不匹配，
+    // 避免回退路径掩盖 warp-DP 的能力缺口。
+    result[sample] = supported && value ? 1U : supported ? 0U : 2U;
+  }
+}
+
+struct SparseAdjacency {
+  std::vector<std::int64_t> row_offsets;
+  std::vector<std::int32_t> neighbors;
+  std::vector<std::int32_t> edge_ids;
+};
+
+SparseAdjacency BuildSparseAdjacency(const GraphSnapshot& graph) {
+  SparseAdjacency result;
+  result.row_offsets.assign(static_cast<std::size_t>(graph.dimension) + 1U, 0);
+  for (const Edge& edge : graph.edges) {
+    ++result.row_offsets[static_cast<std::size_t>(edge.u) + 1U];
+    ++result.row_offsets[static_cast<std::size_t>(edge.v) + 1U];
+  }
+  for (std::int32_t node = 1; node <= graph.dimension; ++node) {
+    result.row_offsets[static_cast<std::size_t>(node)] +=
+        result.row_offsets[static_cast<std::size_t>(node - 1)];
+  }
+  const std::size_t slot_count = static_cast<std::size_t>(result.row_offsets.back());
+  result.neighbors.resize(slot_count);
+  result.edge_ids.resize(slot_count);
+  std::vector<std::int64_t> cursor = result.row_offsets;
+  for (std::size_t edge_id = 0; edge_id < graph.edges.size(); ++edge_id) {
+    const Edge& edge = graph.edges[edge_id];
+    for (const auto [from, to] : {std::pair{edge.u, edge.v}, std::pair{edge.v, edge.u}}) {
+      const std::size_t slot = static_cast<std::size_t>(cursor[static_cast<std::size_t>(from)]++);
+      result.neighbors[slot] = to;
+      result.edge_ids[slot] = static_cast<std::int32_t>(edge_id);
+    }
+  }
+  for (std::int32_t node = 0; node < graph.dimension; ++node) {
+    const std::size_t begin =
+        static_cast<std::size_t>(result.row_offsets[static_cast<std::size_t>(node)]);
+    const std::size_t end =
+        static_cast<std::size_t>(result.row_offsets[static_cast<std::size_t>(node) + 1U]);
+    std::vector<std::pair<std::int32_t, std::int32_t>> row;
+    row.reserve(end - begin);
+    for (std::size_t slot = begin; slot < end; ++slot) {
+      row.emplace_back(result.neighbors[slot], result.edge_ids[slot]);
+    }
+    std::sort(row.begin(), row.end(), [&](const auto& lhs, const auto& rhs) {
+      const Edge& lhs_edge = graph.edges[static_cast<std::size_t>(lhs.second)];
+      const Edge& rhs_edge = graph.edges[static_cast<std::size_t>(rhs.second)];
+      return std::tie(lhs_edge.weight, lhs.first, lhs.second) <
+             std::tie(rhs_edge.weight, rhs.first, rhs.second);
+    });
+    for (std::size_t offset = 0; offset < row.size(); ++offset) {
+      result.neighbors[begin + offset] = row[offset].first;
+      result.edge_ids[begin + offset] = row[offset].second;
     }
   }
   return result;
+}
+
+bool IsCanonicalCompleteGraph(const GraphSnapshot& graph) {
+  const std::int64_t dimension = graph.dimension;
+  const std::int64_t expected = dimension * (dimension - 1) / 2;
+  if (expected != static_cast<std::int64_t>(graph.edges.size())) {
+    return false;
+  }
+  std::size_t edge_id = 0U;
+  for (std::int32_t u = 0; u < graph.dimension; ++u) {
+    for (std::int32_t v = u + 1; v < graph.dimension; ++v, ++edge_id) {
+      if (graph.edges[edge_id].u != u || graph.edges[edge_id].v != v) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 std::vector<GeometryKdNode> BuildGeometryKdTree(const GraphSnapshot& graph) {
@@ -957,6 +4279,166 @@ bool ResidentEliminationCudaAvailable(std::string* const reason) {
   return SelectDevice(-1, reason) >= 0;
 }
 
+QuickHsPathDifferentialResult RunQuickHsPathDifferentialCuda(const int requested_device,
+                                                             const std::uint32_t samples) {
+  if (samples == 0U) {
+    throw std::invalid_argument("Quick-HS GPU 差分测试的样本数必须大于 0");
+  }
+  std::string reason;
+  const int device = SelectDevice(requested_device, &reason);
+  if (device < 0) {
+    throw std::runtime_error("Quick-HS GPU 差分测试无可用 CUDA: " + reason);
+  }
+
+  constexpr std::size_t kDimension = static_cast<std::size_t>(kQuickHsDifferentialDimension);
+  constexpr std::size_t kMatrixSize = kDimension * kDimension;
+  const std::size_t sample_count = static_cast<std::size_t>(samples);
+  if (sample_count > std::numeric_limits<std::size_t>::max() / kMatrixSize) {
+    throw std::overflow_error("Quick-HS GPU 差分测试的样本数溢出");
+  }
+
+  std::vector<std::int64_t> host_distance(sample_count * kMatrixSize, 0);
+  std::vector<std::uint8_t> host_active(sample_count * kMatrixSize, 1U);
+  std::vector<std::int32_t> host_degree(sample_count * kDimension,
+                                        kQuickHsDifferentialDimension - 1);
+  std::vector<quick_hs::SmallPath> host_paths(sample_count * quick_hs::kMaxPathCount);
+  std::vector<std::uint8_t> expected(sample_count, 0U);
+
+  const auto fill_path = [](quick_hs::SmallPath* const path, const std::int32_t* const nodes,
+                            const std::int32_t begin, const std::int32_t size) {
+    *path = {};
+    path->size = size;
+    for (std::int32_t index = 0; index < size; ++index) {
+      path->node[index] = nodes[begin + index];
+    }
+  };
+
+  for (std::uint32_t sample = 0U; sample < samples; ++sample) {
+    const std::size_t matrix_begin = static_cast<std::size_t>(sample) * kMatrixSize;
+    for (std::int32_t first = 0; first < kQuickHsDifferentialDimension; ++first) {
+      host_active[matrix_begin + static_cast<std::size_t>(first) * kDimension +
+                  static_cast<std::size_t>(first)] = 0U;
+      for (std::int32_t second = first + 1; second < kQuickHsDifferentialDimension; ++second) {
+        // 故意使用非度量对称权重：这里验证的是通用 path-order
+        // 语义，不让欧氏三角不等式恰好遮蔽漏枚举。
+        const std::uint64_t value = (static_cast<std::uint64_t>(sample + 1U) * 131U +
+                                     static_cast<std::uint64_t>(first + 3) * 47U +
+                                     static_cast<std::uint64_t>(second + 5) * 89U +
+                                     static_cast<std::uint64_t>(first * second) * 17U +
+                                     static_cast<std::uint64_t>(sample + 7U) *
+                                         static_cast<std::uint64_t>(first + second + 1) * 13U) %
+                                    997U;
+        const std::int64_t weight = static_cast<std::int64_t>(value + 1U);
+        host_distance[matrix_begin + static_cast<std::size_t>(first) * kDimension +
+                      static_cast<std::size_t>(second)] = weight;
+        host_distance[matrix_begin + static_cast<std::size_t>(second) * kDimension +
+                      static_cast<std::size_t>(first)] = weight;
+      }
+    }
+
+    std::int32_t node[10]{};
+    for (std::int32_t index = 0; index < 10; ++index) {
+      node[index] =
+          static_cast<std::int32_t>((static_cast<std::uint32_t>(index) * 5U + sample * 3U) %
+                                    static_cast<std::uint32_t>(kQuickHsDifferentialDimension));
+    }
+    quick_hs::SmallPath* const paths =
+        host_paths.data() + static_cast<std::size_t>(sample) * quick_hs::kMaxPathCount;
+    switch (sample % 8U) {
+    case 0U:
+      fill_path(&paths[0], node, 0, 2);
+      fill_path(&paths[1], node, 2, 4);
+      fill_path(&paths[2], node, 6, 4);
+      break;
+    case 1U:
+      fill_path(&paths[0], node, 0, 2);
+      fill_path(&paths[1], node, 2, 5);
+      fill_path(&paths[2], node, 7, 3);
+      break;
+    case 2U:
+      fill_path(&paths[0], node, 0, 3);
+      fill_path(&paths[1], node, 3, 4);
+      fill_path(&paths[2], node, 7, 3);
+      break;
+    case 3U:
+      fill_path(&paths[0], node, 0, 2);
+      fill_path(&paths[1], node, 2, 3);
+      fill_path(&paths[2], node, 5, 3);
+      break;
+    case 4U:
+      fill_path(&paths[0], node, 0, 2);
+      fill_path(&paths[1], node, 1, 4);
+      fill_path(&paths[2], node, 5, 4);
+      break;
+    case 5U:
+      fill_path(&paths[0], node, 0, 2);
+      fill_path(&paths[1], node, 2, 4);
+      fill_path(&paths[2], node, 6, 4);
+      host_degree[static_cast<std::size_t>(sample) * kDimension +
+                  static_cast<std::size_t>(node[1])] = 2;
+      break;
+    case 6U:
+      fill_path(&paths[0], node, 0, 2);
+      paths[1] = {.size = 3, .node = {node[1], node[2], node[3]}};
+      paths[2] = {.size = 3, .node = {node[3], node[4], node[0]}};
+      break;
+    default:
+      fill_path(&paths[0], node, 0, 3);
+      paths[1] = {.size = 3, .node = {node[3], node[4], node[0]}};
+      paths[2] = {.size = 3, .node = {node[5], node[6], node[3]}};
+      break;
+    }
+
+    quick_hs::GraphView host_graph{
+        .dimension = kQuickHsDifferentialDimension,
+        .degree = host_degree.data() + static_cast<std::size_t>(sample) * kDimension,
+        .neighbors = nullptr,
+        .distance = host_distance.data() + matrix_begin,
+        .active = host_active.data() + matrix_begin,
+        .row_offsets = nullptr,
+        .neighbor_edge_ids = nullptr,
+        .pair_offsets = nullptr,
+        .nonpair_mask = nullptr,
+        .edge_u = nullptr,
+        .edge_v = nullptr,
+        .edge_active = nullptr,
+        .fixed_edge = nullptr,
+        .coordinate_x = nullptr,
+        .coordinate_y = nullptr,
+        .edge_count = 0,
+        .distance_type = 0U,
+        .complete_graph = true,
+    };
+    expected[static_cast<std::size_t>(sample)] =
+        quick_hs::Opt(host_graph, paths, quick_hs::kMaxPathCount) ? 1U : 0U;
+  }
+
+  DeviceBuffer<std::int64_t> device_distance(host_distance.size(), device);
+  DeviceBuffer<std::uint8_t> device_active(host_active.size(), device);
+  DeviceBuffer<std::int32_t> device_degree(host_degree.size(), device);
+  DeviceBuffer<quick_hs::SmallPath> device_paths(host_paths.size(), device);
+  DeviceBuffer<std::uint8_t> device_result(sample_count, device);
+  device_distance.CopyFromHost(host_distance.data(), host_distance.size());
+  device_active.CopyFromHost(host_active.data(), host_active.size());
+  device_degree.CopyFromHost(host_degree.data(), host_degree.size());
+  device_paths.CopyFromHost(host_paths.data(), host_paths.size());
+  const std::uint32_t blocks =
+      (samples + kQuickHsDifferentialWarpsPerBlock - 1U) / kQuickHsDifferentialWarpsPerBlock;
+  QuickHsPathDifferentialKernel<<<blocks, kQuickHsDifferentialWarpsPerBlock * 32U>>>(
+      samples, device_distance.get(), device_active.get(), device_degree.get(), device_paths.get(),
+      device_result.get());
+  CheckCuda(cudaGetLastError(), "QuickHsPathDifferentialKernel launch");
+  CheckCuda(cudaDeviceSynchronize(), "QuickHsPathDifferentialKernel synchronize");
+
+  std::vector<std::uint8_t> actual(sample_count, 2U);
+  device_result.CopyToHost(actual.data(), actual.size());
+  QuickHsPathDifferentialResult result{.cases = sample_count};
+  for (std::size_t sample = 0; sample < sample_count; ++sample) {
+    result.mismatches += static_cast<std::size_t>(actual[sample] != expected[sample]);
+  }
+  return result;
+}
+
 ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
                                              const std::vector<std::uint8_t>& protected_edges,
                                              const ResidentGpuOptions& options) {
@@ -964,9 +4446,17 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
       !graph.integer_distance_safe || protected_edges.size() != graph.edges.size() ||
       options.pdlp_iterations == 0U || options.potential_candidates < 2U ||
       options.potential_candidates > 32U || options.fractional_bits > 30U ||
+      options.main_edge_potentials < 2U || options.main_edge_potentials > 32U ||
+      options.main_edge_positions == 0U ||
+      options.main_edge_positions >= static_cast<std::uint32_t>(INT32_MAX) ||
+      options.quick_hs_candidates < 2U ||
+      options.quick_hs_candidates > static_cast<std::uint32_t>(quick_hs::kMaxPotentialNodes) ||
+      options.quick_hs_pair_trials > static_cast<std::uint32_t>(INT32_MAX) ||
+      options.extra_edge_depth < 1U || options.extra_edge_depth > 2U ||
+      (options.enable_point_nonpair && !options.enable_pdlp) ||
       (options.enable_pdlp && options.incumbent_cost < 0) ||
       (!options.enable_quick_hs && !options.enable_jv && !options.enable_geometry &&
-       !options.enable_pdlp)) {
+       !options.enable_pdlp && !options.enable_main_edge && !options.enable_extra_edge)) {
     throw std::invalid_argument("resident GPU 输入图、tour mask、阶段开关或预算非法");
   }
   if (graph.edges.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
@@ -980,27 +4470,40 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
 
   const SteadyClock::time_point solve_begin = SteadyClock::now();
   const std::size_t dimension = static_cast<std::size_t>(graph.dimension);
-  const std::size_t matrix_size = dimension * dimension;
   const std::size_t edge_count = graph.edges.size();
   std::vector<std::int32_t> host_edge_u(edge_count);
   std::vector<std::int32_t> host_edge_v(edge_count);
   std::vector<std::int64_t> host_edge_weight(edge_count);
   std::vector<std::uint8_t> host_edge_active(edge_count);
-  std::vector<std::uint8_t> host_active_matrix(matrix_size, 0U);
+  std::vector<std::int32_t> host_degree(dimension, 0);
+  std::vector<std::int32_t> host_protected_degree(dimension, 0);
   for (std::size_t edge = 0; edge < edge_count; ++edge) {
     host_edge_u[edge] = graph.edges[edge].u;
     host_edge_v[edge] = graph.edges[edge].v;
     host_edge_weight[edge] = graph.edges[edge].weight;
     host_edge_active[edge] = graph.edges[edge].active ? 1U : 0U;
     if (graph.edges[edge].active) {
-      host_active_matrix[static_cast<std::size_t>(graph.edges[edge].u) * dimension +
-                         static_cast<std::size_t>(graph.edges[edge].v)] = 1U;
-      host_active_matrix[static_cast<std::size_t>(graph.edges[edge].v) * dimension +
-                         static_cast<std::size_t>(graph.edges[edge].u)] = 1U;
+      ++host_degree[static_cast<std::size_t>(graph.edges[edge].u)];
+      ++host_degree[static_cast<std::size_t>(graph.edges[edge].v)];
+      if (protected_edges[edge] != 0U) {
+        ++host_protected_degree[static_cast<std::size_t>(graph.edges[edge].u)];
+        ++host_protected_degree[static_cast<std::size_t>(graph.edges[edge].v)];
+      }
     }
   }
-  const std::vector<std::int64_t> host_distance = BuildDistanceMatrix(graph);
+  const bool has_protected_degree_floor =
+      std::all_of(host_protected_degree.begin(), host_protected_degree.end(),
+                  [](const std::int32_t degree) { return degree >= 2; });
+  const SparseAdjacency host_adjacency = BuildSparseAdjacency(graph);
+  const bool complete_graph = IsCanonicalCompleteGraph(graph);
   const std::vector<GeometryKdNode> host_geometry_kd = BuildGeometryKdTree(graph);
+  std::vector<std::int32_t> host_geometry_rank(dimension, -1);
+  // KD 树按前序连续存储，同一子树在数组中连续。以该顺序构造重叠
+  // 16--48 点局部 SEC，比原始 TSPLIB 编号窗口更贴近真实几何邻域。
+  for (std::size_t rank = 0U; rank < host_geometry_kd.size(); ++rank) {
+    host_geometry_rank[static_cast<std::size_t>(host_geometry_kd[rank].point)] =
+        static_cast<std::int32_t>(rank);
+  }
   std::vector<std::int64_t> host_x(dimension);
   std::vector<std::int64_t> host_y(dimension);
   for (std::size_t node = 0U; node < dimension; ++node) {
@@ -1008,6 +4511,14 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     host_y[node] = graph.points[node].integer_y;
   }
   const std::int64_t denominator = std::int64_t{1} << options.fractional_bits;
+  const LocalSecLayout local_sec = BuildLocalSecLayout(graph.dimension);
+  const std::int64_t maximum_cut_count_wide =
+      static_cast<std::int64_t>(local_sec.cut_count) +
+      static_cast<std::int64_t>(kConnectivitySupportLevels) * graph.dimension;
+  if (maximum_cut_count_wide > INT32_MAX) {
+    throw std::overflow_error("resident GPU cut id 超出 int32 范围");
+  }
+  const std::int32_t maximum_cut_count = static_cast<std::int32_t>(maximum_cut_count_wide);
   const std::int64_t maximum_edge_weight =
       *std::max_element(host_edge_weight.begin(), host_edge_weight.end());
   const std::int64_t minimum_edge_weight =
@@ -1021,16 +4532,16 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
       4.0 * static_cast<double>(std::max<std::int64_t>(maximum_edge_weight, 1));
   const long double maximum_quantized =
       static_cast<long double>(dual_limit) * static_cast<long double>(denominator);
-  const long double conservative_accumulator =
-      2.0L * dimension * maximum_quantized +
-      edge_count *
-          (static_cast<long double>(maximum_edge_weight) * denominator + 2.0L * maximum_quantized);
-  if (options.enable_pdlp &&
-      (maximum_quantized > 1.0e15L ||
-       conservative_accumulator > static_cast<long double>(INT64_MAX) / 2.0L ||
-       static_cast<long double>(options.incumbent_cost) * denominator >
-           static_cast<long double>(INT64_MAX) / 2.0L)) {
-    throw std::overflow_error("resident PDLP int64 证明累加器无法覆盖当前实例");
+  // 一条边最多同时跨越 kMaxLocalSecIncidence 个局部 SEC。reduced cost
+  // 的 int64 门禁必须覆盖全部 cut multiplier，不能只按两个 degree dual 估计。
+  const long double maximum_reduced =
+      static_cast<long double>(maximum_edge_weight) * denominator +
+      static_cast<long double>(2 + kMaxLocalSecIncidence) * maximum_quantized;
+  if (options.enable_pdlp && (maximum_quantized > 1.0e15L ||
+                              maximum_reduced > static_cast<long double>(INT64_MAX) / 2.0L ||
+                              static_cast<long double>(options.incumbent_cost) * denominator >
+                                  static_cast<long double>(INT64_MAX) / 2.0L)) {
+    throw std::overflow_error("resident PDLP 单项 reduced cost 无法用 int64 精确表示");
   }
 
   DeviceBuffer<std::int32_t> device_edge_u(edge_count, device);
@@ -1040,27 +4551,105 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   DeviceBuffer<std::int32_t> device_all_edge_ids(edge_count, device);
   DeviceBuffer<std::int32_t> device_active_edge_ids(edge_count, device);
   DeviceBuffer<std::int32_t> device_active_edge_count(1U, device);
+  DeviceBuffer<std::int32_t> device_dirty_root_edge_ids(edge_count, device);
+  DeviceBuffer<std::int32_t> device_dirty_root_edge_count(1U, device);
+  DeviceBuffer<std::uint8_t> device_dirty_root_flags(edge_count, device);
+  DeviceBuffer<std::uint32_t> device_dirty_vertices(dimension, device);
+  DeviceBuffer<std::uint32_t> device_dirty_vertices_next(dimension, device);
   DeviceBuffer<std::uint8_t> device_protected(protected_edges.size(), device);
-  DeviceBuffer<std::uint8_t> device_active_matrix(matrix_size, device);
-  DeviceBuffer<std::int64_t> device_distance(matrix_size, device);
   DeviceBuffer<std::int64_t> device_x(dimension, device);
   DeviceBuffer<std::int64_t> device_y(dimension, device);
+  DeviceBuffer<std::int64_t> device_row_offsets(host_adjacency.row_offsets.size(), device);
+  DeviceBuffer<std::int32_t> device_neighbors(host_adjacency.neighbors.size(), device);
+  DeviceBuffer<std::int32_t> device_neighbor_edge_ids(host_adjacency.edge_ids.size(), device);
+  DeviceBuffer<std::int64_t> device_compact_row_offsets;
+  DeviceBuffer<std::int64_t> device_compact_row_offsets_next;
+  DeviceBuffer<std::int64_t> device_csr_counts;
+  DeviceBuffer<std::int32_t> device_compact_neighbors;
+  DeviceBuffer<std::int32_t> device_compact_neighbors_next;
+  DeviceBuffer<std::int32_t> device_compact_neighbor_edge_ids;
+  DeviceBuffer<std::int32_t> device_compact_neighbor_edge_ids_next;
+  DeviceBuffer<unsigned long long> device_compact_cursor;
+  DeviceBuffer<std::uint8_t> device_csr_scan_temp;
+  DeviceBuffer<std::int64_t> device_pair_counts(dimension + 1U, device);
+  DeviceBuffer<std::int64_t> device_pair_offsets(dimension + 1U, device);
+  DeviceBuffer<std::int64_t> device_pair_offsets_next(dimension + 1U, device);
+  DeviceBuffer<std::uint8_t> device_pair_scan_temp;
+  DeviceBuffer<std::uint8_t> device_nonpair_mask;
+  DeviceBuffer<std::uint8_t> device_nonpair_mask_next;
+  DeviceBuffer<std::uint8_t> device_nonpair_proposed;
+  DeviceBuffer<std::uint8_t> device_nonpair_verified;
+  DeviceBuffer<std::int32_t> device_nonpair_fixed_witness;
+  DeviceBuffer<std::int32_t> device_nonpair_point_witness;
+  DeviceBuffer<unsigned long long> device_nonpair_proposal_counts(3U, device);
+  DeviceBuffer<unsigned long long> device_nonpair_committed_count(1U, device);
   DeviceBuffer<GeometryKdNode> device_geometry_kd(host_geometry_kd.size(), device);
+  DeviceBuffer<std::int32_t> device_geometry_rank(dimension, device);
   DeviceBuffer<std::int64_t> device_nearest(dimension, device);
   DeviceBuffer<std::int32_t> device_degree(dimension, device);
-  DeviceBuffer<std::int32_t> device_neighbors(matrix_size, device);
   DeviceBuffer<std::uint8_t> device_proposed(edge_count, device);
+  DeviceBuffer<std::uint8_t> device_verified(edge_count, device);
+  DeviceBuffer<std::uint8_t> device_fixed(edge_count, device);
+  DeviceBuffer<std::int32_t> device_fixed_edge_ids(edge_count, device);
+  DeviceBuffer<std::int32_t> device_fixed_edge_count(1U, device);
+  DeviceBuffer<std::uint8_t> device_fixed_proposed(edge_count, device);
+  DeviceBuffer<std::uint8_t> device_fixed_verified(edge_count, device);
+  DeviceBuffer<std::uint8_t> device_fixed_reason(edge_count, device);
   DeviceBuffer<std::uint8_t> device_committed(edge_count, device);
   DeviceBuffer<std::int32_t> device_first_witness(edge_count, device);
   DeviceBuffer<std::int32_t> device_second_witness(edge_count, device);
   DeviceBuffer<unsigned long long> device_committed_count(1U, device);
+  DeviceBuffer<unsigned long long> device_replay_counters(2U, device);
+  DeviceBuffer<unsigned long long> device_lp_path_closed_replies(1U, device);
+  DeviceBuffer<unsigned long long> device_fixed_count(1U, device);
+  DeviceBuffer<unsigned long long> device_nonpair_fix_proposal_count(1U, device);
+  DeviceBuffer<unsigned long long> device_direct_fix_proposal_count(1U, device);
+  DeviceBuffer<std::int32_t> device_fixed_degree(dimension, device);
   DeviceBuffer<std::int32_t> device_selected_degree(dimension, device);
+  DeviceBuffer<std::uint8_t> device_local_sec_incidence_count(edge_count, device);
+  DeviceBuffer<std::int32_t> device_local_sec_incidence_ids(
+      edge_count * static_cast<std::size_t>(kMaxLocalSecIncidence), device);
+  DeviceBuffer<std::int32_t> device_selected_cut(static_cast<std::size_t>(maximum_cut_count),
+                                                 device);
+  DeviceBuffer<std::uint8_t> device_cut_active(static_cast<std::size_t>(maximum_cut_count), device);
+  DeviceBuffer<std::uint8_t> device_cut_valid(static_cast<std::size_t>(maximum_cut_count), device);
+  DeviceBuffer<std::int32_t> device_support_label(dimension, device);
+  DeviceBuffer<std::int32_t> device_component_size(dimension, device);
+  DeviceBuffer<std::int32_t> device_component_changed(1U, device);
+  DeviceBuffer<unsigned long long> device_connectivity_cut_count(1U, device);
   DeviceBuffer<double> device_dual(dimension, device);
+  DeviceBuffer<double> device_degree_dual(dimension, device);
   DeviceBuffer<double> device_average(dimension, device);
+  DeviceBuffer<double> device_cut_dual(static_cast<std::size_t>(maximum_cut_count), device);
+  DeviceBuffer<double> device_cut_average(static_cast<std::size_t>(maximum_cut_count), device);
   DeviceBuffer<std::int64_t> device_quantized_dual(dimension, device);
+  DeviceBuffer<std::int64_t> device_quantized_cut(static_cast<std::size_t>(maximum_cut_count),
+                                                  device);
   DeviceBuffer<std::int64_t> device_reduced_cost(edge_count, device);
+  // local SEC 次梯度并不保证在有限迭代内优于 degree-box。每个阈值
+  // 独立产生候选快照，再由 device Signed128 精确竞赛，确保强化不倒退。
+  DeviceBuffer<std::int64_t> device_degree_quantized_dual(dimension, device);
+  DeviceBuffer<std::int64_t> device_degree_reduced_cost(edge_count, device);
+  DeviceBuffer<Signed128> device_degree_lower_bound(1U, device);
+  DeviceBuffer<std::int64_t> device_candidate_quantized_dual(dimension, device);
+  DeviceBuffer<std::int64_t> device_candidate_quantized_cut(
+      static_cast<std::size_t>(maximum_cut_count), device);
+  DeviceBuffer<std::int64_t> device_candidate_reduced_cost(edge_count, device);
+  DeviceBuffer<Signed128> device_candidate_lower_bound(1U, device);
+  DeviceBuffer<std::int32_t> device_selected_lp_snapshot_kind(1U, device);
+  DeviceBuffer<std::int32_t> device_apply_lp_snapshot(1U, device);
+  // gpu-safe replay 用独立 reduced-cost 向量重新构造全局下界。
+  DeviceBuffer<std::int64_t> device_replay_reduced_cost(edge_count, device);
+  DeviceBuffer<Signed128> device_replay_lower_bound(1U, device);
+  const std::size_t maximum_bound_terms =
+      dimension + static_cast<std::size_t>(maximum_cut_count) + edge_count;
+  constexpr std::size_t kBoundReductionThreads = 128U;
+  const std::size_t bound_partial_capacity = std::max<std::size_t>(
+      1U, std::min<std::size_t>(1024U, (maximum_bound_terms + kBoundReductionThreads - 1U) /
+                                           kBoundReductionThreads));
+  DeviceBuffer<Signed128> device_bound_partials(bound_partial_capacity, device);
   DeviceBuffer<unsigned long long> device_summary(2U, device);
-  DeviceBuffer<long long> device_lower_bound(1U, device);
+  DeviceBuffer<Signed128> device_lower_bound(1U, device);
   DeviceBuffer<std::int32_t> device_invalid(1U, device);
   std::size_t active_select_temp_bytes = 0U;
   CheckCuda(cub::DeviceSelect::Flagged(nullptr, active_select_temp_bytes, device_all_edge_ids.get(),
@@ -1069,54 +4658,153 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
                                        static_cast<std::int32_t>(edge_count)),
             "cub::DeviceSelect::Flagged size query");
   DeviceBuffer<std::uint8_t> device_active_select_temp(active_select_temp_bytes, device);
+  std::size_t pair_scan_temp_bytes = 0U;
+  CheckCuda(cub::DeviceScan::ExclusiveSum(nullptr, pair_scan_temp_bytes, device_pair_counts.get(),
+                                          device_pair_offsets.get(), graph.dimension + 1),
+            "cub::DeviceScan::ExclusiveSum pair size query");
+  device_pair_scan_temp = DeviceBuffer<std::uint8_t>(pair_scan_temp_bytes, device);
 
   ResidentGpuResult result;
   result.selected_device = device;
-  result.backend = "cuda-fully-resident-geometry+pdlp+jv+quick-hs";
+  result.backend = "cuda-fully-resident-geometry+pdlp+jv+quick-hs+extra-edge";
   result.initial_edges = graph.ActiveEdgeCount();
   result.resident_bytes =
       device_edge_u.bytes() + device_edge_v.bytes() + device_edge_weight.bytes() +
       device_edge_active.bytes() + device_all_edge_ids.bytes() + device_active_edge_ids.bytes() +
       device_active_edge_count.bytes() + device_active_select_temp.bytes() +
-      device_protected.bytes() + device_active_matrix.bytes() + device_distance.bytes() +
-      device_x.bytes() + device_y.bytes() + device_geometry_kd.bytes() + device_nearest.bytes() +
-      device_degree.bytes() + device_neighbors.bytes() + device_proposed.bytes() +
-      device_committed.bytes() + device_first_witness.bytes() + device_second_witness.bytes() +
-      device_committed_count.bytes() + device_selected_degree.bytes() + device_dual.bytes() +
-      device_average.bytes() + device_quantized_dual.bytes() + device_reduced_cost.bytes() +
-      device_summary.bytes() + device_lower_bound.bytes() + device_invalid.bytes();
+      device_dirty_root_edge_ids.bytes() + device_dirty_root_edge_count.bytes() +
+      device_dirty_root_flags.bytes() + device_dirty_vertices.bytes() +
+      device_dirty_vertices_next.bytes() + device_protected.bytes() + device_x.bytes() +
+      device_y.bytes() + device_row_offsets.bytes() + device_neighbors.bytes() +
+      device_neighbor_edge_ids.bytes() + device_geometry_kd.bytes() + device_geometry_rank.bytes() +
+      device_nearest.bytes() + device_degree.bytes() + device_proposed.bytes() +
+      device_verified.bytes() + device_fixed.bytes() + device_fixed_proposed.bytes() +
+      device_fixed_verified.bytes() + device_fixed_reason.bytes() + device_committed.bytes() +
+      device_first_witness.bytes() + device_second_witness.bytes() +
+      device_committed_count.bytes() + device_replay_counters.bytes() +
+      device_lp_path_closed_replies.bytes() + device_fixed_count.bytes() +
+      device_nonpair_fix_proposal_count.bytes() + device_direct_fix_proposal_count.bytes() +
+      device_fixed_degree.bytes() + device_selected_degree.bytes() +
+      device_local_sec_incidence_count.bytes() + device_local_sec_incidence_ids.bytes() +
+      device_selected_cut.bytes() + device_cut_active.bytes() + device_cut_valid.bytes() +
+      device_support_label.bytes() + device_component_size.bytes() +
+      device_component_changed.bytes() + device_connectivity_cut_count.bytes() +
+      device_dual.bytes() + device_degree_dual.bytes() + device_average.bytes() +
+      device_cut_dual.bytes() + device_cut_average.bytes() + device_quantized_dual.bytes() +
+      device_quantized_cut.bytes() + device_reduced_cost.bytes() +
+      device_degree_quantized_dual.bytes() + device_degree_reduced_cost.bytes() +
+      device_degree_lower_bound.bytes() + device_candidate_quantized_dual.bytes() +
+      device_candidate_quantized_cut.bytes() + device_candidate_reduced_cost.bytes() +
+      device_candidate_lower_bound.bytes() + device_selected_lp_snapshot_kind.bytes() +
+      device_apply_lp_snapshot.bytes() + device_replay_reduced_cost.bytes() +
+      device_replay_lower_bound.bytes() + device_bound_partials.bytes() + device_summary.bytes() +
+      device_lower_bound.bytes() + device_invalid.bytes() + device_pair_counts.bytes() +
+      device_pair_offsets.bytes() + device_pair_offsets_next.bytes() +
+      device_pair_scan_temp.bytes() + device_nonpair_proposal_counts.bytes() +
+      device_nonpair_committed_count.bytes() + device_fixed_edge_ids.bytes() +
+      device_fixed_edge_count.bytes();
 
   const SteadyClock::time_point upload_begin = SteadyClock::now();
   device_edge_u.CopyFromHost(host_edge_u.data(), edge_count);
   device_edge_v.CopyFromHost(host_edge_v.data(), edge_count);
   device_edge_weight.CopyFromHost(host_edge_weight.data(), edge_count);
   device_edge_active.CopyFromHost(host_edge_active.data(), edge_count);
+  device_geometry_rank.CopyFromHost(host_geometry_rank.data(), dimension);
   constexpr int kThreads = 128;
   const int all_edge_blocks =
       static_cast<int>((static_cast<std::int64_t>(edge_count) + kThreads - 1) / kThreads);
   InitializeEdgeIdsKernel<<<all_edge_blocks, kThreads>>>(static_cast<std::int32_t>(edge_count),
                                                          device_all_edge_ids.get());
   CheckCuda(cudaGetLastError(), "InitializeEdgeIdsKernel launch");
+  CheckCuda(
+      cudaMemset(device_local_sec_incidence_count.get(), 0, edge_count * sizeof(std::uint8_t)),
+      "cudaMemset local SEC incidence count");
+  if (local_sec.cut_count != 0) {
+    BuildLocalSecIncidenceKernel<<<all_edge_blocks, kThreads>>>(
+        static_cast<std::int32_t>(edge_count), device_all_edge_ids.get(), device_edge_u.get(),
+        device_edge_v.get(), device_geometry_rank.get(), local_sec,
+        device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get());
+    CheckCuda(cudaGetLastError(), "BuildLocalSecIncidenceKernel launch");
+  }
   device_protected.CopyFromHost(protected_edges.data(), protected_edges.size());
-  device_active_matrix.CopyFromHost(host_active_matrix.data(), matrix_size);
-  device_distance.CopyFromHost(host_distance.data(), matrix_size);
   device_x.CopyFromHost(host_x.data(), dimension);
   device_y.CopyFromHost(host_y.data(), dimension);
+  device_row_offsets.CopyFromHost(host_adjacency.row_offsets.data(),
+                                  host_adjacency.row_offsets.size());
+  device_neighbors.CopyFromHost(host_adjacency.neighbors.data(), host_adjacency.neighbors.size());
+  device_neighbor_edge_ids.CopyFromHost(host_adjacency.edge_ids.data(),
+                                        host_adjacency.edge_ids.size());
   device_geometry_kd.CopyFromHost(host_geometry_kd.data(), host_geometry_kd.size());
+  CheckCuda(cudaMemset(device_fixed.get(), 0, edge_count * sizeof(std::uint8_t)),
+            "cudaMemset resident fixed");
+  CheckCuda(cudaMemset(device_fixed_count.get(), 0, sizeof(unsigned long long)),
+            "cudaMemset resident fixed count");
+  CheckCuda(cudaMemset(device_dirty_vertices.get(), 0, dimension * sizeof(std::uint32_t)),
+            "cudaMemset resident dirty vertices");
+  CheckCuda(cudaMemset(device_dirty_vertices_next.get(), 0, dimension * sizeof(std::uint32_t)),
+            "cudaMemset resident next dirty vertices");
+  // Geometry/LP 只读度数而不读排序邻接表；直接上传初始度数可省掉完整图上
+  // 最昂贵的一次 O(n^2) 邻接构建。后续提交会在 device 上同步维护它。
+  device_degree.CopyFromHost(host_degree.data(), dimension);
+  MarkDegreeTwoFixedKernel<<<all_edge_blocks, kThreads>>>(
+      static_cast<std::int32_t>(edge_count), device_all_edge_ids.get(), device_edge_u.get(),
+      device_edge_v.get(), device_edge_active.get(), device_degree.get(), device_protected.get(),
+      device_fixed.get());
+  CheckCuda(cudaGetLastError(), "MarkDegreeTwoFixedKernel initial launch");
+  CheckCuda(cudaMemset(device_fixed_degree.get(), 0, dimension * sizeof(std::int32_t)),
+            "cudaMemset resident initial fixed degree");
+  CountFixedDegreeKernel<<<all_edge_blocks, kThreads>>>(
+      static_cast<std::int32_t>(edge_count), device_all_edge_ids.get(), device_edge_u.get(),
+      device_edge_v.get(), device_edge_active.get(), device_fixed.get(), device_fixed_degree.get());
   result.upload_ms = ElapsedMilliseconds(upload_begin);
 
   const int vertex_blocks =
       static_cast<int>((static_cast<std::int64_t>(graph.dimension) + kThreads - 1) / kThreads);
-  const quick_hs::GraphView view{.dimension = graph.dimension,
-                                 .degree = device_degree.get(),
-                                 .neighbors = device_neighbors.get(),
-                                 .distance = device_distance.get(),
-                                 .active = device_active_matrix.get()};
+  const int offset_blocks =
+      static_cast<int>((static_cast<std::int64_t>(graph.dimension) + 1 + kThreads - 1) / kThreads);
+  quick_hs::GraphView view{.dimension = graph.dimension,
+                           .degree = device_degree.get(),
+                           .neighbors = device_neighbors.get(),
+                           .distance = nullptr,
+                           .active = nullptr,
+                           .row_offsets = device_row_offsets.get(),
+                           .neighbor_edge_ids = device_neighbor_edge_ids.get(),
+                           .pair_offsets = nullptr,
+                           .nonpair_mask = nullptr,
+                           .edge_u = device_edge_u.get(),
+                           .edge_v = device_edge_v.get(),
+                           .edge_active = device_edge_active.get(),
+                           .fixed_edge = device_fixed.get(),
+                           .coordinate_x = device_x.get(),
+                           .coordinate_y = device_y.get(),
+                           .edge_count = static_cast<std::int64_t>(edge_count),
+                           .distance_type = static_cast<std::uint8_t>(graph.distance_type),
+                           .complete_graph = complete_graph};
+  CheckCuda(cudaMemset(device_invalid.get(), 0, sizeof(std::int32_t)),
+            "cudaMemset resident metric validation");
+  ValidateMetricKernel<<<all_edge_blocks, kThreads>>>(
+      static_cast<std::int32_t>(edge_count), device_edge_u.get(), device_edge_v.get(),
+      device_edge_weight.get(), view, device_invalid.get());
+  ValidateFixedDegreeKernel<<<vertex_blocks, kThreads>>>(graph.dimension, device_fixed_degree.get(),
+                                                         device_invalid.get());
+  CheckCuda(cudaGetLastError(), "ValidateMetricKernel launch");
+  CheckCuda(cudaDeviceSynchronize(), "resident metric validation synchronize");
+  std::int32_t invalid_metric = 0;
+  device_invalid.CopyToHost(&invalid_metric, 1U);
+  if (invalid_metric != 0) {
+    throw std::runtime_error("resident GPU 精确距离 oracle 与输入边权不一致");
+  }
   std::size_t current_edges = result.initial_edges;
   std::int32_t active_edge_count = 0;
+  bool adjacency_dirty = false;
+  bool compact_csr_allocated = false;
+  std::size_t pair_capacity = 0U;
+  std::int64_t current_pair_count = 0;
+  bool lp_snapshot_ready = false;
   std::vector<std::uint8_t> host_committed(options.collect_trace ? edge_count : 0U);
   std::vector<std::int32_t> host_first_witness(options.collect_trace ? edge_count : 0U);
   std::vector<std::int32_t> host_second_witness(options.collect_trace ? edge_count : 0U);
+  std::vector<std::uint8_t> host_fixed_epoch(options.collect_trace ? edge_count : 0U);
 
   const auto compact_active_edges = [&] {
     const SteadyClock::time_point compact_begin = SteadyClock::now();
@@ -1134,21 +4822,228 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   // CUB 的 Flagged selection 保留输入次序，因此列表始终按 stable edge id 递增。
   compact_active_edges();
 
-  const auto rebuild = [&] {
-    BuildAdjacencyKernel<<<vertex_blocks, kThreads>>>(graph.dimension, device_active_matrix.get(),
-                                                      device_distance.get(), device_degree.get(),
-                                                      device_neighbors.get());
-    CheckCuda(cudaGetLastError(), "BuildAdjacencyKernel launch");
+  const auto rebuild_compact_adjacency = [&] {
+    if (!adjacency_dirty) {
+      return;
+    }
+    const SteadyClock::time_point compact_begin = SteadyClock::now();
+    if (!compact_csr_allocated) {
+      if (edge_count > std::numeric_limits<std::size_t>::max() / 2U) {
+        throw std::overflow_error("resident 紧凑 CSR slot 数溢出");
+      }
+      const std::size_t slot_capacity = edge_count * 2U;
+      device_csr_counts = DeviceBuffer<std::int64_t>(dimension + 1U, device);
+      device_compact_row_offsets = DeviceBuffer<std::int64_t>(dimension + 1U, device);
+      device_compact_row_offsets_next = DeviceBuffer<std::int64_t>(dimension + 1U, device);
+      device_compact_neighbors = DeviceBuffer<std::int32_t>(slot_capacity, device);
+      device_compact_neighbors_next = DeviceBuffer<std::int32_t>(slot_capacity, device);
+      device_compact_neighbor_edge_ids = DeviceBuffer<std::int32_t>(slot_capacity, device);
+      device_compact_neighbor_edge_ids_next = DeviceBuffer<std::int32_t>(slot_capacity, device);
+      device_compact_cursor = DeviceBuffer<unsigned long long>(dimension, device);
+
+      std::size_t scan_temp_bytes = 0U;
+      CheckCuda(cub::DeviceScan::ExclusiveSum(nullptr, scan_temp_bytes, device_csr_counts.get(),
+                                              device_compact_row_offsets.get(),
+                                              graph.dimension + 1),
+                "cub::DeviceScan::ExclusiveSum size query");
+      device_csr_scan_temp = DeviceBuffer<std::uint8_t>(scan_temp_bytes, device);
+      result.resident_bytes +=
+          device_csr_counts.bytes() + device_compact_row_offsets.bytes() +
+          device_compact_row_offsets_next.bytes() + device_compact_neighbors.bytes() +
+          device_compact_neighbors_next.bytes() + device_compact_neighbor_edge_ids.bytes() +
+          device_compact_neighbor_edge_ids_next.bytes() + device_compact_cursor.bytes() +
+          device_csr_scan_temp.bytes();
+      compact_csr_allocated = true;
+    }
+
+    CopyDegreeToOffsetsKernel<<<offset_blocks, kThreads>>>(graph.dimension, device_degree.get(),
+                                                           device_csr_counts.get());
+    CheckCuda(cudaGetLastError(), "CopyDegreeToOffsetsKernel launch");
+    std::size_t scan_temp_bytes = device_csr_scan_temp.bytes();
+    CheckCuda(cub::DeviceScan::ExclusiveSum(
+                  device_csr_scan_temp.get(), scan_temp_bytes, device_csr_counts.get(),
+                  device_compact_row_offsets_next.get(), graph.dimension + 1),
+              "cub::DeviceScan::ExclusiveSum compact CSR");
+
+    std::int64_t compact_slots = 0;
+    CheckCuda(cudaMemcpy(&compact_slots, device_compact_row_offsets_next.get() + graph.dimension,
+                         sizeof(compact_slots), cudaMemcpyDeviceToHost),
+              "cudaMemcpy compact CSR slot count");
+    if (compact_slots < 0 || static_cast<std::uint64_t>(compact_slots) !=
+                                 2ULL * static_cast<std::uint64_t>(current_edges)) {
+      throw std::logic_error("resident 紧凑 CSR degree prefix sum 与活动边数不一致");
+    }
+    CheckCuda(cudaMemcpy(device_compact_cursor.get(), device_compact_row_offsets_next.get(),
+                         dimension * sizeof(std::int64_t), cudaMemcpyDeviceToDevice),
+              "cudaMemcpy compact CSR cursor");
+    const int compact_blocks = (active_edge_count + kThreads - 1) / kThreads;
+    ScatterCompactAdjacencyKernel<<<compact_blocks, kThreads>>>(
+        active_edge_count, device_active_edge_ids.get(), device_edge_u.get(), device_edge_v.get(),
+        device_compact_cursor.get(), device_compact_neighbors_next.get(),
+        device_compact_neighbor_edge_ids_next.get());
+    CheckCuda(cudaGetLastError(), "ScatterCompactAdjacencyKernel launch");
+    SortCompactAdjacencyKernel<<<graph.dimension, 1>>>(
+        graph.dimension, device_compact_row_offsets_next.get(), device_edge_weight.get(),
+        device_compact_neighbors_next.get(), device_compact_neighbor_edge_ids_next.get());
+    CheckCuda(cudaGetLastError(), "SortCompactAdjacencyKernel launch");
+    CheckCuda(cudaMemset(device_invalid.get(), 0, sizeof(std::int32_t)),
+              "cudaMemset compact CSR validation");
+    ValidateCompactAdjacencyKernel<<<vertex_blocks, kThreads>>>(
+        graph.dimension, compact_slots, static_cast<std::int32_t>(edge_count),
+        device_compact_row_offsets_next.get(), device_compact_neighbors_next.get(),
+        device_compact_neighbor_edge_ids_next.get(), device_edge_u.get(), device_edge_v.get(),
+        device_edge_active.get(), device_invalid.get());
+    CheckCuda(cudaGetLastError(), "ValidateCompactAdjacencyKernel launch");
+    CheckCuda(cudaDeviceSynchronize(), "resident compact CSR synchronize");
+    std::int32_t invalid_csr = 0;
+    device_invalid.CopyToHost(&invalid_csr, 1U);
+    if (invalid_csr != 0) {
+      throw std::logic_error("resident 紧凑 CSR 内容校验失败");
+    }
+
+    if (view.pair_offsets != nullptr && view.nonpair_mask != nullptr) {
+      BuildPairCountsKernel<<<offset_blocks, kThreads>>>(graph.dimension, device_degree.get(),
+                                                         device_pair_counts.get());
+      CheckCuda(cudaGetLastError(), "BuildPairCountsKernel compact launch");
+      CheckCuda(cub::DeviceScan::ExclusiveSum(device_pair_scan_temp.get(), pair_scan_temp_bytes,
+                                              device_pair_counts.get(),
+                                              device_pair_offsets_next.get(), graph.dimension + 1),
+                "cub::DeviceScan::ExclusiveSum compact pair offsets");
+      std::int64_t next_pair_count = 0;
+      CheckCuda(cudaMemcpy(&next_pair_count, device_pair_offsets_next.get() + graph.dimension,
+                           sizeof(next_pair_count), cudaMemcpyDeviceToHost),
+                "cudaMemcpy compact pair count");
+      if (next_pair_count < 0 || static_cast<std::uint64_t>(next_pair_count) > pair_capacity) {
+        throw std::logic_error("resident nonpair compact 容量或计数不一致");
+      }
+      if (next_pair_count != 0) {
+        CheckCuda(cudaMemset(device_nonpair_mask_next.get(), 0,
+                             static_cast<std::size_t>(next_pair_count) * sizeof(std::uint8_t)),
+                  "cudaMemset compact nonpair mask");
+        CheckCuda(cudaMemset(device_invalid.get(), 0, sizeof(std::int32_t)),
+                  "cudaMemset compact nonpair validation");
+        CarryNonpairMaskKernel<<<graph.dimension, kThreads>>>(
+            graph.dimension, view.row_offsets, view.neighbor_edge_ids, view.pair_offsets,
+            view.nonpair_mask, device_compact_row_offsets_next.get(),
+            device_compact_neighbor_edge_ids_next.get(), device_pair_offsets_next.get(),
+            device_nonpair_mask_next.get(), device_invalid.get());
+        CheckCuda(cudaGetLastError(), "CarryNonpairMaskKernel launch");
+        CheckCuda(cudaDeviceSynchronize(), "resident nonpair compact synchronize");
+        std::int32_t invalid_nonpair = 0;
+        device_invalid.CopyToHost(&invalid_nonpair, 1U);
+        if (invalid_nonpair != 0) {
+          throw std::logic_error("resident nonpair stable edge 重映射失败");
+        }
+      }
+      std::swap(device_pair_offsets, device_pair_offsets_next);
+      std::swap(device_nonpair_mask, device_nonpair_mask_next);
+      current_pair_count = next_pair_count;
+    } else {
+      current_pair_count = 0;
+    }
+
+    std::swap(device_compact_row_offsets, device_compact_row_offsets_next);
+    std::swap(device_compact_neighbors, device_compact_neighbors_next);
+    std::swap(device_compact_neighbor_edge_ids, device_compact_neighbor_edge_ids_next);
+    view.row_offsets = device_compact_row_offsets.get();
+    view.neighbors = device_compact_neighbors.get();
+    view.neighbor_edge_ids = device_compact_neighbor_edge_ids.get();
+    // non-pair 是固定点的一等单调状态；紧凑 CSR 改变 slot 后，用 stable
+    // edge id 在 device 上重映射，不能因下一轮删边而遗失已证明的 pair。
+    view.pair_offsets = current_pair_count == 0 ? nullptr : device_pair_offsets.get();
+    view.nonpair_mask = current_pair_count == 0 ? nullptr : device_nonpair_mask.get();
+    // 指针切换后释放初始 CSR，峰值内存已记入 resident_bytes。
+    device_row_offsets = DeviceBuffer<std::int64_t>();
+    device_neighbors = DeviceBuffer<std::int32_t>();
+    device_neighbor_edge_ids = DeviceBuffer<std::int32_t>();
+    adjacency_dirty = false;
+    result.compaction_ms += ElapsedMilliseconds(compact_begin);
   };
-  const auto run_epoch = [&](const EliminationMethod method) -> std::size_t {
+
+  const auto clear_dirty_vertices = [&] {
+    CheckCuda(cudaMemset(device_dirty_vertices.get(), 0, dimension * sizeof(std::uint32_t)),
+              "cudaMemset resident dirty frontier");
+  };
+
+  const auto select_dirty_roots = [&](const std::uint32_t radius) -> std::int32_t {
+    rebuild_compact_adjacency();
+    for (std::uint32_t hop = 0U; hop < radius; ++hop) {
+      CheckCuda(cudaMemcpy(device_dirty_vertices_next.get(), device_dirty_vertices.get(),
+                           dimension * sizeof(std::uint32_t), cudaMemcpyDeviceToDevice),
+                "cudaMemcpy resident dirty frontier");
+      ExpandDirtyVerticesKernel<<<vertex_blocks, kThreads>>>(view, device_dirty_vertices.get(),
+                                                             device_dirty_vertices_next.get());
+      CheckCuda(cudaGetLastError(), "ExpandDirtyVerticesKernel launch");
+      std::swap(device_dirty_vertices, device_dirty_vertices_next);
+    }
+    const int root_blocks = (active_edge_count + kThreads - 1) / kThreads;
+    BuildDirtyRootFlagsKernel<<<root_blocks, kThreads>>>(
+        active_edge_count, device_active_edge_ids.get(), device_edge_u.get(), device_edge_v.get(),
+        device_dirty_vertices.get(), device_dirty_root_flags.get());
+    CheckCuda(cudaGetLastError(), "BuildDirtyRootFlagsKernel launch");
+    CheckCuda(cub::DeviceSelect::Flagged(device_active_select_temp.get(), active_select_temp_bytes,
+                                         device_active_edge_ids.get(),
+                                         device_dirty_root_flags.get(),
+                                         device_dirty_root_edge_ids.get(),
+                                         device_dirty_root_edge_count.get(), active_edge_count),
+              "cub::DeviceSelect::Flagged dirty roots");
+    std::int32_t dirty_count = 0;
+    device_dirty_root_edge_count.CopyToHost(&dirty_count, 1U);
+    if (dirty_count < 0 || dirty_count > active_edge_count) {
+      throw std::logic_error("resident dirty root 压缩计数非法");
+    }
+    return dirty_count;
+  };
+
+  const auto compute_exact_box_bound =
+      [&](const std::int32_t work_count, const std::int32_t* const work_edge_ids,
+          const std::int64_t* const quantized_dual, const std::int32_t cut_count,
+          const std::int64_t* const quantized_cut, const std::int64_t* const reduced_cost,
+          Signed128* const output) {
+        const std::size_t term_count =
+            dimension + static_cast<std::size_t>(cut_count) + static_cast<std::size_t>(work_count);
+        const std::size_t required =
+            (term_count + kBoundReductionThreads - 1U) / kBoundReductionThreads;
+        const std::int32_t partial_count = static_cast<std::int32_t>(
+            std::max<std::size_t>(1U, std::min(bound_partial_capacity, required)));
+        ExactBoxBoundPartialsKernel<static_cast<std::int32_t>(kBoundReductionThreads)>
+            <<<partial_count, static_cast<int>(kBoundReductionThreads)>>>(
+                graph.dimension, work_count, work_edge_ids, device_edge_active.get(),
+                quantized_dual, cut_count, quantized_cut, reduced_cost,
+                device_bound_partials.get());
+        CheckCuda(cudaGetLastError(), "ExactBoxBoundPartialsKernel launch");
+        ExactBoxBoundFinalizeKernel<static_cast<std::int32_t>(kBoundReductionThreads)>
+            <<<1, static_cast<int>(kBoundReductionThreads)>>>(partial_count,
+                                                              device_bound_partials.get(), output);
+        CheckCuda(cudaGetLastError(), "ExactBoxBoundFinalizeKernel launch");
+      };
+
+  const auto run_epoch = [&](const EliminationMethod method, const bool main_edge_stage = false,
+                             const std::int32_t main_position = 0,
+                             const bool extra_edge_stage = false,
+                             const std::int32_t* const selected_edge_ids = nullptr,
+                             const std::int32_t selected_edge_count = -1,
+                             const bool pair_service_stage = true) -> std::size_t {
+    rebuild_compact_adjacency();
     const SteadyClock::time_point kernel_begin = SteadyClock::now();
-    const std::int32_t work_count = active_edge_count;
+    const std::int32_t work_count =
+        selected_edge_ids == nullptr ? active_edge_count : selected_edge_count;
+    const std::int32_t* const work_edge_ids =
+        selected_edge_ids == nullptr ? device_active_edge_ids.get() : selected_edge_ids;
     const int work_blocks =
         static_cast<int>((static_cast<std::int64_t>(work_count) + kThreads - 1) / kThreads);
-    if (work_count <= 0) {
+    if (work_count < 0 || work_count > active_edge_count ||
+        (work_count != 0 && work_edge_ids == nullptr)) {
+      throw std::logic_error("resident epoch 的 active-root 子集非法");
+    }
+    if (work_count == 0) {
+      return 0U;
+    }
+    if (active_edge_count <= 0) {
       throw std::logic_error("resident epoch 收到空活动边集");
     }
-    rebuild();
+    // 稀疏 CSR 的 slot 稳定且按 (cost,node) 排序；删边后谓词直接
+    // 跳过 inactive slot，不再为每个 epoch 重建 n×n 邻接表。
     CheckCuda(cudaMemset(device_proposed.get(), 0, edge_count * sizeof(std::uint8_t)),
               "cudaMemset resident proposed");
     CheckCuda(cudaMemset(device_committed.get(), 0, edge_count * sizeof(std::uint8_t)),
@@ -1157,32 +5052,99 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
               "cudaMemset resident first witness");
     CheckCuda(cudaMemset(device_second_witness.get(), 0xff, edge_count * sizeof(std::int32_t)),
               "cudaMemset resident second witness");
+    if (method == EliminationMethod::kLpBox && options.enable_fixing) {
+      CheckCuda(cudaMemset(device_fixed_proposed.get(), 0, edge_count * sizeof(std::uint8_t)),
+                "cudaMemset resident fixed proposed");
+      CheckCuda(cudaMemset(device_fixed_verified.get(), 0, edge_count * sizeof(std::uint8_t)),
+                "cudaMemset resident fixed verified");
+      CheckCuda(cudaMemset(device_fixed_reason.get(), 0, edge_count * sizeof(std::uint8_t)),
+                "cudaMemset resident nonpair fixed reason");
+      CheckCuda(cudaMemset(device_nonpair_fix_proposal_count.get(), 0, sizeof(unsigned long long)),
+                "cudaMemset resident nonpair fix proposal count");
+      CheckCuda(cudaMemset(device_direct_fix_proposal_count.get(), 0, sizeof(unsigned long long)),
+                "cudaMemset resident direct fix proposal count");
+    }
     std::vector<std::int64_t> host_quantized_dual;
-    if (method == EliminationMethod::kJv) {
-      JvKernel<<<work_blocks, kThreads>>>(work_count, device_active_edge_ids.get(),
-                                          device_edge_u.get(), device_edge_v.get(),
-                                          device_edge_active.get(), device_protected.get(), view,
-                                          device_proposed.get(), device_first_witness.get());
+    std::vector<std::int64_t> host_quantized_cut;
+    const bool quick_hs_stage = extra_edge_stage || method == EliminationMethod::kGpuQuickHs;
+    const std::int64_t* const lp_path_reduced_cost =
+        quick_hs_stage && lp_snapshot_ready ? device_reduced_cost.get() : nullptr;
+    const Signed128* const lp_path_lower_bound =
+        quick_hs_stage && lp_snapshot_ready ? device_lower_bound.get() : nullptr;
+    const std::int64_t lp_incumbent_numerator = options.incumbent_cost * denominator;
+    const bool collect_lp_path_closures =
+        (quick_hs_stage && lp_snapshot_ready) ||
+        (method == EliminationMethod::kLpBox && options.enable_point_nonpair && pair_service_stage);
+    if (collect_lp_path_closures) {
+      CheckCuda(cudaMemset(device_lp_path_closed_replies.get(), 0, sizeof(unsigned long long)),
+                "cudaMemset resident LP path closures");
+    }
+    if (extra_edge_stage) {
+      if (options.extra_edge_depth == 2U) {
+        QuickHsContinuationKernel<2><<<work_count, kThreads>>>(
+            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+            device_edge_active.get(), device_protected.get(), view, device_proposed.get(),
+            device_first_witness.get(), device_second_witness.get(),
+            static_cast<std::int32_t>(options.quick_hs_candidates),
+            static_cast<std::int32_t>(options.quick_hs_pair_trials), options.quick_hs_two_hop,
+            lp_path_reduced_cost, lp_path_lower_bound, lp_incumbent_numerator,
+            device_lp_path_closed_replies.get());
+      } else {
+        QuickHsContinuationKernel<1><<<work_count, kThreads>>>(
+            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+            device_edge_active.get(), device_protected.get(), view, device_proposed.get(),
+            device_first_witness.get(), device_second_witness.get(),
+            static_cast<std::int32_t>(options.quick_hs_candidates),
+            static_cast<std::int32_t>(options.quick_hs_pair_trials), options.quick_hs_two_hop,
+            lp_path_reduced_cost, lp_path_lower_bound, lp_incumbent_numerator,
+            device_lp_path_closed_replies.get());
+      }
+    } else if (main_edge_stage) {
+      MainEdgeContinuationKernel<false><<<work_count, kThreads>>>(
+          work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+          device_edge_active.get(), device_protected.get(), view, device_x.get(), device_y.get(),
+          device_geometry_kd.get(), 0, static_cast<std::int32_t>(options.main_edge_potentials),
+          main_position, static_cast<std::int32_t>(options.main_edge_positions + 1U),
+          options.enable_strong_metric, nullptr, device_proposed.get(), device_first_witness.get(),
+          device_second_witness.get(), nullptr, nullptr);
+    } else if (method == EliminationMethod::kJv) {
+      JvKernel<<<work_blocks, kThreads>>>(work_count, work_edge_ids, device_edge_u.get(),
+                                          device_edge_v.get(), device_edge_active.get(),
+                                          device_protected.get(), view, device_proposed.get(),
+                                          device_first_witness.get());
     } else if (method == EliminationMethod::kGpuQuickHs) {
-      QuickHsKernel<<<work_blocks, kThreads>>>(
-          work_count, device_active_edge_ids.get(), device_edge_u.get(), device_edge_v.get(),
+      QuickHsContinuationKernel<0><<<work_count, kThreads>>>(
+          work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
           device_edge_active.get(), device_protected.get(), view, device_proposed.get(),
-          device_first_witness.get(), device_second_witness.get());
+          device_first_witness.get(), device_second_witness.get(),
+          static_cast<std::int32_t>(options.quick_hs_candidates),
+          static_cast<std::int32_t>(options.quick_hs_pair_trials), options.quick_hs_two_hop,
+          lp_path_reduced_cost, lp_path_lower_bound, lp_incumbent_numerator,
+          device_lp_path_closed_replies.get());
     } else if (method == EliminationMethod::kGeometryMain) {
-      NearestDistanceKernel<<<vertex_blocks, kThreads>>>(graph.dimension, device_distance.get(),
-                                                         device_nearest.get());
+      NearestDistanceKernel<<<vertex_blocks, kThreads>>>(view, device_nearest.get());
       GeometryKernel<<<work_blocks, kThreads>>>(
-          work_count, device_active_edge_ids.get(), device_edge_u.get(), device_edge_v.get(),
+          work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
           device_edge_active.get(), device_protected.get(), view, device_x.get(), device_y.get(),
           device_geometry_kd.get(), 0, device_nearest.get(),
           static_cast<std::int32_t>(options.potential_candidates), device_proposed.get(),
           device_first_witness.get(), device_second_witness.get());
+    } else if (method == EliminationMethod::kFixedPropagation) {
+      CheckCuda(cudaMemset(device_fixed_degree.get(), 0, dimension * sizeof(std::int32_t)),
+                "cudaMemset resident fixed degree");
+      CountFixedDegreeKernel<<<work_blocks, kThreads>>>(
+          work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+          device_edge_active.get(), device_fixed.get(), device_fixed_degree.get());
+      FixedPropagationKernel<<<work_blocks, kThreads>>>(
+          work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+          device_edge_active.get(), device_protected.get(), device_fixed_degree.get(),
+          device_proposed.get());
     } else if (method == EliminationMethod::kLpBox) {
       CheckCuda(cudaMemset(device_summary.get(), 0, 2U * sizeof(unsigned long long)),
                 "cudaMemset resident PDLP summary");
       ActiveCostSummaryKernel<<<work_blocks, kThreads>>>(
-          work_count, device_active_edge_ids.get(), device_edge_weight.get(),
-          device_edge_active.get(), device_summary.get(), device_summary.get() + 1);
+          work_count, work_edge_ids, device_edge_weight.get(), device_edge_active.get(),
+          device_summary.get(), device_summary.get() + 1);
       CheckCuda(cudaDeviceSynchronize(), "resident PDLP summary synchronize");
       unsigned long long host_summary[2]{};
       device_summary.CopyToHost(host_summary, 2U);
@@ -1194,15 +5156,22 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
       const double average_degree =
           2.0 * static_cast<double>(host_summary[0]) / static_cast<double>(graph.dimension);
       const double initial_step = std::max(1.0, average_cost / (average_degree + 2.0));
+      const int cut_blocks = (maximum_cut_count + kThreads - 1) / kThreads;
       CheckCuda(cudaMemset(device_dual.get(), 0, dimension * sizeof(double)),
-                "cudaMemset resident PDLP dual");
+                "cudaMemset resident degree-box dual");
       CheckCuda(cudaMemset(device_average.get(), 0, dimension * sizeof(double)),
-                "cudaMemset resident PDLP average");
+                "cudaMemset resident degree-box average");
+      CheckCuda(cudaMemset(device_quantized_cut.get(), 0,
+                           static_cast<std::size_t>(maximum_cut_count) * sizeof(std::int64_t)),
+                "cudaMemset resident degree-box cut numerator");
+
+      // 先求纯 degree-box 基线。它本身是完整合法的 Lagrangian dual，
+      // 同时为 strong solve 提供 warm start。
       for (std::uint32_t iteration = 0U; iteration < options.pdlp_iterations; ++iteration) {
         CheckCuda(cudaMemset(device_selected_degree.get(), 0, dimension * sizeof(std::int32_t)),
-                  "cudaMemset resident PDLP selected degree");
+                  "cudaMemset resident degree-box selected degree");
         SelectDegreeBoxKernel<<<work_blocks, kThreads>>>(
-            work_count, device_active_edge_ids.get(), device_edge_u.get(), device_edge_v.get(),
+            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
             device_edge_weight.get(), device_edge_active.get(), device_dual.get(),
             device_selected_degree.get());
         const double step = initial_step / sqrt(1.0 + static_cast<double>(iteration) / 8.0);
@@ -1210,45 +5179,658 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
             graph.dimension, device_selected_degree.get(), step, dual_limit, device_dual.get(),
             device_average.get());
       }
+      CheckCuda(cudaMemcpy(device_degree_dual.get(), device_dual.get(), dimension * sizeof(double),
+                           cudaMemcpyDeviceToDevice),
+                "cudaMemcpy resident degree dual snapshot");
       CheckCuda(cudaMemset(device_invalid.get(), 0, sizeof(std::int32_t)),
-                "cudaMemset resident PDLP invalid");
+                "cudaMemset resident degree-box invalid");
+      std::int64_t* const degree_quantized = device_degree_quantized_dual.get();
+      std::int64_t* const degree_reduced = device_degree_reduced_cost.get();
+      Signed128* const degree_bound = device_degree_lower_bound.get();
       QuantizeResidentDualKernel<<<vertex_blocks, kThreads>>>(
           graph.dimension, 1.0 / static_cast<double>(options.pdlp_iterations),
-          static_cast<double>(denominator), 1.0e15, device_average.get(),
-          device_quantized_dual.get(), device_invalid.get());
-      CheckCuda(cudaMemset(device_lower_bound.get(), 0, sizeof(long long)),
-                "cudaMemset resident PDLP lower bound");
-      DegreeConstantKernel<<<vertex_blocks, kThreads>>>(
-          graph.dimension, device_quantized_dual.get(), device_lower_bound.get());
+          static_cast<double>(denominator), 1.0e15, device_average.get(), degree_quantized,
+          device_invalid.get());
       ReducedCostKernel<<<work_blocks, kThreads>>>(
-          work_count, device_active_edge_ids.get(), device_edge_u.get(), device_edge_v.get(),
-          device_edge_weight.get(), device_edge_active.get(), denominator,
-          device_quantized_dual.get(), device_reduced_cost.get(), device_lower_bound.get());
+          work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+          device_edge_weight.get(), device_edge_active.get(), denominator, degree_quantized,
+          device_quantized_cut.get(), device_local_sec_incidence_count.get(),
+          device_local_sec_incidence_ids.get(), degree_reduced);
+      compute_exact_box_bound(work_count, work_edge_ids, degree_quantized, 0,
+                              device_quantized_cut.get(), degree_reduced, degree_bound);
+      // 先把 degree 快照发布为当前 best；后续 strong 候选只能由设备端
+      // Signed128 严格比较替换它，因此任意有限迭代都不会导致下界倒退。
+      CheckCuda(cudaMemcpy(device_quantized_dual.get(), degree_quantized,
+                           dimension * sizeof(std::int64_t), cudaMemcpyDeviceToDevice),
+                "cudaMemcpy resident initial best dual");
+      CheckCuda(cudaMemset(device_quantized_cut.get(), 0,
+                           static_cast<std::size_t>(maximum_cut_count) * sizeof(std::int64_t)),
+                "cudaMemset resident initial best cut dual");
+      CheckCuda(cudaMemcpy(device_reduced_cost.get(), degree_reduced,
+                           edge_count * sizeof(std::int64_t), cudaMemcpyDeviceToDevice),
+                "cudaMemcpy resident initial best reduced cost");
+      CheckCuda(cudaMemcpy(device_lower_bound.get(), degree_bound, sizeof(Signed128),
+                           cudaMemcpyDeviceToDevice),
+                "cudaMemcpy resident initial best lower bound");
+      CheckCuda(cudaMemset(device_selected_lp_snapshot_kind.get(), 0, sizeof(std::int32_t)),
+                "cudaMemset resident selected LP snapshot kind");
+
+      // P1 多阈值 connectivity separator：阈值只决定候选子集，不参与
+      // 最终授权；每个连通分量都重新物化为合法 δ(S)>=2 行。三层 support
+      // 覆盖严格负 reduced cost、零邻域和略宽正邻域，形成嵌套候选 cuts。
+      CheckCuda(cudaMemset(device_cut_valid.get(), 0,
+                           static_cast<std::size_t>(maximum_cut_count) * sizeof(std::uint8_t)),
+                "cudaMemset valid SEC cuts");
+      if (local_sec.cut_count != 0) {
+        CheckCuda(cudaMemset(device_cut_valid.get(), 1,
+                             static_cast<std::size_t>(local_sec.cut_count) * sizeof(std::uint8_t)),
+                  "cudaMemset static SEC cuts valid");
+      }
+      CheckCuda(cudaMemset(device_connectivity_cut_count.get(), 0, sizeof(unsigned long long)),
+                "cudaMemset connectivity cut count");
+      // 先恢复静态 local-window incidence，再按层追加 component cuts。
+      BuildLocalSecIncidenceKernel<<<all_edge_blocks, kThreads>>>(
+          static_cast<std::int32_t>(edge_count), device_all_edge_ids.get(), device_edge_u.get(),
+          device_edge_v.get(), device_geometry_rank.get(), local_sec,
+          device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get());
+      const double scaled_support_step = average_cost * static_cast<double>(denominator) / 16.0;
+      if (!std::isfinite(scaled_support_step) ||
+          scaled_support_step > static_cast<double>(INT64_MAX)) {
+        throw std::overflow_error("resident connectivity support 阈值溢出");
+      }
+      const std::int64_t support_step =
+          std::max<std::int64_t>(1, static_cast<std::int64_t>(std::llround(scaled_support_step)));
+      const std::int64_t support_threshold[kConnectivitySupportLevels] = {-support_step, 0,
+                                                                          support_step};
+      for (std::int32_t level = 0; level < kConnectivitySupportLevels; ++level) {
+        InitializeSupportLabelsKernel<<<vertex_blocks, kThreads>>>(graph.dimension,
+                                                                   device_support_label.get());
+        std::int32_t component_changed = 1;
+        std::int32_t component_round = 0;
+        while (component_changed != 0) {
+          if (++component_round > graph.dimension + 1) {
+            throw std::logic_error("GPU support component 标签传播未收敛");
+          }
+          CheckCuda(cudaMemset(device_component_changed.get(), 0, sizeof(std::int32_t)),
+                    "cudaMemset support component changed");
+          RelaxSupportLabelsKernel<<<work_blocks, kThreads>>>(
+              work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+              device_edge_active.get(), degree_reduced, support_threshold[level],
+              device_support_label.get(), device_component_changed.get());
+          CompressSupportLabelsKernel<<<vertex_blocks, kThreads>>>(
+              graph.dimension, device_support_label.get(), device_component_changed.get());
+          device_component_changed.CopyToHost(&component_changed, 1U);
+        }
+        CheckCuda(cudaMemset(device_component_size.get(), 0, dimension * sizeof(std::int32_t)),
+                  "cudaMemset support component sizes");
+        CountSupportComponentsKernel<<<vertex_blocks, kThreads>>>(
+            graph.dimension, device_support_label.get(), device_component_size.get());
+        const std::int32_t dynamic_cut_offset = local_sec.cut_count + level * graph.dimension;
+        ActivateConnectivityCutsKernel<<<vertex_blocks, kThreads>>>(
+            graph.dimension, dynamic_cut_offset, device_support_label.get(),
+            device_component_size.get(), device_cut_valid.get(),
+            device_connectivity_cut_count.get());
+        AppendConnectivityCutIncidenceKernel<<<work_blocks, kThreads>>>(
+            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+            device_edge_active.get(), dynamic_cut_offset, device_support_label.get(),
+            device_cut_valid.get(), device_local_sec_incidence_count.get(),
+            device_local_sec_incidence_ids.get(), device_invalid.get());
+      }
+      unsigned long long connectivity_cuts = 0U;
+      device_connectivity_cut_count.CopyToHost(&connectivity_cuts, 1U);
+      result.lp_connectivity_cuts += static_cast<std::size_t>(connectivity_cuts);
+
+      const int selection_blocks = std::max({vertex_blocks, work_blocks, cut_blocks});
+      for (std::int32_t level = 0; level < kConnectivitySupportLevels; ++level) {
+        // 每个阈值独立从 degree dual 热启动，只激活同层 component cuts 与
+        // 全部静态 local windows。这样短迭代不会因无关 cut 梯度互相稀释。
+        CheckCuda(cudaMemcpy(device_dual.get(), device_degree_dual.get(),
+                             dimension * sizeof(double), cudaMemcpyDeviceToDevice),
+                  "cudaMemcpy resident strong warm start");
+        CheckCuda(cudaMemset(device_average.get(), 0, dimension * sizeof(double)),
+                  "cudaMemset resident strong average");
+        CheckCuda(cudaMemset(device_cut_dual.get(), 0,
+                             static_cast<std::size_t>(maximum_cut_count) * sizeof(double)),
+                  "cudaMemset resident local SEC dual");
+        CheckCuda(cudaMemset(device_cut_average.get(), 0,
+                             static_cast<std::size_t>(maximum_cut_count) * sizeof(double)),
+                  "cudaMemset resident local SEC average");
+        CheckCuda(cudaMemset(device_cut_active.get(), 0,
+                             static_cast<std::size_t>(maximum_cut_count) * sizeof(std::uint8_t)),
+                  "cudaMemset resident active strong cuts");
+        if (local_sec.cut_count != 0) {
+          CheckCuda(
+              cudaMemset(device_cut_active.get(), 1,
+                         static_cast<std::size_t>(local_sec.cut_count) * sizeof(std::uint8_t)),
+              "cudaMemset resident static strong cuts");
+        }
+        const std::int32_t dynamic_cut_offset = local_sec.cut_count + level * graph.dimension;
+        CheckCuda(cudaMemcpy(device_cut_active.get() + dynamic_cut_offset,
+                             device_cut_valid.get() + dynamic_cut_offset,
+                             dimension * sizeof(std::uint8_t), cudaMemcpyDeviceToDevice),
+                  "cudaMemcpy resident dynamic strong cuts");
+        for (std::uint32_t iteration = 0U; iteration < options.pdlp_iterations; ++iteration) {
+          CheckCuda(cudaMemset(device_selected_degree.get(), 0, dimension * sizeof(std::int32_t)),
+                    "cudaMemset resident strong selected degree");
+          CheckCuda(cudaMemset(device_selected_cut.get(), 0,
+                               static_cast<std::size_t>(maximum_cut_count) * sizeof(std::int32_t)),
+                    "cudaMemset resident PDLP selected local SEC");
+          SelectStrongBoxKernel<<<work_blocks, kThreads>>>(
+              work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+              device_edge_weight.get(), device_edge_active.get(), device_dual.get(),
+              device_cut_dual.get(), device_local_sec_incidence_count.get(),
+              device_local_sec_incidence_ids.get(), device_selected_degree.get(),
+              device_selected_cut.get());
+          const double step = initial_step / sqrt(1.0 + static_cast<double>(iteration) / 8.0);
+          UpdateResidentDualKernel<<<vertex_blocks, kThreads>>>(
+              graph.dimension, device_selected_degree.get(), step, dual_limit, device_dual.get(),
+              device_average.get());
+          UpdateLocalSecDualKernel<<<cut_blocks, kThreads>>>(
+              maximum_cut_count, device_selected_cut.get(), device_cut_active.get(), step,
+              dual_limit, device_cut_dual.get(), device_cut_average.get());
+        }
+        QuantizeResidentDualKernel<<<vertex_blocks, kThreads>>>(
+            graph.dimension, 1.0 / static_cast<double>(options.pdlp_iterations),
+            static_cast<double>(denominator), 1.0e15, device_average.get(),
+            device_candidate_quantized_dual.get(), device_invalid.get());
+        QuantizeLocalSecDualKernel<<<cut_blocks, kThreads>>>(
+            maximum_cut_count, 1.0 / static_cast<double>(options.pdlp_iterations),
+            static_cast<double>(denominator), 1.0e15, device_cut_average.get(),
+            device_cut_active.get(), device_candidate_quantized_cut.get(), device_invalid.get());
+        ReducedCostKernel<<<work_blocks, kThreads>>>(
+            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+            device_edge_weight.get(), device_edge_active.get(), denominator,
+            device_candidate_quantized_dual.get(), device_candidate_quantized_cut.get(),
+            device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get(),
+            device_candidate_reduced_cost.get());
+        compute_exact_box_bound(work_count, work_edge_ids, device_candidate_quantized_dual.get(),
+                                maximum_cut_count, device_candidate_quantized_cut.get(),
+                                device_candidate_reduced_cost.get(),
+                                device_candidate_lower_bound.get());
+        if (!options.collect_trace) {
+          // decision 与 copy 分成同一 stream 上的两个 kernel，避免跨 block
+          // 一边替换下界一边读取选择标志。kind=0 保留给 degree 基线。
+          DecideBetterLpSnapshotKernel<<<1, 1>>>(
+              device_candidate_lower_bound.get(), device_lower_bound.get(), level + 1, false,
+              device_selected_lp_snapshot_kind.get(), device_apply_lp_snapshot.get());
+          ApplyBetterLpSnapshotKernel<<<selection_blocks, kThreads>>>(
+              graph.dimension, work_count, work_edge_ids, maximum_cut_count,
+              device_candidate_quantized_dual.get(), device_candidate_quantized_cut.get(),
+              device_candidate_reduced_cost.get(), device_quantized_dual.get(),
+              device_quantized_cut.get(), device_reduced_cost.get(),
+              device_apply_lp_snapshot.get());
+        }
+      }
       LpForcedOneKernel<<<work_blocks, kThreads>>>(
-          work_count, device_edge_u.get(), device_active_edge_ids.get(), device_edge_v.get(),
+          work_count, device_edge_u.get(), work_edge_ids, device_edge_v.get(),
           device_edge_active.get(), device_protected.get(), device_degree.get(),
           device_reduced_cost.get(), device_lower_bound.get(), options.incumbent_cost * denominator,
           device_proposed.get());
+      if (options.enable_fixing) {
+        LpForcedZeroKernel<<<work_blocks, kThreads>>>(
+            work_count, work_edge_ids, device_edge_active.get(), device_protected.get(),
+            device_reduced_cost.get(), device_lower_bound.get(),
+            options.incumbent_cost * denominator, device_fixed_proposed.get());
+        if (view.pair_offsets != nullptr && view.nonpair_mask != nullptr) {
+          NonpairImpliedFixKernel<<<work_blocks, kThreads>>>(
+              work_count, work_edge_ids, view, device_protected.get(), device_fixed_proposed.get(),
+              device_fixed_reason.get(), device_nonpair_fix_proposal_count.get());
+          CheckCuda(cudaGetLastError(), "NonpairImpliedFixKernel launch");
+          if (options.enable_direct_fix && pair_service_stage) {
+            DirectFixKernel<<<work_count, kThreads>>>(
+                work_count, work_edge_ids, view, device_protected.get(), device_reduced_cost.get(),
+                device_lower_bound.get(), options.incumbent_cost * denominator,
+                device_fixed_proposed.get(), device_fixed_reason.get(),
+                device_lp_path_closed_replies.get(), device_direct_fix_proposal_count.get());
+            CheckCuda(cudaGetLastError(), "DirectFixKernel launch");
+          }
+        }
+      }
+
+      // P3：对当前紧凑 CSR 的全部邻边对执行 LP path-system
+      // forced-one 授权。这些 bit 会被后续 Main/Quick-HS/HT reply 直接消费。
+      BuildPairCountsKernel<<<offset_blocks, kThreads>>>(graph.dimension, device_degree.get(),
+                                                         device_pair_counts.get());
+      CheckCuda(cudaGetLastError(), "BuildPairCountsKernel launch");
+      CheckCuda(cub::DeviceScan::ExclusiveSum(device_pair_scan_temp.get(), pair_scan_temp_bytes,
+                                              device_pair_counts.get(), device_pair_offsets.get(),
+                                              graph.dimension + 1),
+                "cub::DeviceScan::ExclusiveSum pair offsets");
+      CheckCuda(cudaMemcpy(&current_pair_count, device_pair_offsets.get() + graph.dimension,
+                           sizeof(current_pair_count), cudaMemcpyDeviceToHost),
+                "cudaMemcpy resident pair count");
+      if (current_pair_count < 0 ||
+          static_cast<std::uint64_t>(current_pair_count) >
+              static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        throw std::overflow_error("resident pair mask 容量溢出");
+      }
+      const std::size_t pair_count = static_cast<std::size_t>(current_pair_count);
+      if (pair_count > pair_capacity) {
+        device_nonpair_mask = DeviceBuffer<std::uint8_t>(pair_count, device);
+        device_nonpair_mask_next = DeviceBuffer<std::uint8_t>(pair_count, device);
+        device_nonpair_proposed = DeviceBuffer<std::uint8_t>(pair_count, device);
+        device_nonpair_verified = DeviceBuffer<std::uint8_t>(pair_count, device);
+        device_nonpair_fixed_witness = DeviceBuffer<std::int32_t>(pair_count, device);
+        device_nonpair_point_witness = DeviceBuffer<std::int32_t>(pair_count, device);
+        pair_capacity = pair_count;
+        CheckCuda(cudaMemset(device_nonpair_mask.get(), 0, pair_count * sizeof(std::uint8_t)),
+                  "cudaMemset resident persistent nonpairs");
+        CheckCuda(cudaMemset(device_nonpair_mask_next.get(), 0, pair_count * sizeof(std::uint8_t)),
+                  "cudaMemset resident next nonpairs");
+        result.resident_bytes += device_nonpair_mask.bytes() + device_nonpair_mask_next.bytes() +
+                                 device_nonpair_proposed.bytes() + device_nonpair_verified.bytes() +
+                                 device_nonpair_fixed_witness.bytes() +
+                                 device_nonpair_point_witness.bytes();
+      }
+      if (pair_count != 0U) {
+        CheckCuda(cudaMemset(device_nonpair_proposed.get(), 0, pair_count * sizeof(std::uint8_t)),
+                  "cudaMemset resident proposed nonpairs");
+        CheckCuda(cudaMemset(device_nonpair_verified.get(), 0, pair_count * sizeof(std::uint8_t)),
+                  "cudaMemset resident verified nonpairs");
+        CheckCuda(
+            cudaMemset(device_nonpair_fixed_witness.get(), 0xff, pair_count * sizeof(std::int32_t)),
+            "cudaMemset resident nonpair fixed witness");
+        CheckCuda(
+            cudaMemset(device_nonpair_point_witness.get(), 0xff, pair_count * sizeof(std::int32_t)),
+            "cudaMemset resident nonpair point witness");
+        CheckCuda(
+            cudaMemset(device_nonpair_proposal_counts.get(), 0, 3U * sizeof(unsigned long long)),
+            "cudaMemset resident nonpair proposal counts");
+        LpNonpairKernel<<<graph.dimension, kThreads>>>(
+            view, device_reduced_cost.get(), device_lower_bound.get(),
+            options.incumbent_cost * denominator, device_pair_offsets.get(),
+            device_nonpair_mask.get(), device_nonpair_proposed.get(),
+            device_nonpair_proposal_counts.get());
+        CheckCuda(cudaGetLastError(), "LpNonpairKernel launch");
+        CheckCuda(cub::DeviceSelect::Flagged(
+                      device_active_select_temp.get(), active_select_temp_bytes,
+                      device_all_edge_ids.get(), device_fixed.get(), device_fixed_edge_ids.get(),
+                      device_fixed_edge_count.get(), static_cast<std::int32_t>(edge_count)),
+                  "cub::DeviceSelect::Flagged fixed edges");
+        FixedAnchorNonpairKernel<<<graph.dimension, kThreads>>>(
+            view, device_edge_u.get(), device_edge_v.get(), device_edge_active.get(),
+            device_fixed.get(), device_fixed_edge_ids.get(), device_fixed_edge_count.get(),
+            device_pair_offsets.get(), device_nonpair_mask.get(), device_nonpair_proposed.get(),
+            device_nonpair_fixed_witness.get(), device_nonpair_proposal_counts.get() + 1);
+        CheckCuda(cudaGetLastError(), "FixedAnchorNonpairKernel launch");
+        if (options.enable_point_nonpair && pair_service_stage) {
+          const std::int64_t point_blocks = std::min<std::int64_t>(current_pair_count, 65535);
+          PointNonpairKernel<<<static_cast<unsigned int>(point_blocks), kThreads>>>(
+              current_pair_count, view, device_pair_offsets.get(), device_nonpair_mask.get(),
+              device_nonpair_proposed.get(), device_nonpair_point_witness.get(),
+              device_reduced_cost.get(), device_lower_bound.get(),
+              options.incumbent_cost * denominator, device_lp_path_closed_replies.get(),
+              device_nonpair_proposal_counts.get() + 2);
+          CheckCuda(cudaGetLastError(), "PointNonpairKernel launch");
+        }
+      }
       CheckCuda(cudaDeviceSynchronize(), "resident PDLP proof synchronize");
       std::int32_t invalid = 0;
       device_invalid.CopyToHost(&invalid, 1U);
       if (invalid != 0) {
         throw std::runtime_error("resident PDLP dual 超出量化安全范围");
       }
+      // selected dual、reduced costs 与 gpu-safe replay 副本至此已经完整
+      // 验证；后续 local epoch 可把它作为不可变 path-system 下界消费。
+      lp_snapshot_ready = true;
+      if (pair_count != 0U) {
+        unsigned long long proposal_counts[3]{};
+        device_nonpair_proposal_counts.CopyToHost(proposal_counts, 3U);
+        result.lp_nonpair_committed += static_cast<std::size_t>(proposal_counts[0]);
+        result.fixed_anchor_nonpair_committed += static_cast<std::size_t>(proposal_counts[1]);
+        result.point_nonpair_committed += static_cast<std::size_t>(proposal_counts[2]);
+      }
     } else {
       throw std::logic_error("resident run_epoch 收到不支持的方法");
     }
     CheckCuda(cudaGetLastError(), "resident elimination kernel launch");
-    CommitKernel<<<1, 1>>>(graph.dimension, work_count, device_active_edge_ids.get(),
-                           device_edge_u.get(), device_edge_v.get(), device_edge_active.get(),
-                           device_active_matrix.get(), device_protected.get(),
-                           device_proposed.get(), device_degree.get(), device_committed.get(),
-                           device_committed_count.get());
-    CheckCuda(cudaGetLastError(), "resident CommitKernel launch");
-    CheckCuda(cudaDeviceSynchronize(), "resident epoch synchronize");
+    CheckCuda(cudaDeviceSynchronize(), "resident proposal synchronize");
+    if (collect_lp_path_closures) {
+      unsigned long long lp_path_closed_replies = 0U;
+      device_lp_path_closed_replies.CopyToHost(&lp_path_closed_replies, 1U);
+      result.lp_path_closed_replies += static_cast<std::size_t>(lp_path_closed_replies);
+    }
+    // proposal、replay、commit 分别计时，避免异步 kernel 的耗时被后续
+    // commit 同步重复吸收，导致阶段画像和总耗时无法比较。
     const double device_ms = ElapsedMilliseconds(kernel_begin);
+    if (method == EliminationMethod::kLpBox) {
+      Signed128 host_lower_bound{};
+      device_lower_bound.CopyToHost(&host_lower_bound, 1U);
+      // 这里只生成人类可读 telemetry；证明比较始终使用 device Signed128。
+      const double numerator = std::ldexp(static_cast<double>(host_lower_bound.high), 64) +
+                               static_cast<double>(host_lower_bound.low);
+      result.lp_lower_bound = numerator / static_cast<double>(denominator);
+      std::int32_t selected_snapshot_kind = 0;
+      device_selected_lp_snapshot_kind.CopyToHost(&selected_snapshot_kind, 1U);
+      if (selected_snapshot_kind == 0) {
+        ++result.lp_degree_snapshots;
+      } else {
+        ++result.lp_strong_snapshots;
+      }
+    }
+
+    const Signed128* replay_lower_bound = device_lower_bound.get();
+    if (method == EliminationMethod::kLpBox && options.gpu_replay) {
+      const SteadyClock::time_point replay_begin = SteadyClock::now();
+      // replay 重新生成所有 reduced costs 和全局 Signed128 下界；后续
+      // edge/fix/non-pair replay 不复用 proposal 的聚合结果。
+      ReducedCostKernel<<<work_blocks, kThreads>>>(
+          work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+          device_edge_weight.get(), device_edge_active.get(), denominator,
+          device_quantized_dual.get(), device_quantized_cut.get(),
+          device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get(),
+          device_replay_reduced_cost.get());
+      compute_exact_box_bound(work_count, work_edge_ids, device_quantized_dual.get(),
+                              maximum_cut_count, device_quantized_cut.get(),
+                              device_replay_reduced_cost.get(), device_replay_lower_bound.get());
+      CheckCuda(cudaMemset(device_invalid.get(), 0, sizeof(std::int32_t)),
+                "cudaMemset resident LP replay bound validation");
+      ValidateLpReplayBoundKernel<<<1, 1>>>(device_lower_bound.get(),
+                                            device_replay_lower_bound.get(), device_invalid.get());
+      CheckCuda(cudaGetLastError(), "ValidateLpReplayBoundKernel launch");
+      CheckCuda(cudaDeviceSynchronize(), "resident LP replay bound synchronize");
+      std::int32_t invalid_replay_bound = 0;
+      device_invalid.CopyToHost(&invalid_replay_bound, 1U);
+      if (invalid_replay_bound != 0) {
+        throw std::runtime_error("GPU LP replay 重构的精确下界不一致");
+      }
+      replay_lower_bound = device_replay_lower_bound.get();
+      result.proof_replay_ms += ElapsedMilliseconds(replay_begin);
+    }
+
+    if (method == EliminationMethod::kLpBox && options.enable_fixing) {
+      const std::uint8_t* authorized_fixed = device_fixed_proposed.get();
+      if (options.gpu_replay) {
+        const SteadyClock::time_point replay_begin = SteadyClock::now();
+        CheckCuda(cudaMemset(device_replay_counters.get(), 0, 2U * sizeof(unsigned long long)),
+                  "cudaMemset resident fixed replay counters");
+        ReplayLpFixedKernel<<<work_blocks, kThreads>>>(
+            work_count, work_edge_ids, view, device_edge_u.get(), device_edge_v.get(),
+            device_edge_weight.get(), device_edge_active.get(), device_protected.get(), denominator,
+            device_quantized_dual.get(), device_quantized_cut.get(),
+            device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get(),
+            replay_lower_bound, options.incumbent_cost * denominator, device_fixed_proposed.get(),
+            device_fixed_reason.get(), device_fixed_verified.get(), device_replay_counters.get(),
+            device_replay_counters.get() + 1);
+        CheckCuda(cudaGetLastError(), "resident LP fixed replay launch");
+        if (options.enable_direct_fix && pair_service_stage) {
+          ReplayDirectFixKernel<<<work_count, kThreads>>>(
+              work_count, work_edge_ids, view, device_protected.get(), device_fixed_proposed.get(),
+              device_fixed_reason.get(), device_replay_reduced_cost.get(), replay_lower_bound,
+              options.incumbent_cost * denominator, device_fixed_verified.get(),
+              device_replay_counters.get(), device_replay_counters.get() + 1);
+          CheckCuda(cudaGetLastError(), "resident direct fixed replay launch");
+        }
+        CheckCuda(cudaDeviceSynchronize(), "resident LP fixed replay synchronize");
+        unsigned long long replay_counters[2]{};
+        device_replay_counters.CopyToHost(replay_counters, 2U);
+        result.proof_replayed += static_cast<std::size_t>(replay_counters[0]);
+        result.proof_rejected += static_cast<std::size_t>(replay_counters[1]);
+        result.proof_replay_ms += ElapsedMilliseconds(replay_begin);
+        if (replay_counters[1] != 0U) {
+          throw std::runtime_error("GPU LP fixed replay 拒绝了候选");
+        }
+        authorized_fixed = device_fixed_verified.get();
+      }
+      CheckCuda(cudaMemset(device_fixed_count.get(), 0, sizeof(unsigned long long)),
+                "cudaMemset resident fixed count epoch");
+      CheckCuda(cudaMemset(device_invalid.get(), 0, sizeof(std::int32_t)),
+                "cudaMemset resident fixed conflict");
+      ApplyFixedKernel<<<work_blocks, kThreads>>>(work_count, work_edge_ids, device_proposed.get(),
+                                                  authorized_fixed, device_protected.get(),
+                                                  device_fixed.get(), device_fixed_count.get(),
+                                                  device_invalid.get());
+      CheckCuda(cudaGetLastError(), "resident ApplyFixedKernel launch");
+      CheckCuda(cudaMemset(device_fixed_degree.get(), 0, dimension * sizeof(std::int32_t)),
+                "cudaMemset resident post-fix degree");
+      CountFixedDegreeKernel<<<work_blocks, kThreads>>>(
+          work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+          device_edge_active.get(), device_fixed.get(), device_fixed_degree.get());
+      ValidateFixedDegreeKernel<<<vertex_blocks, kThreads>>>(
+          graph.dimension, device_fixed_degree.get(), device_invalid.get());
+      CheckCuda(cudaGetLastError(), "ValidateFixedDegreeKernel launch");
+      CheckCuda(cudaDeviceSynchronize(), "resident ApplyFixedKernel synchronize");
+      std::int32_t fixed_conflict = 0;
+      unsigned long long fixed_count = 0U;
+      unsigned long long nonpair_fix_count = 0U;
+      unsigned long long direct_fix_count = 0U;
+      device_invalid.CopyToHost(&fixed_conflict, 1U);
+      device_fixed_count.CopyToHost(&fixed_count, 1U);
+      device_nonpair_fix_proposal_count.CopyToHost(&nonpair_fix_count, 1U);
+      device_direct_fix_proposal_count.CopyToHost(&direct_fix_count, 1U);
+      if (fixed_conflict != 0) {
+        throw std::runtime_error("LP fix 与 delete 冲突，或固定度数超过 2");
+      }
+      result.fixed_count += static_cast<std::size_t>(fixed_count);
+      result.nonpair_fix_committed += static_cast<std::size_t>(nonpair_fix_count);
+      result.direct_fix_committed += static_cast<std::size_t>(direct_fix_count);
+    }
+
+    if (method == EliminationMethod::kLpBox) {
+      const std::uint8_t* authorized_nonpair = device_nonpair_proposed.get();
+      if (current_pair_count != 0 && options.gpu_replay) {
+        const SteadyClock::time_point replay_begin = SteadyClock::now();
+        CheckCuda(cudaMemset(device_replay_counters.get(), 0, 2U * sizeof(unsigned long long)),
+                  "cudaMemset resident nonpair replay counters");
+        ReplayLpNonpairKernel<<<graph.dimension, kThreads>>>(
+            view, device_edge_u.get(), device_edge_v.get(), device_edge_weight.get(), denominator,
+            device_quantized_dual.get(), device_quantized_cut.get(),
+            device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get(),
+            replay_lower_bound, options.incumbent_cost * denominator, device_pair_offsets.get(),
+            device_nonpair_proposed.get(), device_nonpair_fixed_witness.get(),
+            device_nonpair_point_witness.get(), device_fixed.get(), device_nonpair_verified.get(),
+            device_replay_counters.get(), device_replay_counters.get() + 1);
+        CheckCuda(cudaGetLastError(), "ReplayLpNonpairKernel launch");
+        if (options.enable_point_nonpair && pair_service_stage) {
+          const std::int64_t point_blocks = std::min<std::int64_t>(current_pair_count, 65535);
+          ReplayPointNonpairKernel<<<static_cast<unsigned int>(point_blocks), kThreads>>>(
+              current_pair_count, view, device_pair_offsets.get(), device_nonpair_proposed.get(),
+              device_nonpair_point_witness.get(), device_replay_reduced_cost.get(),
+              replay_lower_bound, options.incumbent_cost * denominator,
+              device_nonpair_verified.get(), device_replay_counters.get(),
+              device_replay_counters.get() + 1);
+          CheckCuda(cudaGetLastError(), "ReplayPointNonpairKernel launch");
+        }
+        CheckCuda(cudaDeviceSynchronize(), "resident LP nonpair replay synchronize");
+        unsigned long long replay_counters[2]{};
+        device_replay_counters.CopyToHost(replay_counters, 2U);
+        result.proof_replayed += static_cast<std::size_t>(replay_counters[0]);
+        result.proof_rejected += static_cast<std::size_t>(replay_counters[1]);
+        result.proof_replay_ms += ElapsedMilliseconds(replay_begin);
+        if (replay_counters[1] != 0U) {
+          throw std::runtime_error("GPU LP nonpair replay 拒绝了 " +
+                                   std::to_string(replay_counters[1]) + " 个候选");
+        }
+        authorized_nonpair = device_nonpair_verified.get();
+      }
+      if (current_pair_count != 0) {
+        const int pair_blocks = static_cast<int>((current_pair_count + kThreads - 1) / kThreads);
+        CheckCuda(cudaMemset(device_nonpair_committed_count.get(), 0, sizeof(unsigned long long)),
+                  "cudaMemset resident committed nonpair count");
+        CommitNonpairMaskKernel<<<pair_blocks, kThreads>>>(current_pair_count, authorized_nonpair,
+                                                           device_nonpair_mask.get(),
+                                                           device_nonpair_committed_count.get());
+        CheckCuda(cudaGetLastError(), "CommitNonpairMaskKernel launch");
+        unsigned long long committed_nonpairs = 0U;
+        device_nonpair_committed_count.CopyToHost(&committed_nonpairs, 1U);
+        result.nonpair_committed += static_cast<std::size_t>(committed_nonpairs);
+      }
+      view.pair_offsets = current_pair_count == 0 ? nullptr : device_pair_offsets.get();
+      view.nonpair_mask = current_pair_count == 0 ? nullptr : device_nonpair_mask.get();
+    }
+
+    const std::uint8_t* authorized = device_proposed.get();
+    const std::int64_t* const lp_replay_reduced_cost =
+        lp_snapshot_ready ? device_replay_reduced_cost.get() : nullptr;
+    const Signed128* const lp_replay_bound =
+        lp_snapshot_ready ? device_replay_lower_bound.get() : nullptr;
+    if (options.gpu_replay) {
+      const SteadyClock::time_point replay_begin = SteadyClock::now();
+      CheckCuda(cudaMemset(device_verified.get(), 0, edge_count * sizeof(std::uint8_t)),
+                "cudaMemset resident verified");
+      CheckCuda(cudaMemset(device_replay_counters.get(), 0, 2U * sizeof(unsigned long long)),
+                "cudaMemset resident replay counters");
+      if (extra_edge_stage) {
+        if (options.extra_edge_depth == 2U) {
+          ReplayQuickHsContinuationKernel<2><<<work_count, kThreads>>>(
+              work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+              device_edge_active.get(), device_protected.get(), view, device_proposed.get(),
+              device_first_witness.get(), device_second_witness.get(), device_verified.get(),
+              device_replay_counters.get(), device_replay_counters.get() + 1,
+              lp_replay_reduced_cost, lp_replay_bound, lp_incumbent_numerator);
+        } else {
+          ReplayQuickHsContinuationKernel<1><<<work_count, kThreads>>>(
+              work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+              device_edge_active.get(), device_protected.get(), view, device_proposed.get(),
+              device_first_witness.get(), device_second_witness.get(), device_verified.get(),
+              device_replay_counters.get(), device_replay_counters.get() + 1,
+              lp_replay_reduced_cost, lp_replay_bound, lp_incumbent_numerator);
+        }
+      } else if (main_edge_stage) {
+        MainEdgeContinuationKernel<true><<<work_count, kThreads>>>(
+            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+            device_edge_active.get(), device_protected.get(), view, device_x.get(), device_y.get(),
+            device_geometry_kd.get(), 0, static_cast<std::int32_t>(options.main_edge_potentials),
+            main_position, static_cast<std::int32_t>(options.main_edge_positions + 1U),
+            options.enable_strong_metric, device_proposed.get(), device_verified.get(), nullptr,
+            nullptr, device_replay_counters.get(), device_replay_counters.get() + 1);
+      } else if (method == EliminationMethod::kJv) {
+        ReplayJvKernel<<<work_blocks, kThreads>>>(
+            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+            device_edge_active.get(), device_protected.get(), view, device_proposed.get(),
+            device_first_witness.get(), device_verified.get(), device_replay_counters.get(),
+            device_replay_counters.get() + 1);
+      } else if (method == EliminationMethod::kGpuQuickHs) {
+        ReplayQuickHsContinuationKernel<0><<<work_count, kThreads>>>(
+            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+            device_edge_active.get(), device_protected.get(), view, device_proposed.get(),
+            device_first_witness.get(), device_second_witness.get(), device_verified.get(),
+            device_replay_counters.get(), device_replay_counters.get() + 1, lp_replay_reduced_cost,
+            lp_replay_bound, lp_incumbent_numerator);
+      } else if (method == EliminationMethod::kGeometryMain) {
+        ReplayGeometryKernel<<<work_blocks, kThreads>>>(
+            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+            device_edge_active.get(), device_protected.get(), view, device_x.get(), device_y.get(),
+            device_nearest.get(), device_proposed.get(), device_first_witness.get(),
+            device_second_witness.get(), device_verified.get(), device_replay_counters.get(),
+            device_replay_counters.get() + 1);
+      } else if (method == EliminationMethod::kFixedPropagation) {
+        ReplayFixedPropagationKernel<<<work_blocks, kThreads>>>(
+            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+            device_edge_active.get(), device_protected.get(), device_fixed_degree.get(),
+            device_proposed.get(), device_verified.get(), device_replay_counters.get(),
+            device_replay_counters.get() + 1);
+      } else if (method == EliminationMethod::kLpBox) {
+        ReplayLpKernel<<<work_blocks, kThreads>>>(
+            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+            device_edge_weight.get(), device_edge_active.get(), device_protected.get(),
+            device_degree.get(), denominator, device_quantized_dual.get(),
+            device_quantized_cut.get(), device_local_sec_incidence_count.get(),
+            device_local_sec_incidence_ids.get(), replay_lower_bound,
+            options.incumbent_cost * denominator, device_proposed.get(), device_verified.get(),
+            device_replay_counters.get(), device_replay_counters.get() + 1);
+      }
+      CheckCuda(cudaGetLastError(), "resident GPU proof replay launch");
+      CheckCuda(cudaDeviceSynchronize(), "resident GPU proof replay synchronize");
+      unsigned long long replay_counters[2]{};
+      device_replay_counters.CopyToHost(replay_counters, 2U);
+      result.proof_replayed += static_cast<std::size_t>(replay_counters[0]);
+      result.proof_rejected += static_cast<std::size_t>(replay_counters[1]);
+      result.proof_replay_ms += ElapsedMilliseconds(replay_begin);
+      if (replay_counters[1] != 0U) {
+        throw std::runtime_error("GPU proof replay 拒绝了 " + std::to_string(replay_counters[1]) +
+                                 " 个候选");
+      }
+      authorized = device_verified.get();
+    }
+
+    const SteadyClock::time_point commit_begin = SteadyClock::now();
+    CheckCuda(cudaMemset(device_committed_count.get(), 0, sizeof(unsigned long long)),
+              "cudaMemset resident committed count");
+    if (has_protected_degree_floor) {
+      SelectProtectedFloorCommitKernel<<<work_blocks, kThreads>>>(
+          work_count, work_edge_ids, device_edge_active.get(), device_protected.get(), authorized,
+          device_committed.get());
+      CheckCuda(cudaGetLastError(), "resident SelectProtectedFloorCommitKernel launch");
+    } else {
+      SelectDegreeFloorCommitKernel<<<work_blocks, kThreads>>>(work_count, work_edge_ids, view,
+                                                               device_protected.get(), authorized,
+                                                               device_committed.get());
+      CheckCuda(cudaGetLastError(), "resident SelectDegreeFloorCommitKernel launch");
+    }
+    ApplyCommitKernel<<<work_blocks, kThreads>>>(
+        work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+        device_edge_active.get(), device_committed.get(), device_degree.get(),
+        device_committed_count.get(), device_dirty_vertices.get());
+    CheckCuda(cudaGetLastError(), "resident ApplyCommitKernel launch");
+    const int active_blocks = (active_edge_count + kThreads - 1) / kThreads;
+    MarkDegreeTwoFixedKernel<<<active_blocks, kThreads>>>(
+        active_edge_count, device_active_edge_ids.get(), device_edge_u.get(), device_edge_v.get(),
+        device_edge_active.get(), device_degree.get(), device_protected.get(), device_fixed.get());
+    CheckCuda(cudaGetLastError(), "MarkDegreeTwoFixedKernel commit launch");
+    CheckCuda(cudaMemset(device_fixed_degree.get(), 0, dimension * sizeof(std::int32_t)),
+              "cudaMemset resident committed fixed degree");
+    CountFixedDegreeKernel<<<active_blocks, kThreads>>>(
+        active_edge_count, device_active_edge_ids.get(), device_edge_u.get(), device_edge_v.get(),
+        device_edge_active.get(), device_fixed.get(), device_fixed_degree.get());
+    CheckCuda(cudaMemset(device_invalid.get(), 0, sizeof(std::int32_t)),
+              "cudaMemset resident degree invalid");
+    ValidateDegreeFloorKernel<<<vertex_blocks, kThreads>>>(graph.dimension, device_degree.get(),
+                                                           device_invalid.get());
+    ValidateFixedDegreeKernel<<<vertex_blocks, kThreads>>>(
+        graph.dimension, device_fixed_degree.get(), device_invalid.get());
+    CheckCuda(cudaGetLastError(), "resident ValidateDegreeFloorKernel launch");
+    CheckCuda(cudaDeviceSynchronize(), "resident epoch synchronize");
+    std::int32_t invalid_degree = 0;
+    device_invalid.CopyToHost(&invalid_degree, 1U);
+    if (invalid_degree != 0) {
+      std::vector<std::int32_t> debug_degree(dimension);
+      std::vector<std::int32_t> debug_fixed_degree(dimension);
+      std::vector<std::uint8_t> debug_active(edge_count);
+      std::vector<std::uint8_t> debug_fixed(edge_count);
+      std::vector<std::uint8_t> debug_reason(edge_count);
+      std::vector<std::uint8_t> debug_committed(edge_count);
+      device_degree.CopyToHost(debug_degree.data(), dimension);
+      device_fixed_degree.CopyToHost(debug_fixed_degree.data(), dimension);
+      device_edge_active.CopyToHost(debug_active.data(), edge_count);
+      device_fixed.CopyToHost(debug_fixed.data(), edge_count);
+      device_fixed_reason.CopyToHost(debug_reason.data(), edge_count);
+      device_committed.CopyToHost(debug_committed.data(), edge_count);
+      std::string diagnostic = " method=" + std::to_string(static_cast<std::int32_t>(method)) +
+                               ":main=" + std::to_string(main_edge_stage ? 1 : 0) +
+                               ":extra=" + std::to_string(extra_edge_stage ? 1 : 0) +
+                               ":depth=" + std::to_string(options.extra_edge_depth) + ":committed=";
+      for (std::size_t edge = 0U; edge < edge_count; ++edge) {
+        if (debug_committed[edge] != 0U) {
+          diagnostic += std::to_string(edge) + "(" + std::to_string(host_edge_u[edge]) + "," +
+                        std::to_string(host_edge_v[edge]) + "),";
+        }
+      }
+      for (std::size_t node = 0U; node < dimension; ++node) {
+        if (debug_degree[node] >= 2 && debug_fixed_degree[node] <= 2) {
+          continue;
+        }
+        diagnostic += " node=" + std::to_string(node) +
+                      ":degree=" + std::to_string(debug_degree[node]) +
+                      ":fixed=" + std::to_string(debug_fixed_degree[node]) + ":edges=";
+        for (std::size_t edge = 0U; edge < edge_count; ++edge) {
+          if (debug_active[edge] != 0U && debug_fixed[edge] != 0U &&
+              (host_edge_u[edge] == static_cast<std::int32_t>(node) ||
+               host_edge_v[edge] == static_cast<std::int32_t>(node))) {
+            diagnostic += std::to_string(edge) + "(r" + std::to_string(debug_reason[edge]) + "),";
+          }
+        }
+      }
+      throw std::logic_error("resident 并行提交破坏了最小度或 fixed-degree 不变式，code=" +
+                             std::to_string(invalid_degree) + diagnostic);
+    }
+    result.commit_ms += ElapsedMilliseconds(commit_begin);
     result.kernel_ms += device_ms;
-    if (method == EliminationMethod::kGeometryMain) {
+    if (extra_edge_stage) {
+      result.extra_edge_ms += device_ms;
+    } else if (main_edge_stage) {
+      result.main_edge_ms += device_ms;
+    } else if (method == EliminationMethod::kGeometryMain) {
       result.geometry_ms += device_ms;
     } else if (method == EliminationMethod::kLpBox) {
       result.pdlp_ms += device_ms;
@@ -1278,19 +5860,35 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
       if (method == EliminationMethod::kLpBox) {
         host_quantized_dual.resize(dimension);
         device_quantized_dual.CopyToHost(host_quantized_dual.data(), dimension);
+        host_quantized_cut.resize(static_cast<std::size_t>(local_sec.cut_count));
+        device_quantized_cut.CopyToHost(host_quantized_cut.data(), host_quantized_cut.size());
+        if (options.enable_fixing) {
+          device_fixed_verified.CopyToHost(host_fixed_epoch.data(), edge_count);
+        }
       }
       result.download_ms += ElapsedMilliseconds(download_begin);
 
       ResidentTraceEpoch trace;
       trace.method = method;
+      trace.main_edge_stage = main_edge_stage;
+      trace.extra_edge_stage = extra_edge_stage;
+      trace.main_position = main_position;
       trace.edges_before = current_edges;
       trace.device_ms = device_ms;
       trace.vertex_dual_numerator = std::move(host_quantized_dual);
+      trace.local_sec_dual_numerator = std::move(host_quantized_cut);
       trace.fractional_bits = options.fractional_bits;
       trace.incumbent_cost = options.incumbent_cost;
       trace.edge_ids.reserve(static_cast<std::size_t>(committed_count));
       trace.first_witness.reserve(static_cast<std::size_t>(committed_count));
       trace.second_witness.reserve(static_cast<std::size_t>(committed_count));
+      if (method == EliminationMethod::kLpBox && options.enable_fixing) {
+        for (std::size_t edge = 0U; edge < edge_count; ++edge) {
+          if (host_fixed_epoch[edge] != 0U) {
+            trace.fixed_edge_ids.push_back(static_cast<std::int32_t>(edge));
+          }
+        }
+      }
       for (std::size_t edge = 0U; edge < edge_count; ++edge) {
         if (host_committed[edge] == 0U) {
           continue;
@@ -1309,6 +5907,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     }
     current_edges -= static_cast<std::size_t>(committed_count);
     compact_active_edges();
+    adjacency_dirty = true;
     return static_cast<std::size_t>(committed_count);
   };
 
@@ -1336,56 +5935,201 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
 
   bool orchestration_converged = false;
   bool local_converged = false;
+  bool prefer_dirty_quick_start = false;
+  // 全点 non-pair 的完整工作量是 sum_v C(deg(v), 2)。当它已经不高于
+  // 一轮 Quick-HS 的候选展开量时直接进入联合固定点，避免稀疏图重复执行
+  // Main/-e2；只有 pair frontier 更大时才先收敛 edge services。这里不丢弃
+  // 任何 point/reply，也不设置规模上限，只用两个实际 frontier 决定顺序。
+  if (options.enable_point_nonpair || options.enable_direct_fix) {
+    rebuild_compact_adjacency();
+  }
+  const std::int64_t edge_frontier =
+      static_cast<std::int64_t>(active_edge_count) *
+      static_cast<std::int64_t>(std::max<std::uint32_t>(1U, options.quick_hs_candidates));
+  bool point_service_ready = (!options.enable_point_nonpair && !options.enable_direct_fix) ||
+                             current_pair_count <= edge_frontier;
   std::uint32_t orchestration = 0U;
-  while ((!options.enable_pdlp && orchestration == 0U) ||
+  while (options.enable_main_edge || options.enable_extra_edge ||
+         (!options.enable_pdlp && orchestration == 0U) ||
          (options.enable_pdlp &&
           (options.max_pdlp_epochs == 0U || orchestration < options.max_pdlp_epochs))) {
     ++orchestration;
     const std::size_t edges_before = current_edges;
+    const std::size_t nonpairs_before = result.nonpair_committed;
+    const std::size_t fixed_before = result.fixed_count;
     if (options.enable_pdlp) {
       ++result.pdlp_epochs;
-      const std::size_t committed = run_epoch(EliminationMethod::kLpBox);
+      const std::size_t committed =
+          run_epoch(EliminationMethod::kLpBox, false, 0, false, nullptr, -1, point_service_ready);
       result.lp_committed += committed;
+      if (options.enable_fixing) {
+        const std::size_t propagated = run_epoch(EliminationMethod::kFixedPropagation);
+        result.fixed_propagation_committed += propagated;
+      }
     }
 
     bool jv_converged = run_jv_fixed_point();
     bool hs_converged = !options.enable_quick_hs;
     if (jv_converged && options.enable_quick_hs) {
       std::uint32_t epoch = 0U;
+      bool full_sweep = !prefer_dirty_quick_start;
+      std::int32_t dirty_root_count = 0;
+      if (!full_sweep) {
+        dirty_root_count = select_dirty_roots(2U);
+        full_sweep = dirty_root_count == 0 ||
+                     static_cast<std::int64_t>(dirty_root_count) * 4 >= active_edge_count;
+      }
+      prefer_dirty_quick_start = false;
       while (options.max_hs_epochs == 0U || epoch < options.max_hs_epochs) {
         ++epoch;
         ++result.hs_epochs;
-        const std::size_t committed = run_epoch(EliminationMethod::kGpuQuickHs);
+        if (full_sweep) {
+          // active sweep 只用于提前消费局部级联；每轮最后仍执行完整 sweep，
+          // 因而保守依赖半径漏掉的 root 不会造成伪固定点。
+          clear_dirty_vertices();
+          ++result.hs_full_sweeps;
+          result.hs_full_tasks += static_cast<std::uint64_t>(active_edge_count);
+        } else {
+          ++result.hs_active_sweeps;
+          result.hs_active_tasks += static_cast<std::uint64_t>(dirty_root_count);
+        }
+        const std::size_t committed =
+            run_epoch(EliminationMethod::kGpuQuickHs, false, 0, false,
+                      full_sweep ? nullptr : device_dirty_root_edge_ids.get(),
+                      full_sweep ? -1 : dirty_root_count);
         result.quick_hs_committed += committed;
         if (committed == 0U) {
-          hs_converged = true;
-          break;
+          if (full_sweep) {
+            hs_converged = true;
+            break;
+          }
+          full_sweep = true;
+          continue;
         }
         jv_converged = run_jv_fixed_point();
         if (!jv_converged) {
           break;
         }
+        dirty_root_count = select_dirty_roots(2U);
+        full_sweep = dirty_root_count == 0 ||
+                     static_cast<std::int64_t>(dirty_root_count) * 4 >= active_edge_count;
       }
     }
     local_converged = jv_converged && hs_converged;
     if (!local_converged) {
       break;
     }
-    if (!options.enable_pdlp || current_edges == edges_before) {
+    if (options.enable_extra_edge) {
+      ++result.extra_edge_epochs;
+      const std::size_t committed = run_epoch(EliminationMethod::kGpuQuickHs, false, 0, true);
+      result.extra_edge_committed += committed;
+      if (committed != 0U) {
+        // 深层删除先唤醒局部依赖 root；一次无删除 active sweep 后仍回到
+        // 完整 sweep，保证最终 fixed point 不依赖启发式半径。
+        prefer_dirty_quick_start = true;
+        continue;
+      }
+    }
+    if (options.enable_main_edge) {
+      std::size_t sweep_committed = 0U;
+      for (std::uint32_t position = 1U; position <= options.main_edge_positions; ++position) {
+        ++result.main_edge_epochs;
+        const std::size_t committed =
+            run_epoch(EliminationMethod::kGeometryMain, true, static_cast<std::int32_t>(position));
+        result.main_edge_committed += committed;
+        sweep_committed += committed;
+      }
+      if (sweep_committed != 0U) {
+        prefer_dirty_quick_start = true;
+        continue;
+      }
+    }
+    if (!point_service_ready) {
+      // 到达这里表示当前 snapshot 上所有便宜 edge service 都已无提交。
+      // 下一 epoch 在更稀疏图上首次执行完整 point AND；其新 pair/fix
+      // 仍会重新唤醒所有 edge service，最终联合固定点不变。
+      point_service_ready = true;
+      continue;
+    }
+    if (!options.enable_pdlp ||
+        (current_edges == edges_before && result.nonpair_committed == nonpairs_before &&
+         result.fixed_count == fixed_before)) {
       orchestration_converged = true;
       break;
     }
   }
+  // 有限 epoch 的研究命令可能在一次成功提交后立即用尽预算；最终下载前
+  // 仍须发布与 active bitmap 一致的 CSR/pair 快照。
+  rebuild_compact_adjacency();
   CheckCuda(cudaDeviceSynchronize(), "resident final synchronize");
   const SteadyClock::time_point final_download_begin = SteadyClock::now();
   result.final_active.resize(edge_count);
+  result.final_fixed.resize(edge_count);
   device_edge_active.CopyToHost(result.final_active.data(), edge_count);
+  device_fixed.CopyToHost(result.final_fixed.data(), edge_count);
+  if (current_pair_count > 0 && view.pair_offsets != nullptr && view.nonpair_mask != nullptr) {
+    std::vector<std::int64_t> host_pair_offsets(dimension + 1U);
+    std::vector<std::int64_t> host_final_rows(dimension + 1U);
+    std::vector<std::int32_t> host_final_neighbors(current_edges * 2U);
+    std::vector<std::uint8_t> host_nonpair(static_cast<std::size_t>(current_pair_count));
+    device_pair_offsets.CopyToHost(host_pair_offsets.data(), host_pair_offsets.size());
+    CheckCuda(cudaMemcpy(host_final_rows.data(), view.row_offsets,
+                         host_final_rows.size() * sizeof(std::int64_t), cudaMemcpyDeviceToHost),
+              "cudaMemcpy final CSR rows");
+    CheckCuda(cudaMemcpy(host_final_neighbors.data(), view.neighbors,
+                         host_final_neighbors.size() * sizeof(std::int32_t),
+                         cudaMemcpyDeviceToHost),
+              "cudaMemcpy final CSR neighbors");
+    CheckCuda(cudaMemcpy(host_nonpair.data(), view.nonpair_mask,
+                         host_nonpair.size() * sizeof(std::uint8_t), cudaMemcpyDeviceToHost),
+              "cudaMemcpy final nonpair mask");
+    if (host_final_rows.front() != 0 ||
+        host_final_rows.back() != static_cast<std::int64_t>(host_final_neighbors.size())) {
+      throw std::logic_error(
+          "resident 最终 CSR slot 计数不一致: offsets=" + std::to_string(host_final_rows.back()) +
+          " expected=" + std::to_string(host_final_neighbors.size()));
+    }
+    for (std::int32_t center = 0; center < graph.dimension; ++center) {
+      const std::int64_t row_begin = host_final_rows[static_cast<std::size_t>(center)];
+      const std::int64_t degree =
+          host_final_rows[static_cast<std::size_t>(center) + 1U] - row_begin;
+      if (degree < 0 || row_begin < 0 ||
+          row_begin + degree > static_cast<std::int64_t>(host_final_neighbors.size())) {
+        throw std::logic_error("resident 最终 CSR 行偏移越界: center=" + std::to_string(center));
+      }
+      const std::int64_t pair_begin = host_pair_offsets[static_cast<std::size_t>(center)];
+      for (std::int64_t first = 0; first + 1 < degree; ++first) {
+        for (std::int64_t second = first + 1; second < degree; ++second) {
+          const std::int64_t local = first * (2 * degree - first - 1) / 2 + (second - first - 1);
+          if (host_nonpair[static_cast<std::size_t>(pair_begin + local)] == 0U) {
+            continue;
+          }
+          const std::int32_t first_node =
+              host_final_neighbors[static_cast<std::size_t>(row_begin + first)];
+          const std::int32_t second_node =
+              host_final_neighbors[static_cast<std::size_t>(row_begin + second)];
+          result.final_nonpairs.push_back(
+              {center, std::min(first_node, second_node), std::max(first_node, second_node)});
+        }
+      }
+    }
+    std::sort(result.final_nonpairs.begin(), result.final_nonpairs.end(),
+              [](const ResidentNonpair& lhs, const ResidentNonpair& rhs) {
+                return std::tie(lhs.center, lhs.first, lhs.second) <
+                       std::tie(rhs.center, rhs.first, rhs.second);
+              });
+  }
   result.download_ms += ElapsedMilliseconds(final_download_begin);
   result.final_edges = static_cast<std::size_t>(
       std::count(result.final_active.begin(), result.final_active.end(), std::uint8_t{1U}));
   if (result.final_edges != current_edges) {
     throw std::logic_error("resident 最终活动边 bitmap 与计数不一致");
   }
+  const std::size_t downloaded_fixed = static_cast<std::size_t>(
+      std::count(result.final_fixed.begin(), result.final_fixed.end(), std::uint8_t{1U}));
+  // LP kernel 的计数只覆盖“由本轮 LP 新固定”的边；度数降到 2 后由 GPU
+  // 推导出的隐含固定边不会经过该计数器。最终位图才是跨 epoch 的权威状态。
+  result.fixed_count = downloaded_fixed;
   result.converged = local_converged && orchestration_converged;
   result.solve_wall_ms = ElapsedMilliseconds(solve_begin);
   return result;

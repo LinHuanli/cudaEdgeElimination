@@ -26,6 +26,8 @@ std::string ToString(const EliminationMethod method) {
     return "LP_BOX";
   case EliminationMethod::kGpuQuickHs:
     return "GPU_QUICK_HS";
+  case EliminationMethod::kFixedPropagation:
+    return "FIXED_PROPAGATION";
   }
   throw std::logic_error("未知消元方法");
 }

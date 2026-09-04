@@ -20,6 +20,11 @@ using Arguments = std::map<std::string, std::string>;
 void PrintHelp() {
   std::cout << "fgpu-elim：单 GPU、可重放证明的 TSP 边消除闭环\n\n"
             << "用法：\n"
+            << "  fgpu-elim solve --instance FILE [--input-edges FILE] --tour FILE\n"
+            << "    [--mode gpu-safe|gpu-fast-raw] [--device auto|N]\n"
+            << "    --output-edges FILE --fixed FILE --nonpairs FILE --manifest FILE\n"
+            << "    [--certificate FILE] [--tour-role incumbent|known-optimum]\n"
+            << "    [--expected-cost N]\n"
             << "  fgpu-elim run --instance FILE [--input-edges FILE] [--tour FILE]\n"
             << "    --device N --numeric mixed-safe|fp64|aggressive-fp32\n"
             << "    --verification epoch|deferred --pdlp off|native|cuopt-baseline\n"
@@ -42,6 +47,17 @@ void PrintHelp() {
             << "    [--max-pdlp-epochs N] [--max-hs-epochs N] [--max-jv-rounds N]\n"
             << "    [--enable-geometry 0|1] [--enable-pdlp 0|1]\n"
             << "    [--enable-quick-hs 0|1] [--enable-jv 0|1]，输出参数同上\n"
+            << "  fgpu-elim resident-oneshot --instance FILE [--input-edges FILE] --tour FILE\n"
+            << "    --device N [--potential-candidates 2..32]\n"
+            << "    [--main-edge-potentials 2..32] [--main-edge-positions N]\n"
+            << "    [--enable-strong-metric 0|1]（低度数 metric-excess）\n"
+            << "    [--enable-point-nonpair 0|1]（完整一层 HT point replies）\n"
+            << "    [--enable-direct-fix 0|1]（完整端点邻边对笛卡尔积 fixing）\n"
+            << "    [--quick-hs-candidates 2..32] [--quick-hs-pair-trials N]\n"
+            << "    [--quick-hs-two-hop 0|1]\n"
+            << "    [--enable-extra-edge 0|1] [--extra-edge-depth 1|2]（KH -e1/-e2）\n"
+            << "    [--protect-tour 0|1]，其余输出参数同 resident\n"
+            << "    （固定运行到自然固定点，不接受 CPU audit 或非零 epoch 上限）\n"
             << "  fgpu-elim pdlp-inspect --instance FILE [--input-edges FILE]\n"
             << "    --pdlp native|cuopt-baseline|cuopt-subtour --expected-cost N [--device N]\n"
             << "    [--pdlp-iterations N] [--cuopt-library FILE]\n"
@@ -148,6 +164,37 @@ int ParseDevice(const Arguments& arguments) {
     throw std::invalid_argument("当前正式范围为单 GPU；--gpus 不接受多个 ordinal");
   }
   return ParseInteger<int>(value, has_gpus ? "--gpus" : "--device");
+}
+
+int ParseSolveDevice(const Arguments& arguments) {
+  const bool has_device = arguments.contains("device");
+  const bool has_gpus = arguments.contains("gpus");
+  if (has_device && has_gpus) {
+    throw std::invalid_argument("--device 与 --gpus 不能同时给出");
+  }
+  const std::string value =
+      has_gpus ? Required(arguments, "gpus") : Optional(arguments, "device", "auto");
+  if (value == "auto") {
+    return -1;
+  }
+  if (value.find(',') != std::string::npos) {
+    throw std::invalid_argument("当前正式范围为单 GPU；--gpus 不接受多个 ordinal");
+  }
+  const int device = ParseInteger<int>(value, has_gpus ? "--gpus" : "--device");
+  if (device < 0) {
+    throw std::invalid_argument("--device 必须是 auto 或非负 ordinal");
+  }
+  return device;
+}
+
+cudaee::FgpuSolveMode ParseSolveMode(const std::string& value) {
+  if (value == "gpu-safe") {
+    return cudaee::FgpuSolveMode::kGpuSafe;
+  }
+  if (value == "gpu-fast-raw") {
+    return cudaee::FgpuSolveMode::kGpuFastRaw;
+  }
+  throw std::invalid_argument("--mode 必须是 gpu-safe 或 gpu-fast-raw");
 }
 
 cudaee::NumericMode ParseNumeric(const std::string& value) {
@@ -311,6 +358,7 @@ void ResidentLocalCommand(const Arguments& arguments) {
             << " final_edges=" << report.final_edges << " converged=" << (report.converged ? 1 : 0)
             << " cpu_audited=" << (report.cpu_audited ? 1 : 0)
             << " final_hash=" << cudaee::HexHash(report.final_hash)
+            << " final_state_hash=" << cudaee::HexHash(report.final_state_hash)
             << " selected_device=" << report.selected_device
             << " resident_bytes=" << report.resident_bytes << " upload_ms=" << std::fixed
             << std::setprecision(3) << report.upload_ms << " gpu_kernel_ms=" << report.gpu_kernel_ms
@@ -325,7 +373,45 @@ void ResidentLocalCommand(const Arguments& arguments) {
             << " certificate_bytes=" << report.certificate_bytes << '\n';
 }
 
-void ResidentCommand(const Arguments& arguments) {
+void SolveCommand(const Arguments& arguments) {
+  ValidateKeys(arguments, {"instance", "input-edges", "tour", "tour-role", "expected-cost",
+                           "device", "gpus", "mode", "output-edges", "fixed", "nonpairs",
+                           "certificate", "manifest"});
+  cudaee::FgpuSolveOptions options;
+  options.device = ParseSolveDevice(arguments);
+  options.mode = ParseSolveMode(Optional(arguments, "mode", "gpu-safe"));
+  options.serialize_certificate = arguments.contains("certificate");
+  const cudaee::FgpuSolveReport report = cudaee::RunFgpuElimination(
+      ParseInput(arguments), ParseRunOutputs(arguments, false), options);
+  std::cout << "status=OK mode=" << cudaee::ToString(options.mode)
+            << " termination=" << cudaee::ToString(report.termination)
+            << " initial_edges=" << report.initial_edges << " final_edges=" << report.final_edges
+            << " fixed_edges=" << report.fixed_edges << " pairs=" << report.pairs
+            << " nonpairs=" << report.nonpairs
+            << " lp_nonpairs=" << report.lp_nonpairs
+            << " fixed_anchor_nonpairs=" << report.fixed_anchor_nonpairs
+            << " point_nonpairs=" << report.point_nonpairs
+            << " nonpair_fixed_edges=" << report.nonpair_fixed_edges
+            << " direct_fixed_edges=" << report.direct_fixed_edges
+            << " gpu_replayed=" << (report.gpu_replayed ? 1 : 0)
+            << " unaudited=" << (report.unaudited ? 1 : 0)
+            << " proof_replayed=" << report.proof_replayed
+            << " proof_rejected=" << report.proof_rejected
+            << " lp_connectivity_cuts=" << report.lp_connectivity_cuts
+            << " lp_path_closed_replies=" << report.lp_path_closed_replies
+            << " lp_degree_snapshots=" << report.lp_degree_snapshots
+            << " lp_strong_snapshots=" << report.lp_strong_snapshots
+            << " lp_lower_bound=" << report.lp_lower_bound
+            << " final_hash=" << cudaee::HexHash(report.final_hash)
+            << " final_state_hash=" << cudaee::HexHash(report.final_state_hash)
+            << " selected_device=" << report.selected_device
+            << " resident_bytes=" << report.resident_bytes << " proof_replay_ms=" << std::fixed
+            << std::setprecision(3) << report.proof_replay_ms << " commit_ms=" << report.commit_ms
+            << " gpu_solve_wall_ms=" << report.gpu_solve_wall_ms
+            << " end_to_end_ms=" << report.end_to_end_ms << '\n';
+}
+
+void ResidentCommand(const Arguments& arguments, const bool one_shot = false) {
   ValidateKeys(arguments, {"instance",
                            "input-edges",
                            "tour",
@@ -334,6 +420,13 @@ void ResidentCommand(const Arguments& arguments) {
                            "device",
                            "gpus",
                            "potential-candidates",
+                           "main-edge-potentials",
+                           "main-edge-positions",
+                           "quick-hs-candidates",
+                           "quick-hs-pair-trials",
+                           "quick-hs-two-hop",
+                           "enable-extra-edge",
+                           "extra-edge-depth",
                            "pdlp-iterations",
                            "max-pdlp-epochs",
                            "max-hs-epochs",
@@ -342,6 +435,11 @@ void ResidentCommand(const Arguments& arguments) {
                            "enable-pdlp",
                            "enable-quick-hs",
                            "enable-jv",
+                           "enable-main-edge",
+                           "enable-strong-metric",
+                           "enable-point-nonpair",
+                           "enable-direct-fix",
+                           "protect-tour",
                            "cpu-audit",
                            "output-edges",
                            "fixed",
@@ -352,6 +450,14 @@ void ResidentCommand(const Arguments& arguments) {
   config.device = ParseDevice(arguments);
   config.potential_candidates =
       OptionalInteger<std::uint32_t>(arguments, "potential-candidates", 32U);
+  config.main_edge_potentials =
+      OptionalInteger<std::uint32_t>(arguments, "main-edge-potentials", 11U);
+  config.main_edge_positions =
+      OptionalInteger<std::uint32_t>(arguments, "main-edge-positions", 23U);
+  config.quick_hs_candidates = OptionalInteger<std::uint32_t>(
+      arguments, "quick-hs-candidates", one_shot ? 16U : 10U);
+  config.quick_hs_pair_trials = OptionalInteger<std::uint32_t>(
+      arguments, "quick-hs-pair-trials", one_shot ? 0U : 10U);
   config.pdlp_iterations = OptionalInteger<std::uint32_t>(arguments, "pdlp-iterations", 5000U);
   config.max_pdlp_epochs = OptionalInteger<std::uint32_t>(arguments, "max-pdlp-epochs", 0U);
   config.max_hs_epochs = OptionalInteger<std::uint32_t>(arguments, "max-hs-epochs", 0U);
@@ -360,22 +466,64 @@ void ResidentCommand(const Arguments& arguments) {
   config.enable_pdlp = OptionalBoolean(arguments, "enable-pdlp", true);
   config.enable_quick_hs = OptionalBoolean(arguments, "enable-quick-hs", true);
   config.enable_jv = OptionalBoolean(arguments, "enable-jv", true);
+  config.enable_main_edge = OptionalBoolean(arguments, "enable-main-edge", one_shot);
+  config.enable_strong_metric =
+      OptionalBoolean(arguments, "enable-strong-metric", false);
+  config.enable_point_nonpair =
+      OptionalBoolean(arguments, "enable-point-nonpair", one_shot);
+  config.enable_direct_fix =
+      OptionalBoolean(arguments, "enable-direct-fix", one_shot);
+  config.enable_extra_edge = OptionalBoolean(arguments, "enable-extra-edge", one_shot);
+  config.extra_edge_depth = OptionalInteger<std::uint32_t>(
+      arguments, "extra-edge-depth", one_shot ? 2U : 1U);
+  config.quick_hs_two_hop = OptionalBoolean(arguments, "quick-hs-two-hop", one_shot);
+  config.protect_tour = OptionalBoolean(arguments, "protect-tour", !one_shot);
   config.enable_cpu_audit = OptionalBoolean(arguments, "cpu-audit", false);
+  config.enable_fixing = one_shot;
+  if (one_shot && (!config.enable_main_edge || config.enable_cpu_audit ||
+                   config.max_pdlp_epochs != 0U || config.max_hs_epochs != 0U ||
+                   config.max_jv_rounds != 0U)) {
+    throw std::invalid_argument(
+        "resident-oneshot 必须启用 Main Edge、关闭 CPU audit，并把所有 epoch/round 上限设为 0");
+  }
   const cudaee::FgpuResidentRunReport report = cudaee::RunFgpuResidentElimination(
       ParseInput(arguments), ParseRunOutputs(arguments, config.enable_cpu_audit), config);
-  std::cout << "status=OK mode=resident initial_edges=" << report.initial_edges
+  std::cout << "status=OK mode=" << (one_shot ? "resident-oneshot" : "resident")
+            << " initial_edges=" << report.initial_edges
             << " geometry_deleted=" << report.geometry_committed
+            << " main_edge_deleted=" << report.main_edge_committed
+            << " strong_metric=" << (config.enable_strong_metric ? 1 : 0)
+            << " main_edge_epochs=" << report.main_edge_epochs
             << " lp_deleted=" << report.lp_committed << " pdlp_epochs=" << report.pdlp_epochs
+            << " lp_connectivity_cuts=" << report.lp_connectivity_cuts
+            << " lp_path_closed_replies=" << report.lp_path_closed_replies
+            << " lp_degree_snapshots=" << report.lp_degree_snapshots
+            << " lp_strong_snapshots=" << report.lp_strong_snapshots
+            << " lp_lower_bound=" << report.lp_lower_bound
             << " jv_deleted=" << report.jv_committed
             << " quick_hs_deleted=" << report.quick_hs_committed
+            << " hs_full_sweeps=" << report.hs_full_sweeps
+            << " hs_active_sweeps=" << report.hs_active_sweeps
+            << " extra_edge_deleted=" << report.extra_edge_committed
+            << " extra_edge_depth=" << config.extra_edge_depth
+            << " extra_edge_epochs=" << report.extra_edge_epochs
             << " final_edges=" << report.final_edges << " converged=" << (report.converged ? 1 : 0)
+            << " pairs=" << report.pair_count << " nonpairs=" << report.nonpair_count
+            << " lp_nonpairs=" << report.lp_nonpair_committed
+            << " fixed_anchor_nonpairs=" << report.fixed_anchor_nonpair_committed
+            << " point_nonpairs=" << report.point_nonpair_committed
+            << " nonpair_fixed_edges=" << report.nonpair_fix_committed
+            << " direct_fixed_edges=" << report.direct_fix_committed
             << " cpu_audited=" << (report.cpu_audited ? 1 : 0)
             << " final_hash=" << cudaee::HexHash(report.final_hash)
+            << " final_state_hash=" << cudaee::HexHash(report.final_state_hash)
             << " selected_device=" << report.selected_device
             << " resident_bytes=" << report.resident_bytes << " upload_ms=" << std::fixed
             << std::setprecision(3) << report.upload_ms << " gpu_kernel_ms=" << report.gpu_kernel_ms
             << " geometry_ms=" << report.geometry_ms << " pdlp_ms=" << report.pdlp_ms
+            << " main_edge_ms=" << report.main_edge_ms
             << " jv_ms=" << report.jv_ms << " quick_hs_ms=" << report.quick_hs_ms
+            << " extra_edge_ms=" << report.extra_edge_ms
             << " compaction_ms=" << report.compaction_ms
             << " gpu_download_ms=" << report.gpu_download_ms
             << " gpu_solve_wall_ms=" << report.gpu_solve_wall_ms
@@ -472,12 +620,16 @@ int main(const int argc, char** argv) {
     }
     const Arguments arguments = ParseArguments(argc, argv, 2);
     const std::string command = argv[1];
-    if (command == "run") {
+    if (command == "solve") {
+      SolveCommand(arguments);
+    } else if (command == "run") {
       RunCommand(arguments);
     } else if (command == "resident-local") {
       ResidentLocalCommand(arguments);
     } else if (command == "resident") {
       ResidentCommand(arguments);
+    } else if (command == "resident-oneshot") {
+      ResidentCommand(arguments, true);
     } else if (command == "pdlp-inspect") {
       PdlpInspectCommand(arguments);
     } else if (command == "verify") {
