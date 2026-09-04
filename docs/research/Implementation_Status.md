@@ -1,4 +1,4 @@
-# 实现状态（2026-09-04）
+# 实现状态（2026-09-05）
 
 | 工作包 | 状态 | 已验证证据 |
 |---|---|---|
@@ -12,6 +12,9 @@
 | FGPU native LP 删除 | 完成（degree-only） | CUDA multiplier；`2^24` 定点量化；完整 live-variable `__int128` box bound；V4 sidecar 与篡改拒绝 |
 | FGPU fully-resident 终态 | 部分完成 | GPU 候选/成本/传播已接入；最终 exact replay、HT 控制与完全图物化仍含 CPU；subtour cuts/tile certificate 待实现 |
 | FGPU resident raw 固定点 | 完成（degree-LP/local raw） | 默认无 CPU audit/证书/epoch 上限/节点上限；pcb3038 七次 clean 中位 56.33 s，4,613,203 → 23,720，七份 SHA-256 一致；强度仍不等价论文完整 LP |
+| FGPU strength-upgrade `solve` | 部分完成（P0–P8 核心子集） | 单 GPU sparse resident；Signed128 LP；connectivity/local SEC；Main/metric；KH `-e2`；point non-pair；Direct Fix；联合固定点；安全修复后 pcb3038 论文 LP 图 `6883 -> 6326` |
+| FGPU GPU-safe trust boundary | 完成（当前正式规则） | 无 CPU 逐边 audit；proposal/device replay pass 分离；并行 commit；小图全部最优 tour 穷举；CPU 30/30、CUDA 53/53、memcheck/racecheck 0 errors |
+| FGPU non-pair/fixing 固定点 | 部分完成 | LP/fixed-anchor/完整一层 point non-pair、non-pair-implied fixing、degree-2 propagation；深度 2–4 pair HT 与一般 fixing HT 尚缺 |
 | M4.1 path-system 组合层 | 完成 | 路径规范化；固定哈希表；`m<=6` CPU/CUDA 差分；`m=6` 表为 4,989,600 bytes，`m=7` CPU fallback |
 | M4.2a CPU k-opt 叶证明 | 完成 | proper 3/4/5-opt `4/25/208` 模板；ElimTSP oracle 差分；`path-kopt-proof-v1` 独立重放 |
 | M4.2b CUDA k-opt cost | 完成（CPU 认证候选器） | public 完整矩阵逐 cell 差分；broker 使用 `1/1/4` words candidate mask；改善 witness CPU 完整重建；memcheck 0 error |
@@ -47,6 +50,23 @@
 | M5 中大型调优 | 进行中（JV 三轮 + HT host/device/multi-GPU fast paths） | point/path/reply/leaf/scan-binding fast paths；reply 驻留、任务去重与目标级静态多 GPU |
 
 ## 当前基准结果
+
+FGPU strength-upgrade 同论文 LP 输入基准：修复 `-e2` 重叠路径的安全问题后，
+`pcb3038` 从 6,883 条到 6,326 条，424 fixed、1,404 non-pairs（6.1687%），
+2,836 次 device replay、0 rejected，最优 tour 零缺边。三次隔离 clean E2E 中位为
+153.220 s；三次 graph/state hash 均为 `88098fbab9b930d3/a97ccf56515068ec`，
+edge/fixed/non-pair 文件逐字节相同。2023 论文完整 bootstrap 为 5,548 edges、934
+fixed、49.4% non-pairs、497 s；当前墙钟数字约为其 1/3.244，但终图多 778 条，
+不能报告等强度加速。旧的 6,268-edge/62.635-s 结果存在错误 `-e2` 授权，已作废。详见
+[FGPU 强度升级 P0–P8 实现与论文对齐](70_FGPU_Strength_Upgrade_P0_P8_Implementation.md)。
+
+同一正式入口从 `pcb3038` 完全图运行到固定点：`4,613,203 -> 17,872`，19 fixed、
+32,041/211,766 non-pairs，5,162,470 replay、0 rejected，E2E 7,495.652 s。按边数
+比 2014 Step 2 的 17,940 条少 68 条，但比其累计约 673 s 慢 11.14 倍；相对 Step 3
+的 14,869 条仍多 3,003 条，墙钟虽为论文总计 21,322 s 的 `1/2.845`，不能称等强度
+加速。该长基准目前是单次计时；图/全状态 hash 为
+`c0d80eb7a9b717ce/895b49f61309475c`。完整图上 LP + point、Quick-HS、GPU replay
+分别占 E2E 47.98%、25.53%、23.48%。
 
 FGPU resident raw 基准绑定 `e102216`：pcb3038 完全图在单张 RTX 4000 Ada 上
 七次 clean 进程 wall 中位为 56.330 s，GPU solve 为 55.404 s；Geometry/PDLP/JV/

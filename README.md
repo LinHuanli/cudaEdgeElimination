@@ -1,6 +1,9 @@
 # cudaEdgeElimination
 
-面向对称 TSP 的可验证 GPU 局部边消元研究实现。首期把 GPU 作为候选生成器，并由 CPU 在不可变图快照上逐条复核；LP sidecar 使用 cuOpt 求近似解，但只有独立的精确定价/定点证书可以授权删除。
+面向对称 TSP 的可验证 GPU 局部边消元研究实现。legacy 研究命令仍支持 GPU
+候选加 CPU 独立复核；正式 `fgpu-elim solve --mode gpu-safe` 则在不可变设备快照上
+执行独立 GPU replay，CPU 不参与逐边删除、non-pair 或 fixing 决策。浮点 LP 只生成
+guidance，最终授权统一使用量化 dual 和设备端精确定点比较。
 
 当前实现范围：
 
@@ -55,6 +58,16 @@
 - FGPU V4 证书把量化 vertex dual 与快照哈希绑定；V5 对 HT sidecar 做有界 zlib 压缩并绑定原长/CRC32。在线提交和独立重放均重算完整数学条件。几何、LP 与 JV 同 epoch records 可并行复核，但提交次序、首错和最终哈希保持确定。
 - `fgpu-elim resident` 的单卡全常驻主链：CUDA FP64 有向舍入 Geometry、device-resident degree-box PDLP、exhaustive JV 与 Quick-HS 固定点。当前默认是 `--cpu-audit 0` 的全量 raw 路径：不回传逐边 trace、不生成证书、不做 CPU 精确重放，直接将 GPU 最终 mask 写成边集；manifest 会强制标记为 `gpu-raw`。需要认证回归时显式传 `--cpu-audit 1`。历史 pcb442 认证基准详见 [全常驻基准](docs/research/68_FGPU_单卡全常驻实现与端到端基准.md)。
 - resident 的 `max-pdlp-epochs/max-hs-epochs/max-jv-rounds` 默认均为 `0`，表示运行到自然固定点；不设人为节点上限，由实际内存/显存分配结果决定规模。pcb3038 七次 clean raw 中位为 56.33 s，`4,613,203 -> 23,720`；完整画像、LP 强度缺口和否决实验详见 [无上限 raw 与 LP 诊断](docs/research/69_FGPU_无上限Raw与pcb3038_LP诊断.md)。
+- 正式 `fgpu-elim solve` 的单 GPU sparse resident 主链加入 GPU Signed128 LP
+  delete/fix/path bound、connectivity/local SEC、Main-Edge/metric-excess、KH `-e2`、
+  persistent non-pairs、完整一层 point move、Direct/non-pair implied fixing、device
+  replay 和 edge/pair/fixed 联合固定点。修复 `-e2` 重叠路径的安全问题后，同论文
+  6,883-edge `pcb3038` 输入上可靠结果为 6,326 edges、424 fixed、6.1687%
+  non-pairs，三次隔离 clean E2E 中位 153.220 s；相对论文完整 5,548-edge 结果仍多
+  778 条。正式完全图单次 run 为 `4,613,203 -> 17,872`、E2E 7,495.652 s：边数
+  比 2014 Step 2 少 68 条但用时约 11.14 倍，相对 Step 3 仍多 3,003 条；虽然墙钟
+  比论文总计快 2.845 倍，但不是等强度加速。详见
+  [P0–P8 实现报告](docs/research/70_FGPU_Strength_Upgrade_P0_P8_Implementation.md)。
 - path matching coverage 已扩展到 `m=6`（3,840 outside、10,395 inside、4,989,600 bytes），固定生成器哈希为 `750842211d2a93e7`。
 
 尚未完成的研究项（跨 target SoA continuation ready queue、generation cancellation、cuOpt 退化对偶稳定化和精确定价后边集导出）会显式安全回退，详见 [研究路线图](docs/research/05_Roadmap_and_Gates.md)。V3 的跨目标 leaf broker 在 d15112 32-target 上保持 `19,498 states/18 proofs`，五对 clean A/B 的单 GPU target execution 相对 CPU 为 `1.009x`，algorithm total 为 `1.001x`，process wall 为 `0.997x`，因此端到端只能判定为持平，`transposed` 继续保持 opt-in。这些结果不是论文 Table 7 的同协议对比，详见 [V3 跨目标 Leaf Broker](docs/research/64_V3_单GPU跨目标LeafBroker.md)。多 epoch 调度已可执行，但 `ht-epoch-limit` 只表示安全部分结果，不表示全图收敛。CPU 精确困难叶有 18 blocks 上限，CUDA 候选器上限为 13；任何超限或错误只返回 `unresolved`。HT 只提交完整 CPU 重放成功的 sidecar；旧 `cudaee lp-solve` 仍只输出数值结果。新的 `fgpu-elim --pdlp native` 只有在量化 multiplier 经完整 live-variable box bound 重算、强制目标边下界严格超过 incumbent，并写入 V4/V5 sidecar 后，才可授权 LP 删除。`run_fgpu_oneshot.sh` 默认拒绝 `*-limit/*-partial` 终止；只有显式 `CUDAEE_FGPU_ALLOW_PARTIAL=1` 才保留部分搜索作为调试产物。
@@ -117,6 +130,18 @@ CUDAEE_ALLOW_BUSY_GPU=1 tools/run_fgpu_resident.sh pcb442 1 7
 
 # 全图 GPU raw 基准：默认无逐边 trace、CPU audit、证书或 epoch 上限
 tools/run_fgpu_resident.sh pcb3038 1 7
+
+# 正式单 GPU-safe 联合固定点；默认不写大证书文件
+build/cuda-release/fgpu-elim solve \
+  --instance .tmp/lkh-tours/pcb3038.tsp \
+  --input-edges third_party/ElimTSP/data/pcb3038.all.edg.gz \
+  --tour artifacts/lkh-tours/pcb3038.opt.tour \
+  --tour-role known-optimum --expected-cost 137694 \
+  --mode gpu-safe --device auto \
+  --output-edges artifacts/pcb3038.gpu-safe.edg \
+  --fixed artifacts/pcb3038.gpu-safe.fix \
+  --nonpairs artifacts/pcb3038.gpu-safe.nonpairs \
+  --manifest artifacts/pcb3038.gpu-safe.json
 ```
 
 CLI：
