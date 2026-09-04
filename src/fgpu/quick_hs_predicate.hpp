@@ -389,30 +389,6 @@ Compatible(const GraphView& graph, const std::int32_t a, const std::int32_t b, c
                                   cab + ccd <= Distance(graph, a, d) + Distance(graph, c, b)));
 }
 
-// 返回 true 表示这组 Hamilton reply 通过了原 KH -q 的全部前置门禁，且没有被
-// 任一整数局部改进关闭。CPU 标量谓词与 CUDA warp 谓词共用本函数，防止两条
-// 执行路径在最深层 d2 条件上发生语义漂移。
-CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
-HamiltonReplyRemainsOpen(const GraphView& graph, const std::int32_t a, const std::int32_t b,
-                         const std::int32_t c, const std::int32_t d, const std::int32_t c1,
-                         const std::int32_t c2, const std::int32_t d1, const std::int32_t d2,
-                         const std::int64_t cab, const std::int64_t cc1c, const std::int64_t ccc2,
-                         const std::int64_t cd1d) {
-  if (d2 == c || (d2 == a && (d1 == b || c1 == d2 || c2 == d2)) ||
-      (d2 == b && (d1 == a || c1 == d2 || c2 == d2)) ||
-      (d2 == c1 && (d1 == c2 || a == d2 || b == d2)) ||
-      (d2 == c2 && (d1 == c1 || a == d2 || b == d2)) || HasCycle222(a, b, c1, c2, d1, d2)) {
-    return false;
-  }
-  const std::int64_t cdd2 = Distance(graph, d, d2);
-  return Opt22(graph, d, d2, a, b, cdd2, cab) && Opt22(graph, d, d2, c1, c, cdd2, cc1c) &&
-         Opt22(graph, d, d2, c, c2, cdd2, ccc2) && Opt23(graph, a, b, d1, d, d2, cab, cd1d, cdd2) &&
-         Opt23(graph, d, d2, c1, c, c2, cdd2, cc1c, ccc2) &&
-         Opt23(graph, c1, c, d1, d, d2, cc1c, cd1d, cdd2) &&
-         Opt23(graph, c, c2, d1, d, d2, ccc2, cd1d, cdd2) &&
-         Opt233(graph, a, b, c1, c, c2, d1, d, d2);
-}
-
 // 返回 true 表示固定 c,d 的全部 Hamilton replies 都已被整数局部改进关闭。
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
 CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std::int32_t b,
@@ -458,7 +434,20 @@ CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std:
         }
         for (std::int32_t d_second = d_first + 1; d_second < graph.degree[d]; ++d_second) {
           const std::int32_t d2 = graph.neighbors[d_row + d_second];
-          if (HamiltonReplyRemainsOpen(graph, a, b, c, d, c1, c2, d1, d2, cab, cc1c, ccc2, cd1d)) {
+          if (d2 == c || (d2 == a && (d1 == b || c1 == d2 || c2 == d2)) ||
+              (d2 == b && (d1 == a || c1 == d2 || c2 == d2)) ||
+              (d2 == c1 && (d1 == c2 || a == d2 || b == d2)) ||
+              (d2 == c2 && (d1 == c1 || a == d2 || b == d2)) || HasCycle222(a, b, c1, c2, d1, d2)) {
+            continue;
+          }
+          const std::int64_t cdd2 = Distance(graph, d, d2);
+          if (Opt22(graph, d, d2, a, b, cdd2, cab) && Opt22(graph, d, d2, c1, c, cdd2, cc1c) &&
+              Opt22(graph, d, d2, c, c2, cdd2, ccc2) &&
+              Opt23(graph, a, b, d1, d, d2, cab, cd1d, cdd2) &&
+              Opt23(graph, d, d2, c1, c, c2, cdd2, cc1c, ccc2) &&
+              Opt23(graph, c1, c, d1, d, d2, cc1c, cd1d, cdd2) &&
+              Opt23(graph, c, c2, d1, d, d2, ccc2, cd1d, cdd2) &&
+              Opt233(graph, a, b, c1, c, c2, d1, d, d2)) {
             // 找到一个不能关闭的 reply，固定 c,d 不能证明目标边。
             return false;
           }
@@ -469,9 +458,14 @@ CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std:
   return true;
 }
 
-CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::int32_t
-FindPotentialNodes(const GraphView& graph, const std::int32_t a, const std::int32_t b,
-                   std::int32_t* const candidate_nodes) {
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE Witness FindWitness(const GraphView& graph,
+                                                              const std::int32_t a,
+                                                              const std::int32_t b) {
+  Witness result;
+  if (!Active(graph, a, b) || graph.degree[a] <= 2 || graph.degree[b] <= 2) {
+    return result;
+  }
+  std::int32_t candidate_nodes[kMaxPotentialNodes]{};
   std::int64_t candidate_scores[kMaxPotentialNodes]{};
   std::int32_t candidate_count = 0;
   for (std::int32_t side = 0; side < 2; ++side) {
@@ -510,18 +504,6 @@ FindPotentialNodes(const GraphView& graph, const std::int32_t a, const std::int3
       candidate_nodes[position] = node;
     }
   }
-  return candidate_count;
-}
-
-CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE Witness FindWitness(const GraphView& graph,
-                                                              const std::int32_t a,
-                                                              const std::int32_t b) {
-  Witness result;
-  if (!Active(graph, a, b) || graph.degree[a] <= 2 || graph.degree[b] <= 2) {
-    return result;
-  }
-  std::int32_t candidate_nodes[kMaxPotentialNodes]{};
-  const std::int32_t candidate_count = FindPotentialNodes(graph, a, b, candidate_nodes);
 
   std::int32_t pair_trials = 0;
   for (std::int32_t first = 1; first < candidate_count; ++first) {
