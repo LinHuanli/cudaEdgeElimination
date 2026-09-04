@@ -31,6 +31,16 @@ void PrintHelp() {
             << "    [--ht-target-workers 1..32]（共享同一张 GPU）\n"
             << "    [--max-paths 3..6] [--max-local-nodes 2..32]\n"
             << "    [--enable-geometry 0|1] [--enable-jv 0|1] [--enable-ht 0|1]\n"
+            << "  fgpu-elim resident-local --instance FILE --input-edges FILE [--tour FILE]\n"
+            << "    --device N [--max-hs-epochs N] [--max-jv-rounds N]\n"
+            << "    [--enable-quick-hs 0|1] [--enable-jv 0|1]\n"
+            << "    --certificate FILE --output-edges FILE --fixed FILE --nonpairs FILE\n"
+            << "    --manifest FILE\n"
+            << "  fgpu-elim resident --instance FILE [--input-edges FILE] --tour FILE\n"
+            << "    --device N [--potential-candidates 2..32] [--pdlp-iterations N]\n"
+            << "    [--max-pdlp-epochs N] [--max-hs-epochs N] [--max-jv-rounds N]\n"
+            << "    [--enable-geometry 0|1] [--enable-pdlp 0|1]\n"
+            << "    [--enable-quick-hs 0|1] [--enable-jv 0|1]，输出参数同上\n"
             << "  fgpu-elim verify --instance FILE [--input-edges FILE] --certificate FILE\n"
             << "    --output-edges FILE [--fixed FILE --nonpairs FILE]\n"
             << "    [--tour FILE --tour-role incumbent|known-optimum --expected-cost N]\n\n"
@@ -264,10 +274,93 @@ void RunCommand(const Arguments& arguments) {
             << " final_hash=" << cudaee::HexHash(report.final_hash)
             << " geometry_backend=" << report.geometry.backend
             << " geometry_device=" << report.geometry.selected_device
+            << " geometry_proposed=" << report.geometry.proposed
+            << " geometry_rejected=" << report.geometry.rejected
             << " geometry_kernel_ms=" << std::fixed << std::setprecision(3)
             << report.geometry.kernel_ms << " geometry_verify_ms=" << report.geometry.verify_ms
             << " certificate_bytes=" << report.certificate_bytes << " total_ms=" << report.total_ms
             << '\n';
+}
+
+void ResidentLocalCommand(const Arguments& arguments) {
+  ValidateKeys(arguments,
+               {"instance", "input-edges", "tour", "tour-role", "expected-cost", "device", "gpus",
+                "max-hs-epochs", "max-jv-rounds", "enable-quick-hs", "enable-jv", "output-edges",
+                "fixed", "nonpairs", "certificate", "manifest"});
+  cudaee::FgpuResidentConfig config;
+  config.device = ParseDevice(arguments);
+  config.max_hs_epochs = OptionalInteger<std::uint32_t>(arguments, "max-hs-epochs", 100U);
+  config.max_jv_rounds = OptionalInteger<std::uint32_t>(arguments, "max-jv-rounds", 100U);
+  config.enable_quick_hs = OptionalBoolean(arguments, "enable-quick-hs", true);
+  config.enable_jv = OptionalBoolean(arguments, "enable-jv", true);
+  const cudaee::FgpuResidentRunReport report =
+      cudaee::RunFgpuResidentLocal(ParseInput(arguments), ParseRunOutputs(arguments), config);
+  std::cout << "status=OK mode=resident-local initial_edges=" << report.initial_edges
+            << " jv_deleted=" << report.jv_committed
+            << " quick_hs_deleted=" << report.quick_hs_committed
+            << " final_edges=" << report.final_edges << " converged=" << (report.converged ? 1 : 0)
+            << " final_hash=" << cudaee::HexHash(report.final_hash)
+            << " selected_device=" << report.selected_device
+            << " resident_bytes=" << report.resident_bytes << " upload_ms=" << std::fixed
+            << std::setprecision(3) << report.upload_ms << " gpu_kernel_ms=" << report.gpu_kernel_ms
+            << " gpu_download_ms=" << report.gpu_download_ms
+            << " gpu_solve_wall_ms=" << report.gpu_solve_wall_ms
+            << " cpu_audit_ms=" << report.cpu_audit_ms << " output_ms=" << report.output_ms
+            << " trusted_total_ms=" << report.trusted_total_ms
+            << " certificate_bytes=" << report.certificate_bytes << '\n';
+}
+
+void ResidentCommand(const Arguments& arguments) {
+  ValidateKeys(arguments, {"instance",
+                           "input-edges",
+                           "tour",
+                           "tour-role",
+                           "expected-cost",
+                           "device",
+                           "gpus",
+                           "potential-candidates",
+                           "pdlp-iterations",
+                           "max-pdlp-epochs",
+                           "max-hs-epochs",
+                           "max-jv-rounds",
+                           "enable-geometry",
+                           "enable-pdlp",
+                           "enable-quick-hs",
+                           "enable-jv",
+                           "output-edges",
+                           "fixed",
+                           "nonpairs",
+                           "certificate",
+                           "manifest"});
+  cudaee::FgpuResidentConfig config;
+  config.device = ParseDevice(arguments);
+  config.potential_candidates =
+      OptionalInteger<std::uint32_t>(arguments, "potential-candidates", 32U);
+  config.pdlp_iterations = OptionalInteger<std::uint32_t>(arguments, "pdlp-iterations", 5000U);
+  config.max_pdlp_epochs = OptionalInteger<std::uint32_t>(arguments, "max-pdlp-epochs", 2U);
+  config.max_hs_epochs = OptionalInteger<std::uint32_t>(arguments, "max-hs-epochs", 100U);
+  config.max_jv_rounds = OptionalInteger<std::uint32_t>(arguments, "max-jv-rounds", 100U);
+  config.enable_geometry = OptionalBoolean(arguments, "enable-geometry", true);
+  config.enable_pdlp = OptionalBoolean(arguments, "enable-pdlp", true);
+  config.enable_quick_hs = OptionalBoolean(arguments, "enable-quick-hs", true);
+  config.enable_jv = OptionalBoolean(arguments, "enable-jv", true);
+  const cudaee::FgpuResidentRunReport report =
+      cudaee::RunFgpuResidentElimination(ParseInput(arguments), ParseRunOutputs(arguments), config);
+  std::cout << "status=OK mode=resident initial_edges=" << report.initial_edges
+            << " geometry_deleted=" << report.geometry_committed
+            << " lp_deleted=" << report.lp_committed << " pdlp_epochs=" << report.pdlp_epochs
+            << " jv_deleted=" << report.jv_committed
+            << " quick_hs_deleted=" << report.quick_hs_committed
+            << " final_edges=" << report.final_edges << " converged=" << (report.converged ? 1 : 0)
+            << " final_hash=" << cudaee::HexHash(report.final_hash)
+            << " selected_device=" << report.selected_device
+            << " resident_bytes=" << report.resident_bytes << " upload_ms=" << std::fixed
+            << std::setprecision(3) << report.upload_ms << " gpu_kernel_ms=" << report.gpu_kernel_ms
+            << " gpu_download_ms=" << report.gpu_download_ms
+            << " gpu_solve_wall_ms=" << report.gpu_solve_wall_ms
+            << " cpu_audit_ms=" << report.cpu_audit_ms << " output_ms=" << report.output_ms
+            << " trusted_total_ms=" << report.trusted_total_ms
+            << " certificate_bytes=" << report.certificate_bytes << '\n';
 }
 
 void VerifyCommand(const Arguments& arguments) {
@@ -283,7 +376,7 @@ void VerifyCommand(const Arguments& arguments) {
   std::cout << "status=VERIFIED records=" << report.certificate.proof.size()
             << " geometry=" << report.geometry_committed << " jv=" << report.jv_committed
             << " lp=" << report.lp_committed << " ht=" << report.ht_committed
-            << " active_edges=" << report.final_edges
+            << " quick_hs=" << report.quick_hs_committed << " active_edges=" << report.final_edges
             << " certificate_bytes=" << report.certificate_bytes
             << " final_hash=" << cudaee::HexHash(report.final_hash) << '\n';
 }
@@ -300,6 +393,10 @@ int main(const int argc, char** argv) {
     const std::string command = argv[1];
     if (command == "run") {
       RunCommand(arguments);
+    } else if (command == "resident-local") {
+      ResidentLocalCommand(arguments);
+    } else if (command == "resident") {
+      ResidentCommand(arguments);
     } else if (command == "verify") {
       VerifyCommand(arguments);
     } else {

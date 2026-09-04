@@ -24,6 +24,8 @@ std::string ToString(const EliminationMethod method) {
     return "GEOM_MAIN";
   case EliminationMethod::kLpBox:
     return "LP_BOX";
+  case EliminationMethod::kGpuQuickHs:
+    return "GPU_QUICK_HS";
   }
   throw std::logic_error("未知消元方法");
 }

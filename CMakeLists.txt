@@ -45,6 +45,8 @@ set(CUDAEE_SOURCES
     src/cpu/path_system.cpp
     src/fgpu/geometry.cpp
     src/fgpu/pdlp.cpp
+    src/fgpu/quick_hs_verifier.cpp
+    src/fgpu/resident_pipeline.cpp
     src/fgpu/pipeline.cpp
     src/lp/lp_epoch.cpp
     src/lp/cuopt_sidecar.cpp)
@@ -65,6 +67,7 @@ if(CUDAEE_ENABLE_CUDA)
       src/cuda/jv_cuda.cu
       src/cuda/fgpu_geometry.cu
       src/cuda/fgpu_pdlp.cu
+      src/cuda/fgpu_resident.cu
       src/cuda/kopt_cost.cu
       src/cuda/path_compatibility.cu)
 else()
@@ -77,6 +80,7 @@ else()
       src/cuda/jv_cuda_stub.cpp
       src/cuda/fgpu_geometry_stub.cpp
       src/cuda/fgpu_pdlp_stub.cpp
+      src/cuda/fgpu_resident_stub.cpp
       src/cuda/kopt_cost_stub.cpp
       src/cuda/path_compatibility_stub.cpp)
 endif()

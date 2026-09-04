@@ -203,6 +203,108 @@ if(CUDAEE_ENABLE_CUDA)
     DEPENDS integration.fgpu_pdlp_run
     PASS_REGULAR_EXPRESSION "tampered FGPU fixed output rejected"
     LABELS "negative;fgpu;fixed;certificate;correctness")
+
+  set(FGPU_RESIDENT_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-resident")
+  set(FGPU_RESIDENT_TEST_EDGES "${FGPU_RESIDENT_TEST_DIR}/recursive-point.edg")
+  set(FGPU_RESIDENT_TEST_CERT "${FGPU_RESIDENT_TEST_DIR}/recursive-point.fgcert")
+  add_test(
+    NAME integration.fgpu_resident_run
+    COMMAND fgpu-elim resident
+      --instance "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+      --tour "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.opt.tour"
+      --tour-role known-optimum
+      --expected-cost 251
+      --device 0
+      --potential-candidates 6
+      --pdlp-iterations 2000
+      --max-pdlp-epochs 2
+      --max-hs-epochs 10
+      --max-jv-rounds 10
+      --enable-geometry 1
+      --enable-pdlp 1
+      --enable-quick-hs 1
+      --enable-jv 1
+      --output-edges "${FGPU_RESIDENT_TEST_EDGES}"
+      --fixed "${FGPU_RESIDENT_TEST_DIR}/recursive-point.fix"
+      --nonpairs "${FGPU_RESIDENT_TEST_DIR}/recursive-point.nonpairs"
+      --certificate "${FGPU_RESIDENT_TEST_CERT}"
+      --manifest "${FGPU_RESIDENT_TEST_DIR}/recursive-point.manifest")
+  set_tests_properties(integration.fgpu_resident_run PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "status=OK mode=resident.*geometry_deleted=[1-9].*lp_deleted=[1-9].*final_edges=8.*converged=1"
+    LABELS "integration;fgpu;resident;geometry;pdlp;gpu;correctness")
+
+  add_test(
+    NAME integration.fgpu_resident_verify
+    COMMAND fgpu-elim verify
+      --instance "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+      --tour "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.opt.tour"
+      --tour-role known-optimum
+      --expected-cost 251
+      --output-edges "${FGPU_RESIDENT_TEST_EDGES}"
+      --fixed "${FGPU_RESIDENT_TEST_DIR}/recursive-point.fix"
+      --nonpairs "${FGPU_RESIDENT_TEST_DIR}/recursive-point.nonpairs"
+      --certificate "${FGPU_RESIDENT_TEST_CERT}")
+  set_tests_properties(integration.fgpu_resident_verify PROPERTIES
+    DEPENDS integration.fgpu_resident_run
+    PASS_REGULAR_EXPRESSION "status=VERIFIED.*geometry=[1-9].*lp=[1-9].*active_edges=8"
+    LABELS "integration;fgpu;resident;certificate;gpu;correctness")
+
+  if(EXISTS "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.tsp")
+    set(FGPU_RESIDENT_HS_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-resident-hs")
+    set(FGPU_RESIDENT_HS_TEST_EDGES "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.edg")
+    set(FGPU_RESIDENT_HS_TEST_CERT "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.fgcert")
+    add_test(
+      NAME integration.fgpu_resident_quick_hs_run
+      COMMAND fgpu-elim resident-local
+        --instance "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.tsp"
+        --input-edges "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.edg"
+        --device 0
+        --max-hs-epochs 10
+        --max-jv-rounds 10
+        --enable-quick-hs 1
+        --enable-jv 1
+        --output-edges "${FGPU_RESIDENT_HS_TEST_EDGES}"
+        --fixed "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.fix"
+        --nonpairs "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.nonpairs"
+        --certificate "${FGPU_RESIDENT_HS_TEST_CERT}"
+        --manifest "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.manifest")
+    set_tests_properties(integration.fgpu_resident_quick_hs_run PROPERTIES
+      PASS_REGULAR_EXPRESSION
+        "status=OK mode=resident-local.*jv_deleted=[1-9].*quick_hs_deleted=[1-9].*final_edges=866.*converged=1"
+      LABELS "integration;fgpu;resident;quick-hs;gpu;correctness;strength")
+
+    add_test(
+      NAME integration.fgpu_resident_quick_hs_verify
+      COMMAND fgpu-elim verify
+        --instance "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.tsp"
+        --input-edges "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.edg"
+        --output-edges "${FGPU_RESIDENT_HS_TEST_EDGES}"
+        --fixed "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.fix"
+        --nonpairs "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.nonpairs"
+        --certificate "${FGPU_RESIDENT_HS_TEST_CERT}")
+    set_tests_properties(integration.fgpu_resident_quick_hs_verify PROPERTIES
+      DEPENDS integration.fgpu_resident_quick_hs_run
+      PASS_REGULAR_EXPRESSION "status=VERIFIED.*quick_hs=[1-9].*active_edges=866"
+      LABELS "integration;fgpu;resident;quick-hs;certificate;gpu;correctness")
+
+    if(Python3_Interpreter_FOUND)
+      add_test(
+        NAME negative.fgpu_resident_quick_hs_tamper
+        COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/differential/tamper_fgpu_quick_hs_certificate.py"
+          --exe "$<TARGET_FILE:fgpu-elim>"
+          --instance "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.tsp"
+          --input-edges "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.edg"
+          --edges "${FGPU_RESIDENT_HS_TEST_EDGES}"
+          --certificate "${FGPU_RESIDENT_HS_TEST_CERT}"
+          --output "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.tampered.fgcert")
+      set_tests_properties(negative.fgpu_resident_quick_hs_tamper PROPERTIES
+        DEPENDS integration.fgpu_resident_quick_hs_run
+        PASS_REGULAR_EXPRESSION "tampered FGPU Quick-HS certificate rejected"
+        LABELS "negative;fgpu;resident;quick-hs;certificate;correctness")
+    endif()
+  endif()
 endif()
 
 if(TARGET cudaee_kh_elim)

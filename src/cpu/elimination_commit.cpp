@@ -24,7 +24,8 @@ std::vector<Candidate> CommitVerifiedCandidates(GraphSnapshot* const graph,
     if (candidate.method != EliminationMethod::kJv &&
         candidate.method != EliminationMethod::kHamiltonTutte &&
         candidate.method != EliminationMethod::kGeometryMain &&
-        candidate.method != EliminationMethod::kLpBox) {
+        candidate.method != EliminationMethod::kLpBox &&
+        candidate.method != EliminationMethod::kGpuQuickHs) {
       throw std::runtime_error("epoch 候选方法不受支持");
     }
     if (!graph->edges[static_cast<std::size_t>(candidate.edge_id)].active) {

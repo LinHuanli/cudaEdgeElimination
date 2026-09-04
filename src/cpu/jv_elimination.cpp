@@ -1,4 +1,5 @@
 #include "../fgpu/lp_box_verifier.hpp"
+#include "../fgpu/quick_hs_verifier.hpp"
 #include "cuda_edge_elimination/elimination.hpp"
 #include "cuda_edge_elimination/fgpu.hpp"
 
@@ -292,6 +293,9 @@ EliminationMethod ParseEliminationMethod(const std::string_view method) {
   if (method == "LP_BOX") {
     return EliminationMethod::kLpBox;
   }
+  if (method == "GPU_QUICK_HS") {
+    return EliminationMethod::kGpuQuickHs;
+  }
   throw std::runtime_error("证明 record 的方法不受支持");
 }
 
@@ -315,6 +319,13 @@ void ValidateProofContainer(const EliminationResult& result) {
     if (record.method == EliminationMethod::kGeometryMain) {
       if (record.certificate_index != kNoEliminationCertificate || record.second_witness < 0) {
         throw std::runtime_error("GEOM_MAIN record 的第二见证或 sidecar 非法");
+      }
+      continue;
+    }
+    if (record.method == EliminationMethod::kGpuQuickHs) {
+      if (record.certificate_index != kNoEliminationCertificate || record.witness < 0 ||
+          record.second_witness < 0) {
+        throw std::runtime_error("GPU_QUICK_HS record 的 c,d 见证或 sidecar 非法");
       }
       continue;
     }
@@ -493,7 +504,8 @@ void WriteProof(const std::filesystem::path& path, const EliminationResult& resu
   const bool version3 =
       version4 ||
       std::any_of(result.proof.begin(), result.proof.end(), [](const ProofRecord& record) {
-        return record.method == EliminationMethod::kGeometryMain;
+        return record.method == EliminationMethod::kGeometryMain ||
+               record.method == EliminationMethod::kGpuQuickHs;
       });
   const bool version2 = version3 || !result.ht_proofs.empty();
   std::ofstream output(path, std::ios::binary);
@@ -886,6 +898,14 @@ EliminationResult ReplayProof(GraphSnapshot* const graph, const EliminationResul
       geometry_data = BuildGeometryVerificationData(working);
       geometry_data_ready = true;
     }
+    const bool needs_quick_hs =
+        std::any_of(records.begin(), records.end(), [](const ProofRecord* const record) {
+          return record->method == EliminationMethod::kGpuQuickHs;
+        });
+    std::optional<detail::QuickHsVerificationData> quick_hs_data;
+    if (needs_quick_hs) {
+      quick_hs_data.emplace(detail::BuildQuickHsVerificationData(working));
+    }
     for (const ProofRecord* const record : records) {
       if (record->method != EliminationMethod::kLpBox) {
         continue;
@@ -907,14 +927,14 @@ EliminationResult ReplayProof(GraphSnapshot* const graph, const EliminationResul
     std::vector<std::uint8_t> valid(records.size(), 0U);
     std::vector<std::string> reasons(records.size());
 #ifdef CUDAEE_HAS_OPENMP
-    // HT sidecar 的树规模可相差数个数量级；64 个 record 的粗粒度 chunk
-    // 在 pcb442 one-shot 重放中会留下明显的单线程长尾。HT epoch 改为逐份
-    // 动态领取；几何/LP/JV 的廉价 record 仍保留 64 条批量以减少调度开销。
+    // HT sidecar 与 Quick-HS 的邻域组合量可相差数个数量级；64 个 record
+    // 的粗粒度 chunk 会留下单线程长尾。二者逐份动态领取，其他廉价
+    // record 仍保留 64 条批量以减少调度开销。
     const bool needs_ht =
         std::any_of(records.begin(), records.end(), [](const ProofRecord* const record) {
           return record->method == EliminationMethod::kHamiltonTutte;
         });
-    const int verification_chunk_size = needs_ht ? 1 : 64;
+    const int verification_chunk_size = (needs_ht || needs_quick_hs) ? 1 : 64;
 #pragma omp parallel for schedule(dynamic, verification_chunk_size)
 #endif
     for (std::int64_t record_index = 0; record_index < static_cast<std::int64_t>(records.size());
@@ -936,6 +956,9 @@ EliminationResult ReplayProof(GraphSnapshot* const graph, const EliminationResul
               working, expected.lp_box_proofs[record.certificate_index],
               *lp_verification_cache[record.certificate_index], candidate, snapshot_hash,
               &reasons[index]);
+        } else if (record.method == EliminationMethod::kGpuQuickHs) {
+          accepted =
+              detail::VerifyQuickHsCandidate(working, *quick_hs_data, candidate, &reasons[index]);
         } else {
           reasons[index] = "证明方法不受支持";
         }
@@ -952,7 +975,8 @@ EliminationResult ReplayProof(GraphSnapshot* const graph, const EliminationResul
       const std::string prefix = method == EliminationMethod::kJv              ? "JV"
                                  : method == EliminationMethod::kHamiltonTutte ? "HT"
                                  : method == EliminationMethod::kGeometryMain  ? "GEOM_MAIN"
-                                                                               : "LP_BOX";
+                                 : method == EliminationMethod::kLpBox         ? "LP_BOX"
+                                                                               : "GPU_QUICK_HS";
       throw std::runtime_error(prefix + " 证明复核失败: " + reasons[index]);
     }
     std::vector<Candidate> committed =

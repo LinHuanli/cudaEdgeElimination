@@ -158,6 +158,7 @@ struct FgpuRunReport {
   std::size_t lp_committed{};
   std::size_t jv_committed{};
   std::size_t ht_committed{};
+  std::size_t quick_hs_committed{};
   std::size_t fixed_count{};
   std::size_t nonpair_count{};
   std::uint32_t pdlp_epochs{};
@@ -170,12 +171,62 @@ struct FgpuRunReport {
   EliminationResult certificate;
 };
 
+// 显式的单 GPU 常驻局部搜索。设备先独立跑到 fixed point，CPU 不向搜索
+// 回传逐边判断；随后在计时分栏中重放紧凑整数证书，满足正式删边安全边界。
+struct FgpuResidentConfig {
+  int device{0};
+  std::uint32_t max_hs_epochs{100U};
+  std::uint32_t max_jv_rounds{100U};
+  std::uint32_t potential_candidates{32U};
+  std::uint32_t pdlp_iterations{5000U};
+  std::uint32_t max_pdlp_epochs{2U};
+  bool enable_quick_hs{true};
+  bool enable_jv{true};
+  bool enable_geometry{true};
+  bool enable_pdlp{true};
+};
+
+struct FgpuResidentRunReport {
+  std::uint64_t initial_hash{};
+  std::uint64_t final_hash{};
+  std::size_t initial_edges{};
+  std::size_t final_edges{};
+  std::size_t jv_committed{};
+  std::size_t quick_hs_committed{};
+  std::size_t geometry_committed{};
+  std::size_t lp_committed{};
+  std::uint32_t hs_epochs{};
+  std::uint32_t jv_rounds{};
+  std::uint32_t pdlp_epochs{};
+  bool converged{false};
+  int selected_device{-1};
+  std::uint64_t resident_bytes{};
+  double upload_ms{};
+  double gpu_kernel_ms{};
+  double gpu_download_ms{};
+  // 从已解析图开始，到设备 fixed point 与最终 mask 回传；不含 CPU audit/文件写出。
+  double gpu_solve_wall_ms{};
+  double cpu_audit_ms{};
+  double output_ms{};
+  double trusted_total_ms{};
+  std::uintmax_t certificate_bytes{};
+  EliminationResult certificate;
+};
+
 [[nodiscard]] FgpuRunReport RunFgpuElimination(const FgpuInput& input,
                                                const FgpuOutputPaths& outputs,
                                                const FgpuConfig& config);
 
 [[nodiscard]] FgpuRunReport VerifyFgpuCertificate(const FgpuInput& input,
                                                   const FgpuOutputPaths& outputs);
+
+[[nodiscard]] FgpuResidentRunReport RunFgpuResidentLocal(const FgpuInput& input,
+                                                         const FgpuOutputPaths& outputs,
+                                                         const FgpuResidentConfig& config);
+
+[[nodiscard]] FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
+                                                               const FgpuOutputPaths& outputs,
+                                                               const FgpuResidentConfig& config);
 
 [[nodiscard]] std::string ToString(NumericMode mode);
 [[nodiscard]] std::string ToString(VerificationMode mode);

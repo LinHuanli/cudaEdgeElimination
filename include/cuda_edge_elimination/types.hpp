@@ -31,6 +31,8 @@ enum class EliminationMethod : std::uint8_t {
   kGeometryMain = 3,
   // 量化 Lagrangian box bound 证明强制目标边后下界超过 incumbent。
   kLpBox = 4,
+  // GPU-resident KH -q 浅层 Hamilton--Tutte；record 直接保存 c,d 紧凑见证。
+  kGpuQuickHs = 5,
 };
 
 constexpr std::uint32_t kNoEliminationCertificate = UINT32_MAX;
@@ -39,7 +41,7 @@ struct Candidate {
   std::int32_t edge_id{-1};
   std::int32_t witness{-1};
   EliminationMethod method{EliminationMethod::kJv};
-  // 几何 Main Edge 证明需要两个 strongly-potential 点；其他方法保持 -1。
+  // 几何 Main Edge 与 GPU Quick-HS 分别需要第二个 potential/d 点。
   std::int32_t second_witness{-1};
 };
 
@@ -53,7 +55,7 @@ struct ProofRecord {
   EliminationMethod method{EliminationMethod::kJv};
   // HT 记录指向 EliminationResult::ht_proofs；JV 不携带嵌套证书。
   std::uint32_t certificate_index{kNoEliminationCertificate};
-  // V3 几何记录的第二个 potential 点；旧格式和其他方法保持 -1。
+  // V3+ 几何记录的第二个 potential 点，或 Quick-HS 的 d 点。
   std::int32_t second_witness{-1};
 };
 

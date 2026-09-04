@@ -566,6 +566,9 @@ FgpuRunReport VerifyFgpuCertificate(const FgpuInput& input, const FgpuOutputPath
                     [](const ProofRecord& record) {
                       return record.method == EliminationMethod::kHamiltonTutte;
                     }));
+  report.quick_hs_committed = static_cast<std::size_t>(std::count_if(
+      report.certificate.proof.begin(), report.certificate.proof.end(),
+      [](const ProofRecord& record) { return record.method == EliminationMethod::kGpuQuickHs; }));
   report.termination = "verified";
   return report;
 }
