@@ -4,12 +4,17 @@
 #include "cuda_edge_elimination/lp_epoch.hpp"
 #include "cuda_edge_elimination/tour.hpp"
 
+#include "../../src/fgpu/main_edge_predicate.hpp"
+#include "../../src/fgpu/resident_backend.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -63,6 +68,214 @@ void TestDistances() {
   Check(cudaee::IntegerSqrtFloor(0) == 0, "isqrt(0)");
   Check(cudaee::IntegerSqrtFloor(15) == 3, "isqrt(15)");
   Check(cudaee::IntegerSqrtFloor(16) == 4, "isqrt(16)");
+}
+
+void TestMetricPathDistanceCache() {
+  constexpr std::int32_t dimension = 9;
+  std::vector<std::int32_t> degree(static_cast<std::size_t>(dimension), dimension - 1);
+  std::vector<std::int32_t> neighbors(
+      static_cast<std::size_t>(dimension) * static_cast<std::size_t>(dimension));
+  std::vector<std::int64_t> distance(neighbors.size());
+  std::vector<std::uint8_t> active(neighbors.size(), 1U);
+  for (std::int32_t node = 0; node < dimension; ++node) {
+    for (std::int32_t slot = 0; slot < dimension; ++slot) {
+      neighbors[static_cast<std::size_t>(node) * dimension + slot] = slot;
+    }
+    active[static_cast<std::size_t>(node) * dimension + node] = 0U;
+  }
+  cudaee::detail::quick_hs::GraphView graph{
+      .dimension = dimension,
+      .degree = degree.data(),
+      .neighbors = neighbors.data(),
+      .distance = distance.data(),
+      .active = active.data(),
+  };
+
+  // 用非度量的确定性权重也能覆盖所有严格比较边界；缓存实现必须逐 bit
+  // 等价于通用 path-ordering oracle，而不能依赖欧氏三角不等式。
+  for (std::int32_t sample = 0; sample < 128; ++sample) {
+    for (std::int32_t first = 0; first < dimension; ++first) {
+      distance[static_cast<std::size_t>(first) * dimension + first] = 0;
+      for (std::int32_t second = first + 1; second < dimension; ++second) {
+        const std::int64_t weight =
+            1 + (sample * 131 + first * 47 + second * 89 + first * second * 17) % 997;
+        distance[static_cast<std::size_t>(first) * dimension + second] = weight;
+        distance[static_cast<std::size_t>(second) * dimension + first] = weight;
+      }
+    }
+    std::int32_t node[7]{};
+    for (std::int32_t index = 0; index < 7; ++index) {
+      node[index] = (index + sample) % dimension;
+    }
+    const cudaee::detail::quick_hs::SmallPath paths24[3] = {
+        {.size = 2, .node = {node[0], node[1]}},
+        {.size = 4, .node = {node[2], node[3], node[4], node[5]}},
+    };
+    Check(cudaee::detail::main_edge::Opt24(graph, node[0], node[1], node[2], node[3],
+                                           node[4], node[5]) ==
+              cudaee::detail::quick_hs::Opt(graph, paths24, 2),
+          "cached opt24 equals generic path oracle");
+
+    const cudaee::detail::quick_hs::SmallPath paths34[3] = {
+        {.size = 3, .node = {node[0], node[1], node[2]}},
+        {.size = 4, .node = {node[3], node[4], node[5], node[6]}},
+    };
+    Check(cudaee::detail::main_edge::Opt34(graph, node[0], node[1], node[2], node[3],
+                                           node[4], node[5], node[6]) ==
+              cudaee::detail::quick_hs::Opt(graph, paths34, 2),
+          "cached opt34 equals generic path oracle");
+
+    const cudaee::detail::quick_hs::SmallPath paths33[3] = {
+        {.size = 3, .node = {node[0], node[1], node[2]}},
+        {.size = 3, .node = {node[3], node[4], node[5]}},
+    };
+    Check(cudaee::detail::quick_hs::Opt33(graph, node[0], node[1], node[2],
+                                          node[3], node[4], node[5]) ==
+              cudaee::detail::quick_hs::Opt(graph, paths33, 2),
+          "fast opt33 equals generic path oracle");
+
+    // Point move 的 reply 允许通过端点与根路径相接。覆盖所有跨路径单点
+    // 重合形状，防止只对顶点不交路径成立的快速必要条件误删合法 reply。
+    for (std::int32_t root_position = 0; root_position < 3; ++root_position) {
+      for (std::int32_t point_position = 0; point_position < 3; ++point_position) {
+        std::int32_t overlapping[3] = {node[3], node[4], node[5]};
+        overlapping[point_position] = node[root_position];
+        const cudaee::detail::quick_hs::SmallPath overlap_paths[3] = {
+            {.size = 3, .node = {node[0], node[1], node[2]}},
+            {.size = 3,
+             .node = {overlapping[0], overlapping[1], overlapping[2]}},
+        };
+        Check(cudaee::detail::quick_hs::Opt33(
+                  graph, node[0], node[1], node[2], overlapping[0],
+                  overlapping[1], overlapping[2]) ==
+                  cudaee::detail::quick_hs::Opt(graph, overlap_paths, 2),
+              "fast opt33 overlap equals generic path oracle");
+      }
+    }
+  }
+}
+
+std::int32_t CompleteEdgeId(const std::int32_t dimension, std::int32_t first,
+                            std::int32_t second) {
+  if (first > second) {
+    std::swap(first, second);
+  }
+  return first * (2 * dimension - first - 1) / 2 + (second - first - 1);
+}
+
+void TestFixedAnchorNonpairTheorem() {
+  constexpr std::int32_t dimension = 7;
+  constexpr std::int32_t edge_count = dimension * (dimension - 1) / 2;
+  std::vector<std::int32_t> degree(static_cast<std::size_t>(dimension), dimension - 1);
+  std::vector<std::int32_t> neighbors(
+      static_cast<std::size_t>(dimension) * static_cast<std::size_t>(dimension), -1);
+  std::vector<std::uint8_t> active(neighbors.size(), 0U);
+  std::vector<std::int32_t> edge_u(static_cast<std::size_t>(edge_count));
+  std::vector<std::int32_t> edge_v(static_cast<std::size_t>(edge_count));
+  std::vector<std::uint8_t> fixed(static_cast<std::size_t>(edge_count));
+  std::vector<std::int64_t> x(static_cast<std::size_t>(dimension));
+  std::vector<std::int64_t> y(static_cast<std::size_t>(dimension));
+  for (std::int32_t center = 0; center < dimension; ++center) {
+    std::int32_t slot = 0;
+    for (std::int32_t node = 0; node < dimension; ++node) {
+      active[static_cast<std::size_t>(center) * dimension + node] =
+          center == node ? 0U : 1U;
+      if (center != node) {
+        neighbors[static_cast<std::size_t>(center) * dimension + slot++] = node;
+      }
+      if (center < node) {
+        const std::int32_t edge = CompleteEdgeId(dimension, center, node);
+        edge_u[static_cast<std::size_t>(edge)] = center;
+        edge_v[static_cast<std::size_t>(edge)] = node;
+      }
+    }
+  }
+  cudaee::detail::quick_hs::GraphView graph{
+      .dimension = dimension,
+      .degree = degree.data(),
+      .neighbors = neighbors.data(),
+      .distance = nullptr,
+      .active = active.data(),
+      .edge_u = edge_u.data(),
+      .edge_v = edge_v.data(),
+      .edge_active = nullptr,
+      .fixed_edge = fixed.data(),
+      .coordinate_x = x.data(),
+      .coordinate_y = y.data(),
+      .edge_count = edge_count,
+      .distance_type = 0U,
+      .complete_graph = true,
+  };
+
+  for (std::int32_t sample = 0; sample < 32; ++sample) {
+    for (std::int32_t node = 0; node < dimension; ++node) {
+      x[static_cast<std::size_t>(node)] =
+          (sample * 97 + node * 211 + node * node * 31) % 1009;
+      y[static_cast<std::size_t>(node)] =
+          (sample * 193 + node * 127 + node * node * 53) % 1013;
+    }
+    std::vector<std::int32_t> permutation(static_cast<std::size_t>(dimension - 1));
+    std::iota(permutation.begin(), permutation.end(), 1);
+    std::int64_t best_cost = std::numeric_limits<std::int64_t>::max();
+    std::vector<std::vector<std::int32_t>> best_tours;
+    do {
+      std::vector<std::int32_t> tour{0};
+      tour.insert(tour.end(), permutation.begin(), permutation.end());
+      std::int64_t cost = 0;
+      for (std::int32_t index = 0; index < dimension; ++index) {
+        cost += cudaee::detail::quick_hs::Distance(
+            graph, tour[static_cast<std::size_t>(index)],
+            tour[static_cast<std::size_t>((index + 1) % dimension)]);
+      }
+      if (cost < best_cost) {
+        best_cost = cost;
+        best_tours.clear();
+      }
+      if (cost == best_cost) {
+        best_tours.push_back(std::move(tour));
+      }
+    } while (std::next_permutation(permutation.begin(), permutation.end()));
+
+    std::fill(fixed.begin(), fixed.end(), 1U);
+    for (const std::vector<std::int32_t>& tour : best_tours) {
+      std::vector<std::uint8_t> in_tour(static_cast<std::size_t>(edge_count), 0U);
+      for (std::int32_t index = 0; index < dimension; ++index) {
+        in_tour[static_cast<std::size_t>(CompleteEdgeId(
+            dimension, tour[static_cast<std::size_t>(index)],
+            tour[static_cast<std::size_t>((index + 1) % dimension)]))] = 1U;
+      }
+      for (std::int32_t edge = 0; edge < edge_count; ++edge) {
+        fixed[static_cast<std::size_t>(edge)] &= in_tour[static_cast<std::size_t>(edge)];
+      }
+    }
+
+    for (const std::vector<std::int32_t>& tour : best_tours) {
+      for (std::int32_t index = 0; index < dimension; ++index) {
+        const std::int32_t center = tour[static_cast<std::size_t>(index)];
+        const std::int32_t first =
+            tour[static_cast<std::size_t>((index + dimension - 1) % dimension)];
+        const std::int32_t second =
+            tour[static_cast<std::size_t>((index + 1) % dimension)];
+        for (std::int32_t edge = 0; edge < edge_count; ++edge) {
+          if (fixed[static_cast<std::size_t>(edge)] == 0U) {
+            continue;
+          }
+          const std::int32_t p = edge_u[static_cast<std::size_t>(edge)];
+          const std::int32_t q = edge_v[static_cast<std::size_t>(edge)];
+          if (p == center || p == first || p == second || q == center ||
+              q == first || q == second) {
+            continue;
+          }
+          Check(cudaee::detail::quick_hs::Opt23(
+                    graph, p, q, first, center, second,
+                    cudaee::detail::quick_hs::Distance(graph, p, q),
+                    cudaee::detail::quick_hs::Distance(graph, first, center),
+                    cudaee::detail::quick_hs::Distance(graph, center, second)),
+                "disjoint fixed edge cannot exclude an optimal-tour pair");
+        }
+      }
+    }
+  }
 }
 
 void TestLpEpochAndExactBound() {
@@ -331,16 +544,31 @@ void TestJvCudaResidentCache() {
   cudaee::ClearJvCudaCache();
 }
 
+void TestQuickHsWarpPathDifferential() {
+  std::string reason;
+  if (!cudaee::detail::ResidentEliminationCudaAvailable(&reason)) {
+    return;
+  }
+  const cudaee::detail::QuickHsPathDifferentialResult result =
+      cudaee::detail::RunQuickHsPathDifferentialCuda(-1, 64U);
+  Check(result.cases == 64U, "Quick-HS warp path differential case count");
+  Check(result.mismatches == 0U,
+        "Quick-HS warp-DP exactly matches host permutation oracle");
+}
+
 } // namespace
 
 int main() {
   TestDistances();
+  TestMetricPathDistanceCache();
+  TestFixedAnchorNonpairTheorem();
   TestLpEpochAndExactBound();
   TestLpStableIdentityAndWarmProjection();
   TestGraphCsrAndVerifierSafety();
   TestProtectedTour();
   TestCompleteGraphLoader();
   TestJvCudaResidentCache();
+  TestQuickHsWarpPathDifferential();
   std::cout << "unit tests passed\n";
   return 0;
 }

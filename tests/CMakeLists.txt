@@ -224,6 +224,7 @@ if(CUDAEE_ENABLE_CUDA)
       --enable-pdlp 1
       --enable-quick-hs 1
       --enable-jv 1
+      --cpu-audit 1
       --output-edges "${FGPU_RESIDENT_TEST_EDGES}"
       --fixed "${FGPU_RESIDENT_TEST_DIR}/recursive-point.fix"
       --nonpairs "${FGPU_RESIDENT_TEST_DIR}/recursive-point.nonpairs"
@@ -278,6 +279,71 @@ if(CUDAEE_ENABLE_CUDA)
       "status=OK mode=resident.*final_edges=8.*converged=1.*cpu_audited=0.*certificate_bytes=0"
     LABELS "integration;fgpu;resident;raw;gpu;performance")
 
+  if(Python3_Interpreter_FOUND)
+    add_test(
+      NAME exhaustive.fgpu_solve_gpu_safe
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/exhaustive/check_fgpu_solve.py"
+        "$<TARGET_FILE:fgpu-elim>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.edg"
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.opt.tour"
+        "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-solve-exhaustive")
+    set_tests_properties(exhaustive.fgpu_solve_gpu_safe PROPERTIES
+      PASS_REGULAR_EXPRESSION "FGPU solve exhaustive check passed"
+      LABELS "exhaustive;integration;fgpu;gpu;gpu-replay;correctness;solve")
+
+    add_test(
+      NAME exhaustive.fgpu_solve_e2_overlap
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/exhaustive/check_fgpu_solve.py"
+        "$<TARGET_FILE:fgpu-elim>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/e2-overlap-regression.tsp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/e2-overlap-regression.edg"
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/e2-overlap-regression.opt.tour"
+        "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-solve-e2-overlap"
+        "ht_extra_edge_deleted")
+    set_tests_properties(exhaustive.fgpu_solve_e2_overlap PROPERTIES
+      PASS_REGULAR_EXPRESSION "FGPU solve exhaustive check passed"
+      LABELS "exhaustive;integration;fgpu;gpu;gpu-replay;correctness;solve;e2")
+
+    add_test(
+      NAME exhaustive.fgpu_e2_distinct
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/exhaustive/check_fgpu_e2.py"
+        "$<TARGET_FILE:fgpu-elim>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/e2-distinct-regression.tsp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/e2-distinct-regression.opt.tour"
+        "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-e2-distinct")
+    set_tests_properties(exhaustive.fgpu_e2_distinct PROPERTIES
+      PASS_REGULAR_EXPRESSION "FGPU e2 exhaustive check passed"
+      LABELS "exhaustive;integration;fgpu;gpu;correctness;e2;path-system")
+
+    add_test(
+      NAME exhaustive.fgpu_oneshot_unprotected
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/exhaustive/check_fgpu_oneshot.py"
+        "$<TARGET_FILE:fgpu-elim>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.opt.tour"
+        "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-oneshot-exhaustive")
+    set_tests_properties(exhaustive.fgpu_oneshot_unprotected PROPERTIES
+      PASS_REGULAR_EXPRESSION "FGPU one-shot exhaustive optimal-edge check passed"
+      LABELS "exhaustive;integration;fgpu;resident;gpu;correctness;oneshot")
+
+    add_test(
+      NAME exhaustive.fgpu_nonpair_persistence
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/exhaustive/check_fgpu_nonpair_persistence.py"
+        "$<TARGET_FILE:fgpu-elim>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.opt.tour"
+        "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-nonpair-persistence")
+    set_tests_properties(exhaustive.fgpu_nonpair_persistence PROPERTIES
+      PASS_REGULAR_EXPRESSION "FGPU non-pair persistence check passed"
+      LABELS "exhaustive;integration;fgpu;resident;gpu;correctness;lp;nonpair")
+  endif()
+
   if(EXISTS "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.tsp")
     set(FGPU_RESIDENT_HS_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-resident-hs")
     set(FGPU_RESIDENT_HS_TEST_EDGES "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.edg")
@@ -292,6 +358,7 @@ if(CUDAEE_ENABLE_CUDA)
         --max-jv-rounds 10
         --enable-quick-hs 1
         --enable-jv 1
+        --cpu-audit 1
         --output-edges "${FGPU_RESIDENT_HS_TEST_EDGES}"
         --fixed "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.fix"
         --nonpairs "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.nonpairs"
@@ -299,7 +366,7 @@ if(CUDAEE_ENABLE_CUDA)
         --manifest "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.manifest")
     set_tests_properties(integration.fgpu_resident_quick_hs_run PROPERTIES
       PASS_REGULAR_EXPRESSION
-        "status=OK mode=resident-local.*jv_deleted=[1-9].*quick_hs_deleted=[1-9].*final_edges=866.*converged=1"
+        "status=OK mode=resident-local.*jv_deleted=[1-9].*quick_hs_deleted=[1-9].*final_edges=860.*converged=1.*cpu_audited=1"
       LABELS "integration;fgpu;resident;quick-hs;gpu;correctness;strength")
 
     add_test(
@@ -313,10 +380,23 @@ if(CUDAEE_ENABLE_CUDA)
         --certificate "${FGPU_RESIDENT_HS_TEST_CERT}")
     set_tests_properties(integration.fgpu_resident_quick_hs_verify PROPERTIES
       DEPENDS integration.fgpu_resident_quick_hs_run
-      PASS_REGULAR_EXPRESSION "status=VERIFIED.*quick_hs=[1-9].*active_edges=866"
+      PASS_REGULAR_EXPRESSION "status=VERIFIED.*quick_hs=[1-9].*active_edges=860"
       LABELS "integration;fgpu;resident;quick-hs;certificate;gpu;correctness")
 
     if(Python3_Interpreter_FOUND)
+      add_test(
+        NAME integration.fgpu_direct_fix_pr299
+        COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/exhaustive/check_fgpu_direct_fix.py"
+          "$<TARGET_FILE:fgpu-elim>"
+          "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.tsp"
+          "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.edg"
+          "${CMAKE_CURRENT_SOURCE_DIR}/data/pr299.opt.tour"
+          "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-direct-fix-pr299")
+      set_tests_properties(integration.fgpu_direct_fix_pr299 PROPERTIES
+        PASS_REGULAR_EXPRESSION "FGPU Direct Fix check passed"
+        LABELS "integration;fgpu;gpu;gpu-replay;correctness;fixing;strength")
+
       add_test(
         NAME negative.fgpu_resident_quick_hs_tamper
         COMMAND "${Python3_EXECUTABLE}"

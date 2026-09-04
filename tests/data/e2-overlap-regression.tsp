@@ -1,0 +1,14 @@
+NAME : e2-overlap-regression
+TYPE : TSP
+DIMENSION : 8
+EDGE_WEIGHT_TYPE : EUC_2D
+NODE_COORD_SECTION
+1 70 -11
+2 -59 68
+3 51 0
+4 41 -54
+5 -22 -70
+6 -4 -27
+7 -48 -66
+8 64 -23
+EOF

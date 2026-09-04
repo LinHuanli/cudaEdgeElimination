@@ -1,0 +1,16 @@
+NAME : e2-distinct-regression-optimum
+TYPE : TOUR
+DIMENSION : 10
+TOUR_SECTION
+1
+6
+8
+3
+10
+5
+4
+9
+2
+7
+-1
+EOF
