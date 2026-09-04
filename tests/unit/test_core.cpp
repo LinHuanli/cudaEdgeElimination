@@ -73,8 +73,8 @@ void TestDistances() {
 void TestMetricPathDistanceCache() {
   constexpr std::int32_t dimension = 9;
   std::vector<std::int32_t> degree(static_cast<std::size_t>(dimension), dimension - 1);
-  std::vector<std::int32_t> neighbors(
-      static_cast<std::size_t>(dimension) * static_cast<std::size_t>(dimension));
+  std::vector<std::int32_t> neighbors(static_cast<std::size_t>(dimension) *
+                                      static_cast<std::size_t>(dimension));
   std::vector<std::int64_t> distance(neighbors.size());
   std::vector<std::uint8_t> active(neighbors.size(), 1U);
   for (std::int32_t node = 0; node < dimension; ++node) {
@@ -111,8 +111,8 @@ void TestMetricPathDistanceCache() {
         {.size = 2, .node = {node[0], node[1]}},
         {.size = 4, .node = {node[2], node[3], node[4], node[5]}},
     };
-    Check(cudaee::detail::main_edge::Opt24(graph, node[0], node[1], node[2], node[3],
-                                           node[4], node[5]) ==
+    Check(cudaee::detail::main_edge::Opt24(graph, node[0], node[1], node[2], node[3], node[4],
+                                           node[5]) ==
               cudaee::detail::quick_hs::Opt(graph, paths24, 2),
           "cached opt24 equals generic path oracle");
 
@@ -120,8 +120,8 @@ void TestMetricPathDistanceCache() {
         {.size = 3, .node = {node[0], node[1], node[2]}},
         {.size = 4, .node = {node[3], node[4], node[5], node[6]}},
     };
-    Check(cudaee::detail::main_edge::Opt34(graph, node[0], node[1], node[2], node[3],
-                                           node[4], node[5], node[6]) ==
+    Check(cudaee::detail::main_edge::Opt34(graph, node[0], node[1], node[2], node[3], node[4],
+                                           node[5], node[6]) ==
               cudaee::detail::quick_hs::Opt(graph, paths34, 2),
           "cached opt34 equals generic path oracle");
 
@@ -129,8 +129,8 @@ void TestMetricPathDistanceCache() {
         {.size = 3, .node = {node[0], node[1], node[2]}},
         {.size = 3, .node = {node[3], node[4], node[5]}},
     };
-    Check(cudaee::detail::quick_hs::Opt33(graph, node[0], node[1], node[2],
-                                          node[3], node[4], node[5]) ==
+    Check(cudaee::detail::quick_hs::Opt33(graph, node[0], node[1], node[2], node[3], node[4],
+                                          node[5]) ==
               cudaee::detail::quick_hs::Opt(graph, paths33, 2),
           "fast opt33 equals generic path oracle");
 
@@ -142,12 +142,10 @@ void TestMetricPathDistanceCache() {
         overlapping[point_position] = node[root_position];
         const cudaee::detail::quick_hs::SmallPath overlap_paths[3] = {
             {.size = 3, .node = {node[0], node[1], node[2]}},
-            {.size = 3,
-             .node = {overlapping[0], overlapping[1], overlapping[2]}},
+            {.size = 3, .node = {overlapping[0], overlapping[1], overlapping[2]}},
         };
-        Check(cudaee::detail::quick_hs::Opt33(
-                  graph, node[0], node[1], node[2], overlapping[0],
-                  overlapping[1], overlapping[2]) ==
+        Check(cudaee::detail::quick_hs::Opt33(graph, node[0], node[1], node[2], overlapping[0],
+                                              overlapping[1], overlapping[2]) ==
                   cudaee::detail::quick_hs::Opt(graph, overlap_paths, 2),
               "fast opt33 overlap equals generic path oracle");
       }
@@ -155,8 +153,7 @@ void TestMetricPathDistanceCache() {
   }
 }
 
-std::int32_t CompleteEdgeId(const std::int32_t dimension, std::int32_t first,
-                            std::int32_t second) {
+std::int32_t CompleteEdgeId(const std::int32_t dimension, std::int32_t first, std::int32_t second) {
   if (first > second) {
     std::swap(first, second);
   }
@@ -178,8 +175,7 @@ void TestFixedAnchorNonpairTheorem() {
   for (std::int32_t center = 0; center < dimension; ++center) {
     std::int32_t slot = 0;
     for (std::int32_t node = 0; node < dimension; ++node) {
-      active[static_cast<std::size_t>(center) * dimension + node] =
-          center == node ? 0U : 1U;
+      active[static_cast<std::size_t>(center) * dimension + node] = center == node ? 0U : 1U;
       if (center != node) {
         neighbors[static_cast<std::size_t>(center) * dimension + slot++] = node;
       }
@@ -209,10 +205,8 @@ void TestFixedAnchorNonpairTheorem() {
 
   for (std::int32_t sample = 0; sample < 32; ++sample) {
     for (std::int32_t node = 0; node < dimension; ++node) {
-      x[static_cast<std::size_t>(node)] =
-          (sample * 97 + node * 211 + node * node * 31) % 1009;
-      y[static_cast<std::size_t>(node)] =
-          (sample * 193 + node * 127 + node * node * 53) % 1013;
+      x[static_cast<std::size_t>(node)] = (sample * 97 + node * 211 + node * node * 31) % 1009;
+      y[static_cast<std::size_t>(node)] = (sample * 193 + node * 127 + node * node * 53) % 1013;
     }
     std::vector<std::int32_t> permutation(static_cast<std::size_t>(dimension - 1));
     std::iota(permutation.begin(), permutation.end(), 1);
@@ -240,9 +234,9 @@ void TestFixedAnchorNonpairTheorem() {
     for (const std::vector<std::int32_t>& tour : best_tours) {
       std::vector<std::uint8_t> in_tour(static_cast<std::size_t>(edge_count), 0U);
       for (std::int32_t index = 0; index < dimension; ++index) {
-        in_tour[static_cast<std::size_t>(CompleteEdgeId(
-            dimension, tour[static_cast<std::size_t>(index)],
-            tour[static_cast<std::size_t>((index + 1) % dimension)]))] = 1U;
+        in_tour[static_cast<std::size_t>(
+            CompleteEdgeId(dimension, tour[static_cast<std::size_t>(index)],
+                           tour[static_cast<std::size_t>((index + 1) % dimension)]))] = 1U;
       }
       for (std::int32_t edge = 0; edge < edge_count; ++edge) {
         fixed[static_cast<std::size_t>(edge)] &= in_tour[static_cast<std::size_t>(edge)];
@@ -254,16 +248,15 @@ void TestFixedAnchorNonpairTheorem() {
         const std::int32_t center = tour[static_cast<std::size_t>(index)];
         const std::int32_t first =
             tour[static_cast<std::size_t>((index + dimension - 1) % dimension)];
-        const std::int32_t second =
-            tour[static_cast<std::size_t>((index + 1) % dimension)];
+        const std::int32_t second = tour[static_cast<std::size_t>((index + 1) % dimension)];
         for (std::int32_t edge = 0; edge < edge_count; ++edge) {
           if (fixed[static_cast<std::size_t>(edge)] == 0U) {
             continue;
           }
           const std::int32_t p = edge_u[static_cast<std::size_t>(edge)];
           const std::int32_t q = edge_v[static_cast<std::size_t>(edge)];
-          if (p == center || p == first || p == second || q == center ||
-              q == first || q == second) {
+          if (p == center || p == first || p == second || q == center || q == first ||
+              q == second) {
             continue;
           }
           Check(cudaee::detail::quick_hs::Opt23(
@@ -552,8 +545,7 @@ void TestQuickHsWarpPathDifferential() {
   const cudaee::detail::QuickHsPathDifferentialResult result =
       cudaee::detail::RunQuickHsPathDifferentialCuda(-1, 64U);
   Check(result.cases == 64U, "Quick-HS warp path differential case count");
-  Check(result.mismatches == 0U,
-        "Quick-HS warp-DP exactly matches host permutation oracle");
+  Check(result.mismatches == 0U, "Quick-HS warp-DP exactly matches host permutation oracle");
 }
 
 } // namespace

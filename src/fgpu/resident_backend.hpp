@@ -142,7 +142,7 @@ RunResidentEliminationCuda(const GraphSnapshot& graph,
 
 [[nodiscard]] bool ResidentEliminationCudaAvailable(std::string* reason);
 
-[[nodiscard]] QuickHsPathDifferentialResult
-RunQuickHsPathDifferentialCuda(int device, std::uint32_t samples);
+[[nodiscard]] QuickHsPathDifferentialResult RunQuickHsPathDifferentialCuda(int device,
+                                                                           std::uint32_t samples);
 
 } // namespace cudaee::detail

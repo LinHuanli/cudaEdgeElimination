@@ -16,8 +16,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot&, const std::ve
   throw std::runtime_error("当前构建未启用 resident GPU CUDA 后端");
 }
 
-QuickHsPathDifferentialResult RunQuickHsPathDifferentialCuda(const int,
-                                                             const std::uint32_t) {
+QuickHsPathDifferentialResult RunQuickHsPathDifferentialCuda(const int, const std::uint32_t) {
   throw std::runtime_error("当前构建未启用 resident GPU CUDA 后端");
 }
 

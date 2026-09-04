@@ -66,15 +66,12 @@ struct SmallPath {
 // 顶点仍跨路径重复，继续求解会把同一 TSP 顶点当成多个位置并产生假阴性。
 // 返回 true 时调用者应保守地保持 reply 开放，而不是据此授权删除。
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
-HasAmbiguousPathOverlap(const SmallPath* const paths,
-                        const std::int32_t path_count) {
+HasAmbiguousPathOverlap(const SmallPath* const paths, const std::int32_t path_count) {
   for (std::int32_t first_path = 0; first_path < path_count; ++first_path) {
     for (std::int32_t first = 0; first < paths[first_path].size; ++first) {
-      for (std::int32_t second_path = first_path; second_path < path_count;
-           ++second_path) {
+      for (std::int32_t second_path = first_path; second_path < path_count; ++second_path) {
         const std::int32_t begin = second_path == first_path ? first + 1 : 0;
-        for (std::int32_t second = begin; second < paths[second_path].size;
-             ++second) {
+        for (std::int32_t second = begin; second < paths[second_path].size; ++second) {
           if (paths[first_path].node[first] == paths[second_path].node[second]) {
             return true;
           }
@@ -85,8 +82,8 @@ HasAmbiguousPathOverlap(const SmallPath* const paths,
   return false;
 }
 
-CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
-AllNodesDistinct(const std::int32_t* const nodes, const std::int32_t count) {
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool AllNodesDistinct(const std::int32_t* const nodes,
+                                                                const std::int32_t count) {
   for (std::int32_t first = 0; first < count; ++first) {
     for (std::int32_t second = first + 1; second < count; ++second) {
       if (nodes[first] == nodes[second]) {
@@ -97,8 +94,7 @@ AllNodesDistinct(const std::int32_t* const nodes, const std::int32_t count) {
   return true;
 }
 
-CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::uint64_t
-IntegerSqrtFloor(std::uint64_t value) {
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::uint64_t IntegerSqrtFloor(std::uint64_t value) {
 #if defined(__CUDA_ARCH__)
   // GPU 热路径先使用硬件 FP64 sqrt 得到候选，再用无溢出的整数除法
   // 精确校正。最终返回值与逐 bit 算法完全相同，但避免每次距离计算
@@ -141,10 +137,8 @@ Distance(const GraphView& graph, const std::int32_t a, const std::int32_t b) {
   }
   const std::int64_t dx = graph.coordinate_x[a] - graph.coordinate_x[b];
   const std::int64_t dy = graph.coordinate_y[a] - graph.coordinate_y[b];
-  const std::uint64_t absolute_x =
-      static_cast<std::uint64_t>(dx < 0 ? -dx : dx);
-  const std::uint64_t absolute_y =
-      static_cast<std::uint64_t>(dy < 0 ? -dy : dy);
+  const std::uint64_t absolute_x = static_cast<std::uint64_t>(dx < 0 ? -dx : dx);
+  const std::uint64_t absolute_y = static_cast<std::uint64_t>(dy < 0 ? -dy : dy);
   const std::uint64_t squared = absolute_x * absolute_x + absolute_y * absolute_y;
   const std::uint64_t root = IntegerSqrtFloor(squared);
   std::uint64_t rounded = root;
@@ -157,13 +151,13 @@ Distance(const GraphView& graph, const std::int32_t a, const std::int32_t b) {
   return static_cast<std::int64_t>(rounded);
 }
 
-CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::int64_t
-NeighborBegin(const GraphView& graph, const std::int32_t node) {
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::int64_t NeighborBegin(const GraphView& graph,
+                                                                     const std::int32_t node) {
   return graph.row_offsets == nullptr ? 0 : graph.row_offsets[node];
 }
 
-CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::int64_t
-NeighborEnd(const GraphView& graph, const std::int32_t node) {
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::int64_t NeighborEnd(const GraphView& graph,
+                                                                   const std::int32_t node) {
   return graph.row_offsets == nullptr ? graph.degree[node] : graph.row_offsets[node + 1];
 }
 
@@ -174,8 +168,8 @@ Neighbor(const GraphView& graph, const std::int32_t node, const std::int64_t slo
              : graph.neighbors[slot];
 }
 
-CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
-NeighborActive(const GraphView& graph, const std::int64_t slot) {
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool NeighborActive(const GraphView& graph,
+                                                              const std::int64_t slot) {
   return graph.row_offsets == nullptr || graph.edge_active[graph.neighbor_edge_ids[slot]] != 0U;
 }
 
@@ -201,9 +195,10 @@ PairForbiddenBySlots(const GraphView& graph, const std::int32_t center,
   return graph.nonpair_mask[graph.pair_offsets[center] + local] != 0U;
 }
 
-CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
-PairForbidden(const GraphView& graph, const std::int32_t center,
-              const std::int32_t first_neighbor, const std::int32_t second_neighbor) {
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool PairForbidden(const GraphView& graph,
+                                                             const std::int32_t center,
+                                                             const std::int32_t first_neighbor,
+                                                             const std::int32_t second_neighbor) {
   if (graph.pair_offsets == nullptr || graph.nonpair_mask == nullptr ||
       first_neighbor == second_neighbor) {
     return false;
@@ -234,8 +229,7 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Active(const GraphView& graph, co
   const std::int32_t u = a < b ? a : b;
   const std::int32_t v = a < b ? b : a;
   if (graph.complete_graph) {
-    const std::int64_t prefix =
-        static_cast<std::int64_t>(u) * (2LL * graph.dimension - u - 1) / 2;
+    const std::int64_t prefix = static_cast<std::int64_t>(u) * (2LL * graph.dimension - u - 1) / 2;
     const std::int64_t edge = prefix + (v - u - 1);
     return edge >= 0 && edge < graph.edge_count && graph.edge_active[edge] != 0U;
   }
@@ -266,13 +260,11 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Fixed(const GraphView& graph, con
     std::int64_t low = 0;
     std::int64_t high = graph.edge_count;
     if (graph.complete_graph) {
-      low = static_cast<std::int64_t>(u) * (2LL * graph.dimension - u - 1) / 2 +
-            (v - u - 1);
+      low = static_cast<std::int64_t>(u) * (2LL * graph.dimension - u - 1) / 2 + (v - u - 1);
     } else {
       while (low < high) {
         const std::int64_t middle = low + (high - low) / 2;
-        if (graph.edge_u[middle] < u ||
-            (graph.edge_u[middle] == u && graph.edge_v[middle] < v)) {
+        if (graph.edge_u[middle] < u || (graph.edge_u[middle] == u && graph.edge_v[middle] < v)) {
           low = middle + 1;
         } else {
           high = middle;
@@ -421,16 +413,15 @@ PathOrderIsOpt(const GraphView& graph, const SmallPath* const paths, const std::
     dynamic_order[node] = static_cast<std::uint8_t>(node);
   }
   for (;;) {
-    std::int64_t candidate =
-        Distance(graph, order[dynamic_order[0] + 1], order[0]);
+    std::int64_t candidate = Distance(graph, order[dynamic_order[0] + 1], order[0]);
     for (std::int32_t position = 1; position < dynamic_nodes; ++position) {
       candidate += PathTransitionCost(
           graph, order, fixed_after, static_cast<std::int32_t>(dynamic_order[position - 1]) + 1,
           static_cast<std::int32_t>(dynamic_order[position]) + 1, forced_cost);
     }
-    candidate += PathTransitionCost(
-        graph, order, fixed_after,
-        static_cast<std::int32_t>(dynamic_order[dynamic_nodes - 1]) + 1, total - 1, forced_cost);
+    candidate += PathTransitionCost(graph, order, fixed_after,
+                                    static_cast<std::int32_t>(dynamic_order[dynamic_nodes - 1]) + 1,
+                                    total - 1, forced_cost);
     if (candidate < original) {
       return false;
     }
@@ -450,8 +441,7 @@ PathOrderIsOpt(const GraphView& graph, const SmallPath* const paths, const std::
     const std::uint8_t pivot_value = dynamic_order[pivot];
     dynamic_order[pivot] = dynamic_order[successor];
     dynamic_order[successor] = pivot_value;
-    for (std::int32_t left = pivot + 1, right = dynamic_nodes - 1; left < right;
-         ++left, --right) {
+    for (std::int32_t left = pivot + 1, right = dynamic_nodes - 1; left < right; ++left, --right) {
       const std::uint8_t left_value = dynamic_order[left];
       dynamic_order[left] = dynamic_order[right];
       dynamic_order[right] = left_value;
@@ -616,10 +606,10 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Opt233(const GraphView& graph, co
   return Opt(graph, paths, 3);
 }
 
-CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
-Opt33(const GraphView& graph, const std::int32_t a1, const std::int32_t a2,
-      const std::int32_t a3, const std::int32_t b1, const std::int32_t b2,
-      const std::int32_t b3) {
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Opt33(const GraphView& graph, const std::int32_t a1,
+                                                     const std::int32_t a2, const std::int32_t a3,
+                                                     const std::int32_t b1, const std::int32_t b2,
+                                                     const std::int32_t b3) {
   // 任一 constituent edge 与另一条二边路径已能严格改进时，
   // 整个 3+3 path system 必然关闭。先做四个 KH opt23 必要条件，
   // 只把少数 surviving replies 送入精确 path-ordering 枚举。该蕴含只对
@@ -632,15 +622,14 @@ Opt33(const GraphView& graph, const std::int32_t a1, const std::int32_t a2,
       all_distinct = all_distinct && nodes[first] != nodes[second];
     }
   }
-  if (all_distinct &&
-      (!Opt23(graph, a1, a2, b1, b2, b3, Distance(graph, a1, a2),
-              Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
-       !Opt23(graph, a2, a3, b1, b2, b3, Distance(graph, a2, a3),
-              Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
-       !Opt23(graph, b1, b2, a1, a2, a3, Distance(graph, b1, b2),
-              Distance(graph, a1, a2), Distance(graph, a2, a3)) ||
-       !Opt23(graph, b2, b3, a1, a2, a3, Distance(graph, b2, b3),
-              Distance(graph, a1, a2), Distance(graph, a2, a3)))) {
+  if (all_distinct && (!Opt23(graph, a1, a2, b1, b2, b3, Distance(graph, a1, a2),
+                              Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
+                       !Opt23(graph, a2, a3, b1, b2, b3, Distance(graph, a2, a3),
+                              Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
+                       !Opt23(graph, b1, b2, a1, a2, a3, Distance(graph, b1, b2),
+                              Distance(graph, a1, a2), Distance(graph, a2, a3)) ||
+                       !Opt23(graph, b2, b3, a1, a2, a3, Distance(graph, b2, b3),
+                              Distance(graph, a1, a2), Distance(graph, a2, a3)))) {
     return false;
   }
   const SmallPath paths[kMaxPathCount] = {
@@ -654,20 +643,19 @@ Opt33(const GraphView& graph, const std::int32_t a1, const std::int32_t a2,
 // 低阶必要条件，再进入同一个精确 path-ordering 枚举，避免在大多数 reply 上
 // 支付 7! 排列的代价。
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
-Opt243(const GraphView& graph, const std::int32_t a, const std::int32_t b,
-       const std::int32_t c1, const std::int32_t c2, const std::int32_t c3,
-       const std::int32_t c4, const std::int32_t d1, const std::int32_t d2,
-       const std::int32_t d3) {
-  if (!Opt23(graph, c1, c2, c2, c3, c4, Distance(graph, c1, c2),
-             Distance(graph, c2, c3), Distance(graph, c3, c4)) ||
-      !Opt23(graph, c1, c2, d1, d2, d3, Distance(graph, c1, c2),
-             Distance(graph, d1, d2), Distance(graph, d2, d3)) ||
-      !Opt23(graph, d1, d2, c1, c2, c3, Distance(graph, d1, d2),
-             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
-      !Opt23(graph, d2, d3, c1, c2, c3, Distance(graph, d2, d3),
-             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
-      !Opt23(graph, a, b, c1, c2, c3, Distance(graph, a, b),
-             Distance(graph, c1, c2), Distance(graph, c2, c3))) {
+Opt243(const GraphView& graph, const std::int32_t a, const std::int32_t b, const std::int32_t c1,
+       const std::int32_t c2, const std::int32_t c3, const std::int32_t c4, const std::int32_t d1,
+       const std::int32_t d2, const std::int32_t d3) {
+  if (!Opt23(graph, c1, c2, c2, c3, c4, Distance(graph, c1, c2), Distance(graph, c2, c3),
+             Distance(graph, c3, c4)) ||
+      !Opt23(graph, c1, c2, d1, d2, d3, Distance(graph, c1, c2), Distance(graph, d1, d2),
+             Distance(graph, d2, d3)) ||
+      !Opt23(graph, d1, d2, c1, c2, c3, Distance(graph, d1, d2), Distance(graph, c1, c2),
+             Distance(graph, c2, c3)) ||
+      !Opt23(graph, d2, d3, c1, c2, c3, Distance(graph, d2, d3), Distance(graph, c1, c2),
+             Distance(graph, c2, c3)) ||
+      !Opt23(graph, a, b, c1, c2, c3, Distance(graph, a, b), Distance(graph, c1, c2),
+             Distance(graph, c2, c3))) {
     return false;
   }
   const SmallPath paths[kMaxPathCount] = {
@@ -679,10 +667,9 @@ Opt243(const GraphView& graph, const std::int32_t a, const std::int32_t b,
 }
 
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
-Opt244(const GraphView& graph, const std::int32_t a, const std::int32_t b,
-       const std::int32_t c1, const std::int32_t c2, const std::int32_t c3,
-       const std::int32_t c4, const std::int32_t d1, const std::int32_t d2,
-       const std::int32_t d3, const std::int32_t d4) {
+Opt244(const GraphView& graph, const std::int32_t a, const std::int32_t b, const std::int32_t c1,
+       const std::int32_t c2, const std::int32_t c3, const std::int32_t c4, const std::int32_t d1,
+       const std::int32_t d2, const std::int32_t d3, const std::int32_t d4) {
   const std::int32_t roles[10] = {a, b, c1, c2, c3, c4, d1, d2, d3, d4};
   if (!AllNodesDistinct(roles, 10)) {
     // q10 的每个 DP 位置必须代表不同 Hamilton 顶点；角色重叠时
@@ -691,20 +678,20 @@ Opt244(const GraphView& graph, const std::int32_t a, const std::int32_t b,
   }
   // 对齐 KH `opt244`：这些 Opt23 是证明成立的必要条件，不只是
   // path-order DP 的性能预筛。漏掉任意一项都可能把可行 reply 误关掉。
-  if (!Opt23(graph, c1, c2, c2, c3, c4, Distance(graph, c1, c2),
-             Distance(graph, c2, c3), Distance(graph, c3, c4)) ||
-      !Opt23(graph, c1, c2, d1, d2, d3, Distance(graph, c1, c2),
-             Distance(graph, d1, d2), Distance(graph, d2, d3)) ||
-      !Opt23(graph, c1, c2, d2, d3, d4, Distance(graph, c1, c2),
-             Distance(graph, d2, d3), Distance(graph, d3, d4)) ||
-      !Opt23(graph, d1, d2, c1, c2, c3, Distance(graph, d1, d2),
-             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
-      !Opt23(graph, d2, d3, c1, c2, c3, Distance(graph, d2, d3),
-             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
-      !Opt23(graph, d3, d4, c1, c2, c3, Distance(graph, d3, d4),
-             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
-      !Opt23(graph, a, b, c1, c2, c3, Distance(graph, a, b),
-             Distance(graph, c1, c2), Distance(graph, c2, c3))) {
+  if (!Opt23(graph, c1, c2, c2, c3, c4, Distance(graph, c1, c2), Distance(graph, c2, c3),
+             Distance(graph, c3, c4)) ||
+      !Opt23(graph, c1, c2, d1, d2, d3, Distance(graph, c1, c2), Distance(graph, d1, d2),
+             Distance(graph, d2, d3)) ||
+      !Opt23(graph, c1, c2, d2, d3, d4, Distance(graph, c1, c2), Distance(graph, d2, d3),
+             Distance(graph, d3, d4)) ||
+      !Opt23(graph, d1, d2, c1, c2, c3, Distance(graph, d1, d2), Distance(graph, c1, c2),
+             Distance(graph, c2, c3)) ||
+      !Opt23(graph, d2, d3, c1, c2, c3, Distance(graph, d2, d3), Distance(graph, c1, c2),
+             Distance(graph, c2, c3)) ||
+      !Opt23(graph, d3, d4, c1, c2, c3, Distance(graph, d3, d4), Distance(graph, c1, c2),
+             Distance(graph, c2, c3)) ||
+      !Opt23(graph, a, b, c1, c2, c3, Distance(graph, a, b), Distance(graph, c1, c2),
+             Distance(graph, c2, c3))) {
     return false;
   }
   const SmallPath paths[kMaxPathCount] = {
@@ -716,26 +703,25 @@ Opt244(const GraphView& graph, const std::int32_t a, const std::int32_t b,
 }
 
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
-Opt253(const GraphView& graph, const std::int32_t a, const std::int32_t b,
-       const std::int32_t c1, const std::int32_t c2, const std::int32_t c3,
-       const std::int32_t c4, const std::int32_t c5, const std::int32_t d1,
-       const std::int32_t d2, const std::int32_t d3) {
+Opt253(const GraphView& graph, const std::int32_t a, const std::int32_t b, const std::int32_t c1,
+       const std::int32_t c2, const std::int32_t c3, const std::int32_t c4, const std::int32_t c5,
+       const std::int32_t d1, const std::int32_t d2, const std::int32_t d3) {
   const std::int32_t roles[10] = {a, b, c1, c2, c3, c4, c5, d1, d2, d3};
   if (!AllNodesDistinct(roles, 10)) {
     return true;
   }
-  if (!Opt23(graph, c1, c2, c2, c3, c4, Distance(graph, c1, c2),
-             Distance(graph, c2, c3), Distance(graph, c3, c4)) ||
-      !Opt23(graph, c1, c2, c3, c4, c5, Distance(graph, c1, c2),
-             Distance(graph, c3, c4), Distance(graph, c4, c5)) ||
-      !Opt23(graph, c1, c2, d1, d2, d3, Distance(graph, c1, c2),
-             Distance(graph, d1, d2), Distance(graph, d2, d3)) ||
-      !Opt23(graph, d1, d2, c1, c2, c3, Distance(graph, d1, d2),
-             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
-      !Opt23(graph, d2, d3, c1, c2, c3, Distance(graph, d2, d3),
-             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
-      !Opt23(graph, a, b, c1, c2, c3, Distance(graph, a, b),
-             Distance(graph, c1, c2), Distance(graph, c2, c3))) {
+  if (!Opt23(graph, c1, c2, c2, c3, c4, Distance(graph, c1, c2), Distance(graph, c2, c3),
+             Distance(graph, c3, c4)) ||
+      !Opt23(graph, c1, c2, c3, c4, c5, Distance(graph, c1, c2), Distance(graph, c3, c4),
+             Distance(graph, c4, c5)) ||
+      !Opt23(graph, c1, c2, d1, d2, d3, Distance(graph, c1, c2), Distance(graph, d1, d2),
+             Distance(graph, d2, d3)) ||
+      !Opt23(graph, d1, d2, c1, c2, c3, Distance(graph, d1, d2), Distance(graph, c1, c2),
+             Distance(graph, c2, c3)) ||
+      !Opt23(graph, d2, d3, c1, c2, c3, Distance(graph, d2, d3), Distance(graph, c1, c2),
+             Distance(graph, c2, c3)) ||
+      !Opt23(graph, a, b, c1, c2, c3, Distance(graph, a, b), Distance(graph, c1, c2),
+             Distance(graph, c2, c3))) {
     return false;
   }
   const SmallPath paths[kMaxPathCount] = {
@@ -747,10 +733,9 @@ Opt253(const GraphView& graph, const std::int32_t a, const std::int32_t b,
 }
 
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
-Opt333(const GraphView& graph, const std::int32_t a, const std::int32_t b,
-       const std::int32_t b2, const std::int32_t c1, const std::int32_t c2,
-       const std::int32_t c3, const std::int32_t d1, const std::int32_t d2,
-       const std::int32_t d3) {
+Opt333(const GraphView& graph, const std::int32_t a, const std::int32_t b, const std::int32_t b2,
+       const std::int32_t c1, const std::int32_t c2, const std::int32_t c3, const std::int32_t d1,
+       const std::int32_t d2, const std::int32_t d3) {
   const SmallPath paths[kMaxPathCount] = {
       {.size = 3, .node = {a, b, b2}},
       {.size = 3, .node = {c1, c2, c3}},
@@ -760,33 +745,31 @@ Opt333(const GraphView& graph, const std::int32_t a, const std::int32_t b,
 }
 
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
-Opt343(const GraphView& graph, const std::int32_t a1, const std::int32_t a2,
-       const std::int32_t a3, const std::int32_t b1, const std::int32_t b2,
-       const std::int32_t b3, const std::int32_t b4, const std::int32_t c1,
-       const std::int32_t c2, const std::int32_t c3) {
-  const std::int32_t roles[10] = {a1, a2, a3, b1, b2,
-                                  b3, b4, c1, c2, c3};
+Opt343(const GraphView& graph, const std::int32_t a1, const std::int32_t a2, const std::int32_t a3,
+       const std::int32_t b1, const std::int32_t b2, const std::int32_t b3, const std::int32_t b4,
+       const std::int32_t c1, const std::int32_t c2, const std::int32_t c3) {
+  const std::int32_t roles[10] = {a1, a2, a3, b1, b2, b3, b4, c1, c2, c3};
   if (!AllNodesDistinct(roles, 10)) {
     return true;
   }
-  if (!Opt23(graph, b1, b2, b2, b3, b4, Distance(graph, b1, b2),
-             Distance(graph, b2, b3), Distance(graph, b3, b4)) ||
-      !Opt23(graph, b1, b2, a1, a2, a3, Distance(graph, b1, b2),
-             Distance(graph, a1, a2), Distance(graph, a2, a3)) ||
-      !Opt23(graph, b1, b2, c1, c2, c3, Distance(graph, b1, b2),
-             Distance(graph, c1, c2), Distance(graph, c2, c3)) ||
-      !Opt23(graph, a1, a2, b1, b2, b3, Distance(graph, a1, a2),
-             Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
-      !Opt23(graph, a2, a3, b1, b2, b3, Distance(graph, a2, a3),
-             Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
-      !Opt23(graph, c1, c2, b1, b2, b3, Distance(graph, c1, c2),
-             Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
-      !Opt23(graph, c2, c3, b1, b2, b3, Distance(graph, c2, c3),
-             Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
-      !Opt23(graph, a2, a3, b2, b3, b4, Distance(graph, a2, a3),
-             Distance(graph, b2, b3), Distance(graph, b3, b4)) ||
-      !Opt23(graph, a2, a3, c1, c2, c3, Distance(graph, a2, a3),
-             Distance(graph, c1, c2), Distance(graph, c2, c3))) {
+  if (!Opt23(graph, b1, b2, b2, b3, b4, Distance(graph, b1, b2), Distance(graph, b2, b3),
+             Distance(graph, b3, b4)) ||
+      !Opt23(graph, b1, b2, a1, a2, a3, Distance(graph, b1, b2), Distance(graph, a1, a2),
+             Distance(graph, a2, a3)) ||
+      !Opt23(graph, b1, b2, c1, c2, c3, Distance(graph, b1, b2), Distance(graph, c1, c2),
+             Distance(graph, c2, c3)) ||
+      !Opt23(graph, a1, a2, b1, b2, b3, Distance(graph, a1, a2), Distance(graph, b1, b2),
+             Distance(graph, b2, b3)) ||
+      !Opt23(graph, a2, a3, b1, b2, b3, Distance(graph, a2, a3), Distance(graph, b1, b2),
+             Distance(graph, b2, b3)) ||
+      !Opt23(graph, c1, c2, b1, b2, b3, Distance(graph, c1, c2), Distance(graph, b1, b2),
+             Distance(graph, b2, b3)) ||
+      !Opt23(graph, c2, c3, b1, b2, b3, Distance(graph, c2, c3), Distance(graph, b1, b2),
+             Distance(graph, b2, b3)) ||
+      !Opt23(graph, a2, a3, b2, b3, b4, Distance(graph, a2, a3), Distance(graph, b2, b3),
+             Distance(graph, b3, b4)) ||
+      !Opt23(graph, a2, a3, c1, c2, c3, Distance(graph, a2, a3), Distance(graph, c1, c2),
+             Distance(graph, c2, c3))) {
     return false;
   }
   const SmallPath paths[kMaxPathCount] = {
@@ -832,8 +815,8 @@ ExtraEdgeOpt1(const GraphView& graph, const std::int32_t a, const std::int32_t b
         continue;
       }
       bool unresolved = false;
-      for (std::int64_t slot = NeighborBegin(graph, endpoint);
-           slot < NeighborEnd(graph, endpoint); ++slot) {
+      for (std::int64_t slot = NeighborBegin(graph, endpoint); slot < NeighborEnd(graph, endpoint);
+           ++slot) {
         if (!NeighborActive(graph, slot)) {
           continue;
         }
@@ -846,8 +829,7 @@ ExtraEdgeOpt1(const GraphView& graph, const std::int32_t a, const std::int32_t b
           continue;
         }
         if (Opt243(graph, a, b, extension, endpoint, path_centers[path], opposite,
-                   path_endpoints[other][0], path_centers[other],
-                   path_endpoints[other][1])) {
+                   path_endpoints[other][0], path_centers[other], path_endpoints[other][1])) {
           unresolved = true;
           break;
         }
@@ -867,8 +849,8 @@ ExtraEdgeOpt1(const GraphView& graph, const std::int32_t a, const std::int32_t b
       continue;
     }
     bool unresolved = false;
-    for (std::int64_t slot = NeighborBegin(graph, endpoint);
-         slot < NeighborEnd(graph, endpoint); ++slot) {
+    for (std::int64_t slot = NeighborBegin(graph, endpoint); slot < NeighborEnd(graph, endpoint);
+         ++slot) {
       if (!NeighborActive(graph, slot)) {
         continue;
       }
@@ -896,17 +878,14 @@ ExtraEdgeOpt1(const GraphView& graph, const std::int32_t a, const std::int32_t b
 template <bool EnableExtraEdge1 = false>
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
 ReplyPassesFastFilters(const GraphView& graph, const std::int32_t a, const std::int32_t b,
-                       const std::int32_t c1, const std::int32_t c,
-                       const std::int32_t c2, const std::int32_t d1,
-                       const std::int32_t d, const std::int32_t d2) {
-  if (c1 == d || c2 == d || d1 == c || d2 == c ||
-      (c2 == a && c1 == b) || (c2 == b && c1 == a) ||
+                       const std::int32_t c1, const std::int32_t c, const std::int32_t c2,
+                       const std::int32_t d1, const std::int32_t d, const std::int32_t d2) {
+  if (c1 == d || c2 == d || d1 == c || d2 == c || (c2 == a && c1 == b) || (c2 == b && c1 == a) ||
       ((d1 == a || d1 == b) && (c1 == d1 || c2 == d1)) ||
       (d2 == a && (d1 == b || c1 == d2 || c2 == d2)) ||
       (d2 == b && (d1 == a || c1 == d2 || c2 == d2)) ||
       (d2 == c1 && (d1 == c2 || a == d2 || b == d2)) ||
-      (d2 == c2 && (d1 == c1 || a == d2 || b == d2)) ||
-      HasCycle222(a, b, c1, c2, d1, d2)) {
+      (d2 == c2 && (d1 == c1 || a == d2 || b == d2)) || HasCycle222(a, b, c1, c2, d1, d2)) {
     return false;
   }
   const std::int64_t cab = Distance(graph, a, b);
@@ -914,20 +893,13 @@ ReplyPassesFastFilters(const GraphView& graph, const std::int32_t a, const std::
   const std::int64_t ccc2 = Distance(graph, c, c2);
   const std::int64_t cd1d = Distance(graph, d1, d);
   const std::int64_t cdd2 = Distance(graph, d, d2);
-  return Opt22(graph, c1, c, a, b, cc1c, cab) &&
-         Opt22(graph, c, c2, a, b, ccc2, cab) &&
-         Opt23(graph, a, b, c1, c, c2, cab, cc1c, ccc2) &&
-         Opt22(graph, d, d1, a, b, cd1d, cab) &&
-         Opt22(graph, d, d1, c1, c, cd1d, cc1c) &&
-         Opt22(graph, d, d1, c, c2, cd1d, ccc2) &&
-         Opt23(graph, d, d1, c1, c, c2, cd1d, cc1c, ccc2) &&
-         Opt222(graph, a, b, c1, c, d, d1) &&
-         Opt222(graph, a, b, c, c2, d, d1) &&
-         Opt232(graph, a, b, c1, c, c2, d1, d) &&
-         Opt22(graph, d, d2, a, b, cdd2, cab) &&
-         Opt22(graph, d, d2, c1, c, cdd2, cc1c) &&
-         Opt22(graph, d, d2, c, c2, cdd2, ccc2) &&
-         Opt23(graph, a, b, d1, d, d2, cab, cd1d, cdd2) &&
+  return Opt22(graph, c1, c, a, b, cc1c, cab) && Opt22(graph, c, c2, a, b, ccc2, cab) &&
+         Opt23(graph, a, b, c1, c, c2, cab, cc1c, ccc2) && Opt22(graph, d, d1, a, b, cd1d, cab) &&
+         Opt22(graph, d, d1, c1, c, cd1d, cc1c) && Opt22(graph, d, d1, c, c2, cd1d, ccc2) &&
+         Opt23(graph, d, d1, c1, c, c2, cd1d, cc1c, ccc2) && Opt222(graph, a, b, c1, c, d, d1) &&
+         Opt222(graph, a, b, c, c2, d, d1) && Opt232(graph, a, b, c1, c, c2, d1, d) &&
+         Opt22(graph, d, d2, a, b, cdd2, cab) && Opt22(graph, d, d2, c1, c, cdd2, cc1c) &&
+         Opt22(graph, d, d2, c, c2, cdd2, ccc2) && Opt23(graph, a, b, d1, d, d2, cab, cd1d, cdd2) &&
          Opt23(graph, d, d2, c1, c, c2, cdd2, cc1c, ccc2) &&
          Opt23(graph, c1, c, d1, d, d2, cc1c, cd1d, cdd2) &&
          Opt23(graph, c, c2, d1, d, d2, ccc2, cd1d, cdd2);
@@ -953,8 +925,7 @@ CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std:
     return false;
   }
   const std::int64_t cab = Distance(graph, a, b);
-  for (std::int64_t c_first = NeighborBegin(graph, c); c_first < NeighborEnd(graph, c);
-       ++c_first) {
+  for (std::int64_t c_first = NeighborBegin(graph, c); c_first < NeighborEnd(graph, c); ++c_first) {
     if (!NeighborActive(graph, c_first)) {
       continue;
     }
@@ -999,8 +970,7 @@ CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std:
             !Opt232(graph, a, b, c1, c, c2, d1, d)) {
           continue;
         }
-        for (std::int64_t d_second = d_first + 1; d_second < NeighborEnd(graph, d);
-             ++d_second) {
+        for (std::int64_t d_second = d_first + 1; d_second < NeighborEnd(graph, d); ++d_second) {
           if (!NeighborActive(graph, d_second)) {
             continue;
           }
@@ -1036,8 +1006,8 @@ CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std:
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE void
 InsertWitnessCandidate(const GraphView& graph, const std::int32_t a, const std::int32_t b,
                        const std::int32_t node, const std::int32_t candidate_limit,
-                       std::int32_t* const candidate_nodes,
-                       std::int64_t* const candidate_scores, std::int32_t* const candidate_count) {
+                       std::int32_t* const candidate_nodes, std::int64_t* const candidate_scores,
+                       std::int32_t* const candidate_count) {
   if (node == a || node == b) {
     return;
   }
@@ -1047,10 +1017,9 @@ InsertWitnessCandidate(const GraphView& graph, const std::int32_t a, const std::
     }
   }
   const std::int64_t score = Distance(graph, a, node) + Distance(graph, node, b);
-  if (*candidate_count == candidate_limit &&
-      (score > candidate_scores[candidate_limit - 1] ||
-       (score == candidate_scores[candidate_limit - 1] &&
-        node >= candidate_nodes[candidate_limit - 1]))) {
+  if (*candidate_count == candidate_limit && (score > candidate_scores[candidate_limit - 1] ||
+                                              (score == candidate_scores[candidate_limit - 1] &&
+                                               node >= candidate_nodes[candidate_limit - 1]))) {
     return;
   }
   std::int32_t position =
@@ -1072,8 +1041,8 @@ FindWitness(const GraphView& graph, const std::int32_t a, const std::int32_t b,
             const std::int32_t candidate_limit = 10, const std::int32_t pair_trial_limit = 10,
             const bool include_two_hop = false) {
   Witness result;
-  if (!Active(graph, a, b) || graph.degree[a] <= 2 || graph.degree[b] <= 2 ||
-      candidate_limit < 2 || candidate_limit > kMaxPotentialNodes || pair_trial_limit < 0) {
+  if (!Active(graph, a, b) || graph.degree[a] <= 2 || graph.degree[b] <= 2 || candidate_limit < 2 ||
+      candidate_limit > kMaxPotentialNodes || pair_trial_limit < 0) {
     return result;
   }
   std::int32_t candidate_nodes[kMaxPotentialNodes]{};
@@ -1081,14 +1050,13 @@ FindWitness(const GraphView& graph, const std::int32_t a, const std::int32_t b,
   std::int32_t candidate_count = 0;
   for (std::int32_t side = 0; side < 2; ++side) {
     const std::int32_t from = side == 0 ? a : b;
-    for (std::int64_t slot = NeighborBegin(graph, from); slot < NeighborEnd(graph, from);
-         ++slot) {
+    for (std::int64_t slot = NeighborBegin(graph, from); slot < NeighborEnd(graph, from); ++slot) {
       if (!NeighborActive(graph, slot)) {
         continue;
       }
       const std::int32_t node = Neighbor(graph, from, slot);
-      InsertWitnessCandidate(graph, a, b, node, candidate_limit, candidate_nodes,
-                             candidate_scores, &candidate_count);
+      InsertWitnessCandidate(graph, a, b, node, candidate_limit, candidate_nodes, candidate_scores,
+                             &candidate_count);
     }
   }
   if (include_two_hop) {

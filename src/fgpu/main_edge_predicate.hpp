@@ -19,8 +19,7 @@ constexpr std::int32_t kMaximumMetricPathDistances =
     kMaximumMetricPathNodes * (kMaximumMetricPathNodes - 1) / 2;
 
 CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE std::int32_t
-CachedDistanceIndex(const std::int32_t node_count, std::int32_t first,
-                    std::int32_t second) {
+CachedDistanceIndex(const std::int32_t node_count, std::int32_t first, std::int32_t second) {
   if (first > second) {
     const std::int32_t saved = first;
     first = second;
@@ -32,16 +31,12 @@ CachedDistanceIndex(const std::int32_t node_count, std::int32_t first,
 CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE std::int64_t
 CachedDistance(const std::int64_t* const distances, const std::int32_t node_count,
                const std::int32_t first, const std::int32_t second) {
-  return first == second
-             ? 0
-             : distances[CachedDistanceIndex(node_count, first, second)];
+  return first == second ? 0 : distances[CachedDistanceIndex(node_count, first, second)];
 }
 
 CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool
-CanUseCachedTwoPathOpt(const quick_hs::GraphView& graph,
-                      const std::int32_t* const nodes,
-                      const std::int32_t first_path_size,
-                      const std::int32_t node_count) {
+CanUseCachedTwoPathOpt(const quick_hs::GraphView& graph, const std::int32_t* const nodes,
+                       const std::int32_t first_path_size, const std::int32_t node_count) {
   for (std::int32_t first = 0; first < node_count; ++first) {
     for (std::int32_t second = first + 1; second < node_count; ++second) {
       if (nodes[first] == nodes[second]) {
@@ -49,9 +44,8 @@ CanUseCachedTwoPathOpt(const quick_hs::GraphView& graph,
       }
     }
   }
-  const std::int32_t endpoints[4] = {
-      nodes[0], nodes[first_path_size - 1], nodes[first_path_size],
-      nodes[node_count - 1]};
+  const std::int32_t endpoints[4] = {nodes[0], nodes[first_path_size - 1], nodes[first_path_size],
+                                     nodes[node_count - 1]};
   for (std::int32_t first = 0; first < 4; ++first) {
     for (std::int32_t second = first + 1; second < 4; ++second) {
       if (quick_hs::Fixed(graph, endpoints[first], endpoints[second])) {
@@ -66,10 +60,8 @@ CanUseCachedTwoPathOpt(const quick_hs::GraphView& graph,
 // 6/7 点 path system 扫描很多排列；先缓存三角距离表，避免每条转移重复做
 // 精确整数平方根。遇到共享节点或 fixed endpoint 时由调用者回退通用实现。
 CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool
-CachedTwoPathOrderIsOpt(const quick_hs::GraphView& graph,
-                        const std::int32_t* const source_nodes,
-                        const std::int32_t first_path_size,
-                        const std::int32_t node_count,
+CachedTwoPathOrderIsOpt(const quick_hs::GraphView& graph, const std::int32_t* const source_nodes,
+                        const std::int32_t first_path_size, const std::int32_t node_count,
                         const bool reverse_second_path) {
   std::int32_t nodes[kMaximumMetricPathNodes]{};
   for (std::int32_t index = 0; index < first_path_size; ++index) {
@@ -78,8 +70,7 @@ CachedTwoPathOrderIsOpt(const quick_hs::GraphView& graph,
   const std::int32_t second_size = node_count - first_path_size;
   for (std::int32_t index = 0; index < second_size; ++index) {
     nodes[first_path_size + index] =
-        source_nodes[first_path_size +
-                     (reverse_second_path ? second_size - 1 - index : index)];
+        source_nodes[first_path_size + (reverse_second_path ? second_size - 1 - index : index)];
   }
 
   std::int64_t distances[kMaximumMetricPathDistances]{};
@@ -89,8 +80,7 @@ CachedTwoPathOrderIsOpt(const quick_hs::GraphView& graph,
           quick_hs::Distance(graph, nodes[first], nodes[second]);
     }
   }
-  const std::int64_t forced_cost =
-      static_cast<std::int64_t>(INT_MIN) / (node_count - 1);
+  const std::int64_t forced_cost = static_cast<std::int64_t>(INT_MIN) / (node_count - 1);
   std::int64_t original = CachedDistance(distances, node_count, 0, 1);
   for (std::int32_t position = 1; position < node_count - 1; ++position) {
     original += position == first_path_size - 1
@@ -104,23 +94,20 @@ CachedTwoPathOrderIsOpt(const quick_hs::GraphView& graph,
     order[index] = static_cast<std::uint8_t>(index);
   }
   for (;;) {
-    std::int64_t candidate =
-        CachedDistance(distances, node_count, order[0] + 1, 0);
+    std::int64_t candidate = CachedDistance(distances, node_count, order[0] + 1, 0);
     for (std::int32_t position = 1; position < dynamic_nodes; ++position) {
       const std::int32_t previous = order[position - 1] + 1;
       const std::int32_t current = order[position] + 1;
       const std::int32_t difference = previous - current;
       const std::int32_t lower = previous < current ? previous : current;
-      candidate += (difference == 1 || difference == -1) &&
-                           lower == first_path_size - 1
+      candidate += (difference == 1 || difference == -1) && lower == first_path_size - 1
                        ? forced_cost
                        : CachedDistance(distances, node_count, previous, current);
     }
     const std::int32_t last = order[dynamic_nodes - 1] + 1;
     const std::int32_t difference = last - (node_count - 1);
     const std::int32_t lower = last < node_count - 1 ? last : node_count - 1;
-    candidate += (difference == 1 || difference == -1) &&
-                         lower == first_path_size - 1
+    candidate += (difference == 1 || difference == -1) && lower == first_path_size - 1
                      ? forced_cost
                      : CachedDistance(distances, node_count, last, node_count - 1);
     if (candidate < original) {
@@ -141,8 +128,7 @@ CachedTwoPathOrderIsOpt(const quick_hs::GraphView& graph,
     const std::uint8_t saved = order[pivot];
     order[pivot] = order[successor];
     order[successor] = saved;
-    for (std::int32_t left = pivot + 1, right = dynamic_nodes - 1;
-         left < right; ++left, --right) {
+    for (std::int32_t left = pivot + 1, right = dynamic_nodes - 1; left < right; ++left, --right) {
       const std::uint8_t left_value = order[left];
       order[left] = order[right];
       order[right] = left_value;
@@ -157,8 +143,7 @@ CachedTwoPathOrderIsOpt(const quick_hs::GraphView& graph,
 CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool
 Compatible(const quick_hs::GraphView& graph, const std::int32_t p, const std::int32_t q,
            const std::int32_t x, const std::int32_t y) {
-  const std::int64_t pqxy =
-      quick_hs::Distance(graph, p, q) + quick_hs::Distance(graph, x, y);
+  const std::int64_t pqxy = quick_hs::Distance(graph, p, q) + quick_hs::Distance(graph, x, y);
   return quick_hs::Distance(graph, p, x) + quick_hs::Distance(graph, q, y) >= pqxy ||
          quick_hs::Distance(graph, p, y) + quick_hs::Distance(graph, q, x) >= pqxy;
 }
@@ -177,8 +162,7 @@ ThreeCompatible(const quick_hs::GraphView& graph, const std::int32_t p, const st
 
 CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool
 Opt24(const quick_hs::GraphView& graph, const std::int32_t a, const std::int32_t b,
-      const std::int32_t c1, const std::int32_t c2, const std::int32_t c3,
-      const std::int32_t c4) {
+      const std::int32_t c1, const std::int32_t c2, const std::int32_t c3, const std::int32_t c4) {
   const std::int32_t nodes[6] = {a, b, c1, c2, c3, c4};
   if (CanUseCachedTwoPathOpt(graph, nodes, 2, 6)) {
     return CachedTwoPathOrderIsOpt(graph, nodes, 2, 6, false) ||
@@ -191,10 +175,11 @@ Opt24(const quick_hs::GraphView& graph, const std::int32_t a, const std::int32_t
   return quick_hs::Opt(graph, paths, 2);
 }
 
-CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool
-Opt34(const quick_hs::GraphView& graph, const std::int32_t a1, const std::int32_t a2,
-      const std::int32_t a3, const std::int32_t b1, const std::int32_t b2,
-      const std::int32_t b3, const std::int32_t b4) {
+CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool Opt34(const quick_hs::GraphView& graph,
+                                                       const std::int32_t a1, const std::int32_t a2,
+                                                       const std::int32_t a3, const std::int32_t b1,
+                                                       const std::int32_t b2, const std::int32_t b3,
+                                                       const std::int32_t b4) {
   const std::int32_t nodes[7] = {a1, a2, a3, b1, b2, b3, b4};
   if (CanUseCachedTwoPathOpt(graph, nodes, 3, 7)) {
     return CachedTwoPathOrderIsOpt(graph, nodes, 3, 7, false) ||
@@ -211,9 +196,8 @@ Opt34(const quick_hs::GraphView& graph, const std::int32_t a1, const std::int32_
 // 邻边对无法关闭；false 表示对 z 的全部 Hamilton replies 均有严格更短重连。
 CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool
 MetricExcessAdmitsPair(const quick_hs::GraphView& graph, const std::int32_t z,
-                       const std::int32_t s1, const std::int32_t s2,
-                       const std::int32_t s3, const std::int32_t s4,
-                       const std::int64_t cs1s2, const std::int64_t cs2s3,
+                       const std::int32_t s1, const std::int32_t s2, const std::int32_t s3,
+                       const std::int32_t s4, const std::int64_t cs1s2, const std::int64_t cs2s3,
                        const std::int64_t cs3s4) {
   static_cast<void>(cs2s3); // 与 KH opt_excess 签名对齐；中段成本已含在两个 z 距离中。
   const std::int64_t cs2z = quick_hs::Distance(graph, s2, z);
@@ -231,15 +215,15 @@ MetricExcessAdmitsPair(const quick_hs::GraphView& graph, const std::int32_t z,
         !Opt24(graph, z1, z, s1, s2, s3, s4)) {
       continue;
     }
-    for (std::int64_t second_slot = first_slot + 1;
-         second_slot < quick_hs::NeighborEnd(graph, z); ++second_slot) {
+    for (std::int64_t second_slot = first_slot + 1; second_slot < quick_hs::NeighborEnd(graph, z);
+         ++second_slot) {
       if (!quick_hs::NeighborActive(graph, second_slot) ||
           quick_hs::PairForbiddenBySlots(graph, z, first_slot, second_slot)) {
         continue;
       }
       const std::int32_t z2 = quick_hs::Neighbor(graph, z, second_slot);
-      if (z2 != s2 && z2 != s3 && (z1 != s1 || z2 != s4) &&
-          (z1 != s4 || z2 != s1) && Opt34(graph, z1, z, z2, s1, s2, s3, s4)) {
+      if (z2 != s2 && z2 != s3 && (z1 != s1 || z2 != s4) && (z1 != s4 || z2 != s1) &&
+          Opt34(graph, z1, z, z2, s1, s2, s3, s4)) {
         return true;
       }
     }
@@ -248,9 +232,8 @@ MetricExcessAdmitsPair(const quick_hs::GraphView& graph, const std::int32_t z,
 }
 
 CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool
-StrongThreeCompatible(const quick_hs::GraphView& graph, std::int32_t p,
-                      std::int32_t q, std::int32_t x, const std::int32_t middle,
-                      std::int32_t y) {
+StrongThreeCompatible(const quick_hs::GraphView& graph, std::int32_t p, std::int32_t q,
+                      std::int32_t x, const std::int32_t middle, std::int32_t y) {
   // metric-excess 内层会为每个 z 枚举邻边对并执行精确 path-ordering。
   // 将它作为低度数强规则：高度数时退回“仍可能兼容”只会少删边，不会
   // 产生错误证明；低度数后期固定点仍完整执行该规则。
@@ -261,10 +244,8 @@ StrongThreeCompatible(const quick_hs::GraphView& graph, std::int32_t p,
   if (!quick_hs::Opt23(graph, p, q, x, middle, y, cpq, cxm, cmy)) {
     return false;
   }
-  for (std::int32_t target_orientation = 0; target_orientation < 2;
-       ++target_orientation) {
-    for (std::int32_t path_orientation = 0; path_orientation < 2;
-         ++path_orientation) {
+  for (std::int32_t target_orientation = 0; target_orientation < 2; ++target_orientation) {
+    for (std::int32_t path_orientation = 0; path_orientation < 2; ++path_orientation) {
       if (q == x) {
         if (quick_hs::Fixed(graph, p, y)) {
           return false;
@@ -279,8 +260,7 @@ StrongThreeCompatible(const quick_hs::GraphView& graph, std::int32_t p,
             continue;
           }
           const std::int32_t z = quick_hs::Neighbor(graph, q, slot);
-          if (z != p && z != middle && z != y &&
-              graph.degree[z] > kMetricExcessMaximumDegree) {
+          if (z != p && z != middle && z != y && graph.degree[z] > kMetricExcessMaximumDegree) {
             return true;
           }
           if (z != p && z != middle && z != y &&
@@ -323,10 +303,9 @@ StrongThreeCompatible(const quick_hs::GraphView& graph, std::int32_t p,
 }
 
 CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool
-MainEdgeEliminates(const quick_hs::GraphView& graph, const std::int32_t p,
-                   const std::int32_t q, const std::int32_t r1, const std::int32_t r,
-                   const std::int32_t r2, const std::int32_t s1, const std::int32_t s,
-                   const std::int32_t s2) {
+MainEdgeEliminates(const quick_hs::GraphView& graph, const std::int32_t p, const std::int32_t q,
+                   const std::int32_t r1, const std::int32_t r, const std::int32_t r2,
+                   const std::int32_t s1, const std::int32_t s, const std::int32_t s2) {
   if (r == s1 || r == s2 || s == r1 || s == r2) {
     return false;
   }
@@ -345,14 +324,12 @@ MainEdgeEliminates(const quick_hs::GraphView& graph, const std::int32_t p,
       const std::int32_t rb = r_endpoint[1 - swap_r];
       const std::int32_t sa = s_endpoint[swap_s];
       const std::int32_t sb = s_endpoint[1 - swap_s];
-      const std::int64_t first = quick_hs::Distance(graph, p, ra) +
-                                 quick_hs::Distance(graph, s, sa) + rs +
-                                 quick_hs::Distance(graph, r, rb) +
-                                 quick_hs::Distance(graph, q, sb);
-      const std::int64_t second = quick_hs::Distance(graph, p, sa) +
-                                  quick_hs::Distance(graph, r, ra) + rs +
-                                  quick_hs::Distance(graph, s, sb) +
-                                  quick_hs::Distance(graph, q, rb);
+      const std::int64_t first =
+          quick_hs::Distance(graph, p, ra) + quick_hs::Distance(graph, s, sa) + rs +
+          quick_hs::Distance(graph, r, rb) + quick_hs::Distance(graph, q, sb);
+      const std::int64_t second =
+          quick_hs::Distance(graph, p, sa) + quick_hs::Distance(graph, r, ra) + rs +
+          quick_hs::Distance(graph, s, sb) + quick_hs::Distance(graph, q, rb);
       if (beginning > first && beginning > second) {
         return true;
       }
@@ -362,26 +339,23 @@ MainEdgeEliminates(const quick_hs::GraphView& graph, const std::int32_t p,
 }
 
 CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool
-BasicAllowedPair(const quick_hs::GraphView& graph, const std::int32_t p,
-                 const std::int32_t q, const std::int32_t middle,
-                 const std::int32_t first, const std::int32_t second) {
-  return Compatible(graph, p, q, middle, first) &&
-         Compatible(graph, p, q, middle, second) &&
+BasicAllowedPair(const quick_hs::GraphView& graph, const std::int32_t p, const std::int32_t q,
+                 const std::int32_t middle, const std::int32_t first, const std::int32_t second) {
+  return Compatible(graph, p, q, middle, first) && Compatible(graph, p, q, middle, second) &&
          ThreeCompatible(graph, p, q, first, middle, second);
 }
 
 CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool
 AllowedPair(const quick_hs::GraphView& graph, const std::int32_t p, const std::int32_t q,
-            const std::int32_t middle, const std::int32_t first,
-            const std::int32_t second) {
-  return Compatible(graph, p, q, middle, first) &&
-         Compatible(graph, p, q, middle, second) &&
+            const std::int32_t middle, const std::int32_t first, const std::int32_t second) {
+  return Compatible(graph, p, q, middle, first) && Compatible(graph, p, q, middle, second) &&
          StrongThreeCompatible(graph, p, q, first, middle, second);
 }
 
-CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool
-HasAllowedPair(const quick_hs::GraphView& graph, const std::int32_t p, const std::int32_t q,
-               const std::int32_t middle) {
+CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool HasAllowedPair(const quick_hs::GraphView& graph,
+                                                                const std::int32_t p,
+                                                                const std::int32_t q,
+                                                                const std::int32_t middle) {
   for (std::int64_t first_index = quick_hs::NeighborBegin(graph, middle);
        first_index < quick_hs::NeighborEnd(graph, middle); ++first_index) {
     if (!quick_hs::NeighborActive(graph, first_index)) {
@@ -410,7 +384,7 @@ HasAllowedPair(const quick_hs::GraphView& graph, const std::int32_t p, const std
 
 CUDAEE_MAIN_EDGE_HD CUDAEE_MAIN_EDGE_INLINE bool
 PotentialPairAdmitsTour(const quick_hs::GraphView& graph, const std::int32_t p,
-                       const std::int32_t q, const std::int32_t r, const std::int32_t s) {
+                        const std::int32_t q, const std::int32_t r, const std::int32_t s) {
   for (std::int64_t r1_index = quick_hs::NeighborBegin(graph, r);
        r1_index < quick_hs::NeighborEnd(graph, r); ++r1_index) {
     if (!quick_hs::NeighborActive(graph, r1_index)) {
@@ -441,8 +415,8 @@ PotentialPairAdmitsTour(const quick_hs::GraphView& graph, const std::int32_t p,
         if (!Compatible(graph, p, q, s, s1)) {
           continue;
         }
-        for (std::int64_t s2_index = s1_index + 1;
-             s2_index < quick_hs::NeighborEnd(graph, s); ++s2_index) {
+        for (std::int64_t s2_index = s1_index + 1; s2_index < quick_hs::NeighborEnd(graph, s);
+             ++s2_index) {
           if (!quick_hs::NeighborActive(graph, s2_index)) {
             continue;
           }

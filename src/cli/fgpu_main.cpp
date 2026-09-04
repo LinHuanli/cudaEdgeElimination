@@ -374,21 +374,20 @@ void ResidentLocalCommand(const Arguments& arguments) {
 }
 
 void SolveCommand(const Arguments& arguments) {
-  ValidateKeys(arguments, {"instance", "input-edges", "tour", "tour-role", "expected-cost",
-                           "device", "gpus", "mode", "output-edges", "fixed", "nonpairs",
-                           "certificate", "manifest"});
+  ValidateKeys(arguments,
+               {"instance", "input-edges", "tour", "tour-role", "expected-cost", "device", "gpus",
+                "mode", "output-edges", "fixed", "nonpairs", "certificate", "manifest"});
   cudaee::FgpuSolveOptions options;
   options.device = ParseSolveDevice(arguments);
   options.mode = ParseSolveMode(Optional(arguments, "mode", "gpu-safe"));
   options.serialize_certificate = arguments.contains("certificate");
-  const cudaee::FgpuSolveReport report = cudaee::RunFgpuElimination(
-      ParseInput(arguments), ParseRunOutputs(arguments, false), options);
+  const cudaee::FgpuSolveReport report =
+      cudaee::RunFgpuElimination(ParseInput(arguments), ParseRunOutputs(arguments, false), options);
   std::cout << "status=OK mode=" << cudaee::ToString(options.mode)
             << " termination=" << cudaee::ToString(report.termination)
             << " initial_edges=" << report.initial_edges << " final_edges=" << report.final_edges
             << " fixed_edges=" << report.fixed_edges << " pairs=" << report.pairs
-            << " nonpairs=" << report.nonpairs
-            << " lp_nonpairs=" << report.lp_nonpairs
+            << " nonpairs=" << report.nonpairs << " lp_nonpairs=" << report.lp_nonpairs
             << " fixed_anchor_nonpairs=" << report.fixed_anchor_nonpairs
             << " point_nonpairs=" << report.point_nonpairs
             << " nonpair_fixed_edges=" << report.nonpair_fixed_edges
@@ -454,10 +453,10 @@ void ResidentCommand(const Arguments& arguments, const bool one_shot = false) {
       OptionalInteger<std::uint32_t>(arguments, "main-edge-potentials", 11U);
   config.main_edge_positions =
       OptionalInteger<std::uint32_t>(arguments, "main-edge-positions", 23U);
-  config.quick_hs_candidates = OptionalInteger<std::uint32_t>(
-      arguments, "quick-hs-candidates", one_shot ? 16U : 10U);
-  config.quick_hs_pair_trials = OptionalInteger<std::uint32_t>(
-      arguments, "quick-hs-pair-trials", one_shot ? 0U : 10U);
+  config.quick_hs_candidates =
+      OptionalInteger<std::uint32_t>(arguments, "quick-hs-candidates", one_shot ? 16U : 10U);
+  config.quick_hs_pair_trials =
+      OptionalInteger<std::uint32_t>(arguments, "quick-hs-pair-trials", one_shot ? 0U : 10U);
   config.pdlp_iterations = OptionalInteger<std::uint32_t>(arguments, "pdlp-iterations", 5000U);
   config.max_pdlp_epochs = OptionalInteger<std::uint32_t>(arguments, "max-pdlp-epochs", 0U);
   config.max_hs_epochs = OptionalInteger<std::uint32_t>(arguments, "max-hs-epochs", 0U);
@@ -467,22 +466,19 @@ void ResidentCommand(const Arguments& arguments, const bool one_shot = false) {
   config.enable_quick_hs = OptionalBoolean(arguments, "enable-quick-hs", true);
   config.enable_jv = OptionalBoolean(arguments, "enable-jv", true);
   config.enable_main_edge = OptionalBoolean(arguments, "enable-main-edge", one_shot);
-  config.enable_strong_metric =
-      OptionalBoolean(arguments, "enable-strong-metric", false);
-  config.enable_point_nonpair =
-      OptionalBoolean(arguments, "enable-point-nonpair", one_shot);
-  config.enable_direct_fix =
-      OptionalBoolean(arguments, "enable-direct-fix", one_shot);
+  config.enable_strong_metric = OptionalBoolean(arguments, "enable-strong-metric", false);
+  config.enable_point_nonpair = OptionalBoolean(arguments, "enable-point-nonpair", one_shot);
+  config.enable_direct_fix = OptionalBoolean(arguments, "enable-direct-fix", one_shot);
   config.enable_extra_edge = OptionalBoolean(arguments, "enable-extra-edge", one_shot);
-  config.extra_edge_depth = OptionalInteger<std::uint32_t>(
-      arguments, "extra-edge-depth", one_shot ? 2U : 1U);
+  config.extra_edge_depth =
+      OptionalInteger<std::uint32_t>(arguments, "extra-edge-depth", one_shot ? 2U : 1U);
   config.quick_hs_two_hop = OptionalBoolean(arguments, "quick-hs-two-hop", one_shot);
   config.protect_tour = OptionalBoolean(arguments, "protect-tour", !one_shot);
   config.enable_cpu_audit = OptionalBoolean(arguments, "cpu-audit", false);
   config.enable_fixing = one_shot;
-  if (one_shot && (!config.enable_main_edge || config.enable_cpu_audit ||
-                   config.max_pdlp_epochs != 0U || config.max_hs_epochs != 0U ||
-                   config.max_jv_rounds != 0U)) {
+  if (one_shot &&
+      (!config.enable_main_edge || config.enable_cpu_audit || config.max_pdlp_epochs != 0U ||
+       config.max_hs_epochs != 0U || config.max_jv_rounds != 0U)) {
     throw std::invalid_argument(
         "resident-oneshot 必须启用 Main Edge、关闭 CPU audit，并把所有 epoch/round 上限设为 0");
   }
@@ -499,8 +495,7 @@ void ResidentCommand(const Arguments& arguments, const bool one_shot = false) {
             << " lp_path_closed_replies=" << report.lp_path_closed_replies
             << " lp_degree_snapshots=" << report.lp_degree_snapshots
             << " lp_strong_snapshots=" << report.lp_strong_snapshots
-            << " lp_lower_bound=" << report.lp_lower_bound
-            << " jv_deleted=" << report.jv_committed
+            << " lp_lower_bound=" << report.lp_lower_bound << " jv_deleted=" << report.jv_committed
             << " quick_hs_deleted=" << report.quick_hs_committed
             << " hs_full_sweeps=" << report.hs_full_sweeps
             << " hs_active_sweeps=" << report.hs_active_sweeps
@@ -521,9 +516,8 @@ void ResidentCommand(const Arguments& arguments, const bool one_shot = false) {
             << " resident_bytes=" << report.resident_bytes << " upload_ms=" << std::fixed
             << std::setprecision(3) << report.upload_ms << " gpu_kernel_ms=" << report.gpu_kernel_ms
             << " geometry_ms=" << report.geometry_ms << " pdlp_ms=" << report.pdlp_ms
-            << " main_edge_ms=" << report.main_edge_ms
-            << " jv_ms=" << report.jv_ms << " quick_hs_ms=" << report.quick_hs_ms
-            << " extra_edge_ms=" << report.extra_edge_ms
+            << " main_edge_ms=" << report.main_edge_ms << " jv_ms=" << report.jv_ms
+            << " quick_hs_ms=" << report.quick_hs_ms << " extra_edge_ms=" << report.extra_edge_ms
             << " compaction_ms=" << report.compaction_ms
             << " gpu_download_ms=" << report.gpu_download_ms
             << " gpu_solve_wall_ms=" << report.gpu_solve_wall_ms

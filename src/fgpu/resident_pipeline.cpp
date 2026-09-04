@@ -37,9 +37,8 @@ void HashUint64(std::uint64_t* const hash, const std::uint64_t value) {
   }
 }
 
-std::uint64_t ComputeResidentStateHash(
-    const GraphSnapshot& graph, const std::vector<Edge>& fixed,
-    const std::vector<detail::ResidentNonpair>& nonpairs) {
+std::uint64_t ComputeResidentStateHash(const GraphSnapshot& graph, const std::vector<Edge>& fixed,
+                                       const std::vector<detail::ResidentNonpair>& nonpairs) {
   constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
   constexpr std::uint64_t kStateDomain = 0x4657505553544154ULL;
   std::uint64_t hash = kFnvOffset;
@@ -72,11 +71,11 @@ std::vector<std::uint8_t> BuildProtectedEdgeMask(const GraphSnapshot& graph,
     if (u > v) {
       std::swap(u, v);
     }
-    const auto found = std::lower_bound(
-        graph.edges.begin(), graph.edges.end(), std::pair{u, v},
-        [](const Edge& edge, const std::pair<std::int32_t, std::int32_t>& key) {
-          return std::tie(edge.u, edge.v) < std::tie(key.first, key.second);
-        });
+    const auto found =
+        std::lower_bound(graph.edges.begin(), graph.edges.end(), std::pair{u, v},
+                         [](const Edge& edge, const std::pair<std::int32_t, std::int32_t>& key) {
+                           return std::tie(edge.u, edge.v) < std::tie(key.first, key.second);
+                         });
     if (found == graph.edges.end() || found->u != u || found->v != v || !found->active) {
       throw std::runtime_error("resident 输入图缺少受保护 tour 边");
     }
@@ -124,8 +123,7 @@ void CheckTourNonpairs(const std::vector<std::int32_t>& tour,
   std::vector<std::int32_t> next(tour.size(), -1);
   for (std::size_t index = 0U; index < tour.size(); ++index) {
     const std::int32_t center = tour[index];
-    previous[static_cast<std::size_t>(center)] =
-        tour[(index + tour.size() - 1U) % tour.size()];
+    previous[static_cast<std::size_t>(center)] = tour[(index + tour.size() - 1U) % tour.size()];
     next[static_cast<std::size_t>(center)] = tour[(index + 1U) % tour.size()];
   }
   for (const detail::ResidentNonpair& nonpair : nonpairs) {
@@ -133,9 +131,8 @@ void CheckTourNonpairs(const std::vector<std::int32_t>& tour,
     const std::int32_t second = next[static_cast<std::size_t>(nonpair.center)];
     if ((nonpair.first == first && nonpair.second == second) ||
         (nonpair.first == second && nonpair.second == first)) {
-      throw std::runtime_error(
-          "resident non-pair 与提供的 incumbent tour 冲突: center=" +
-          std::to_string(nonpair.center));
+      throw std::runtime_error("resident non-pair 与提供的 incumbent tour 冲突: center=" +
+                               std::to_string(nonpair.center));
     }
   }
 }
@@ -149,17 +146,14 @@ void CheckKnownOptimalTourFixedEdges(const std::vector<std::int32_t>& tour,
   std::vector<std::int32_t> next(tour.size(), -1);
   for (std::size_t index = 0U; index < tour.size(); ++index) {
     const std::int32_t center = tour[index];
-    previous[static_cast<std::size_t>(center)] =
-        tour[(index + tour.size() - 1U) % tour.size()];
-    next[static_cast<std::size_t>(center)] =
-        tour[(index + 1U) % tour.size()];
+    previous[static_cast<std::size_t>(center)] = tour[(index + tour.size() - 1U) % tour.size()];
+    next[static_cast<std::size_t>(center)] = tour[(index + 1U) % tour.size()];
   }
   for (const Edge& edge : fixed) {
     if (previous[static_cast<std::size_t>(edge.u)] != edge.v &&
         next[static_cast<std::size_t>(edge.u)] != edge.v) {
-      throw std::runtime_error(
-          "resident fixed edge 不属于已知最优 tour: " +
-          std::to_string(edge.u) + "-" + std::to_string(edge.v));
+      throw std::runtime_error("resident fixed edge 不属于已知最优 tour: " +
+                               std::to_string(edge.u) + "-" + std::to_string(edge.v));
     }
   }
 }
@@ -188,12 +182,11 @@ void WriteNonpairs(const std::filesystem::path& path, const std::int32_t dimensi
     const std::size_t begin = cursor;
     while (cursor < nonpairs.size() && nonpairs[cursor].center == node) {
       if (nonpairs[cursor].first < 0 || nonpairs[cursor].second >= dimension ||
-          nonpairs[cursor].first >= nonpairs[cursor].second ||
-          nonpairs[cursor].first == node || nonpairs[cursor].second == node) {
-        throw std::logic_error(
-            "GPU non-pair 三元组非法: center=" + std::to_string(node) +
-            " first=" + std::to_string(nonpairs[cursor].first) +
-            " second=" + std::to_string(nonpairs[cursor].second));
+          nonpairs[cursor].first >= nonpairs[cursor].second || nonpairs[cursor].first == node ||
+          nonpairs[cursor].second == node) {
+        throw std::logic_error("GPU non-pair 三元组非法: center=" + std::to_string(node) +
+                               " first=" + std::to_string(nonpairs[cursor].first) +
+                               " second=" + std::to_string(nonpairs[cursor].second));
       }
       ++cursor;
     }
@@ -207,10 +200,8 @@ void WriteNonpairs(const std::filesystem::path& path, const std::int32_t dimensi
   }
 }
 
-void WriteGpuReplayLog(const std::filesystem::path& path,
-                       const detail::ResidentGpuResult& device,
-                       const std::uint64_t initial_hash,
-                       const std::uint64_t final_hash) {
+void WriteGpuReplayLog(const std::filesystem::path& path, const detail::ResidentGpuResult& device,
+                       const std::uint64_t initial_hash, const std::uint64_t final_hash) {
   std::ofstream output(path);
   if (!output) {
     throw std::runtime_error("无法创建 GPU replay log: " + path.string());
@@ -273,10 +264,8 @@ void WriteResidentManifest(const std::filesystem::path& path, const FgpuInput& i
   output << "enable_pdlp " << (config.enable_pdlp ? 1 : 0) << '\n';
   output << "enable_main_edge " << (config.enable_main_edge ? 1 : 0) << '\n';
   output << "enable_strong_metric " << (config.enable_strong_metric ? 1 : 0) << '\n';
-  output << "enable_point_nonpair "
-         << (config.enable_point_nonpair ? 1 : 0) << '\n';
-  output << "enable_direct_fix "
-         << (config.enable_direct_fix ? 1 : 0) << '\n';
+  output << "enable_point_nonpair " << (config.enable_point_nonpair ? 1 : 0) << '\n';
+  output << "enable_direct_fix " << (config.enable_direct_fix ? 1 : 0) << '\n';
   output << "enable_fixing " << (config.enable_fixing ? 1 : 0) << '\n';
   output << "enable_extra_edge " << (config.enable_extra_edge ? 1 : 0) << '\n';
   output << "extra_edge_depth " << config.extra_edge_depth << '\n';
@@ -314,17 +303,14 @@ void WriteResidentManifest(const std::filesystem::path& path, const FgpuInput& i
   output << "pair_count " << report.pair_count << '\n';
   output << "nonpair_count " << report.nonpair_count << '\n';
   output << "lp_nonpair_committed " << report.lp_nonpair_committed << '\n';
-  output << "fixed_anchor_nonpair_committed "
-         << report.fixed_anchor_nonpair_committed << '\n';
-  output << "point_nonpair_committed " << report.point_nonpair_committed
-         << '\n';
+  output << "fixed_anchor_nonpair_committed " << report.fixed_anchor_nonpair_committed << '\n';
+  output << "point_nonpair_committed " << report.point_nonpair_committed << '\n';
   output << "nonpair_fix_committed " << report.nonpair_fix_committed << '\n';
   output << "direct_fix_committed " << report.direct_fix_committed << '\n';
   output << "nonpair_ratio "
-         << (report.pair_count == 0U
-                 ? 0.0
-                 : static_cast<double>(report.nonpair_count) /
-                       static_cast<double>(report.pair_count))
+         << (report.pair_count == 0U ? 0.0
+                                     : static_cast<double>(report.nonpair_count) /
+                                           static_cast<double>(report.pair_count))
          << '\n';
   output << "fixed_propagation_committed " << report.fixed_propagation_committed << '\n';
   output << "hs_epochs " << report.hs_epochs << '\n';
@@ -393,26 +379,21 @@ void WriteSolveManifest(const std::filesystem::path& path, const FgpuInput& inpu
          << "  \"selected_device\": " << report.selected_device << ",\n"
          << "  \"initial_hash\": " << std::quoted(HexHash(report.initial_hash)) << ",\n"
          << "  \"final_hash\": " << std::quoted(HexHash(report.final_hash)) << ",\n"
-         << "  \"final_state_hash\": "
-         << std::quoted(HexHash(report.final_state_hash)) << ",\n"
+         << "  \"final_state_hash\": " << std::quoted(HexHash(report.final_state_hash)) << ",\n"
          << "  \"initial_edges\": " << report.initial_edges << ",\n"
          << "  \"final_edges\": " << report.final_edges << ",\n"
          << "  \"fixed_edges\": " << report.fixed_edges << ",\n"
          << "  \"pairs\": " << report.pairs << ",\n"
          << "  \"nonpairs\": " << report.nonpairs << ",\n"
          << "  \"lp_nonpairs\": " << report.lp_nonpairs << ",\n"
-         << "  \"fixed_anchor_nonpairs\": "
-         << report.fixed_anchor_nonpairs << ",\n"
+         << "  \"fixed_anchor_nonpairs\": " << report.fixed_anchor_nonpairs << ",\n"
          << "  \"point_nonpairs\": " << report.point_nonpairs << ",\n"
-         << "  \"nonpair_fixed_edges\": " << report.nonpair_fixed_edges
-         << ",\n"
-         << "  \"direct_fixed_edges\": " << report.direct_fixed_edges
-         << ",\n"
+         << "  \"nonpair_fixed_edges\": " << report.nonpair_fixed_edges << ",\n"
+         << "  \"direct_fixed_edges\": " << report.direct_fixed_edges << ",\n"
          << "  \"nonpair_ratio\": "
          << (report.pairs == 0U
                  ? 0.0
-                 : static_cast<double>(report.nonpairs) /
-                       static_cast<double>(report.pairs))
+                 : static_cast<double>(report.nonpairs) / static_cast<double>(report.pairs))
          << ",\n"
          << "  \"proof_replayed\": " << report.proof_replayed << ",\n"
          << "  \"proof_rejected\": " << report.proof_rejected << ",\n"
@@ -420,13 +401,11 @@ void WriteSolveManifest(const std::filesystem::path& path, const FgpuInput& inpu
          << "  \"geometry_deleted\": " << resident.geometry_committed << ",\n"
          << "  \"lp_deleted\": " << resident.lp_committed << ",\n"
          << "  \"lp_connectivity_cuts\": " << resident.lp_connectivity_cuts << ",\n"
-         << "  \"lp_path_closed_replies\": "
-         << resident.lp_path_closed_replies << ",\n"
+         << "  \"lp_path_closed_replies\": " << resident.lp_path_closed_replies << ",\n"
          << "  \"lp_degree_snapshots\": " << resident.lp_degree_snapshots << ",\n"
          << "  \"lp_strong_snapshots\": " << resident.lp_strong_snapshots << ",\n"
          << "  \"lp_lower_bound\": " << resident.lp_lower_bound << ",\n"
-         << "  \"fixed_propagation_deleted\": "
-         << resident.fixed_propagation_committed << ",\n"
+         << "  \"fixed_propagation_deleted\": " << resident.fixed_propagation_committed << ",\n"
          << "  \"jv_deleted\": " << resident.jv_committed << ",\n"
          << "  \"quick_hs_deleted\": " << resident.quick_hs_committed << ",\n"
          << "  \"quick_hs_full_sweeps\": " << resident.hs_full_sweeps << ",\n"
@@ -472,12 +451,10 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
       config.quick_hs_candidates < 2U || config.quick_hs_candidates > 32U ||
       config.extra_edge_depth < 1U || config.extra_edge_depth > 2U ||
       (config.serialize_gpu_certificate && !config.enable_gpu_replay) ||
-      ((config.enable_point_nonpair || config.enable_direct_fix) &&
-       !config.enable_pdlp) ||
+      ((config.enable_point_nonpair || config.enable_direct_fix) && !config.enable_pdlp) ||
       (config.enable_cpu_audit &&
-       (config.enable_main_edge || config.enable_extra_edge ||
-        config.enable_point_nonpair || config.enable_direct_fix ||
-        config.quick_hs_candidates != 10U ||
+       (config.enable_main_edge || config.enable_extra_edge || config.enable_point_nonpair ||
+        config.enable_direct_fix || config.quick_hs_candidates != 10U ||
         config.quick_hs_pair_trials != 10U || config.quick_hs_two_hop)) ||
       (!config.enable_quick_hs && !config.enable_jv && !config.enable_geometry &&
        !config.enable_pdlp && !config.enable_main_edge && !config.enable_extra_edge)) {
@@ -543,8 +520,7 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   report.lp_committed = device.lp_committed;
   report.nonpair_count = device.final_nonpairs.size();
   report.lp_nonpair_committed = device.lp_nonpair_committed;
-  report.fixed_anchor_nonpair_committed =
-      device.fixed_anchor_nonpair_committed;
+  report.fixed_anchor_nonpair_committed = device.fixed_anchor_nonpair_committed;
   report.point_nonpair_committed = device.point_nonpair_committed;
   report.nonpair_fix_committed = device.nonpair_fix_committed;
   report.direct_fix_committed = device.direct_fix_committed;
@@ -582,11 +558,10 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   report.compaction_ms = device.compaction_ms;
   report.gpu_download_ms = device.download_ms;
   report.gpu_solve_wall_ms = device.solve_wall_ms;
-  report.certificate.backend =
-      config.enable_cpu_audit
-          ? "cuda-fully-resident-cpu-audited"
-          : (config.enable_gpu_replay ? "cuda-fully-resident-gpu-replayed"
-                                      : "cuda-fully-resident-gpu-raw");
+  report.certificate.backend = config.enable_cpu_audit
+                                   ? "cuda-fully-resident-cpu-audited"
+                                   : (config.enable_gpu_replay ? "cuda-fully-resident-gpu-replayed"
+                                                               : "cuda-fully-resident-gpu-raw");
   report.certificate.initial_hash = report.initial_hash;
   report.certificate.final_hash = report.initial_hash;
 
@@ -739,8 +714,7 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
     CheckKnownOptimalTourFixedEdges(tour, fixed_edges);
   }
   report.fixed_count = fixed_edges.size();
-  report.final_state_hash =
-      ComputeResidentStateHash(audited, fixed_edges, device.final_nonpairs);
+  report.final_state_hash = ComputeResidentStateHash(audited, fixed_edges, device.final_nonpairs);
   if (config.enable_cpu_audit) {
     WriteProof(outputs.certificate, report.certificate);
     std::error_code size_error;
@@ -808,8 +782,7 @@ FgpuSolveReport RunFgpuElimination(const FgpuInput& input, const FgpuOutputPaths
   config.enable_point_nonpair = true;
   config.enable_direct_fix = true;
 
-  const FgpuResidentRunReport resident =
-      RunFgpuResidentElimination(input, outputs, config);
+  const FgpuResidentRunReport resident = RunFgpuResidentElimination(input, outputs, config);
   if (!resident.converged) {
     throw std::runtime_error("solve 在无预算上限模式下未到达自然不动点");
   }
