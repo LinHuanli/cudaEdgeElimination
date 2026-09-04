@@ -37,6 +37,14 @@ struct ExactBound {
   std::string reason;
 };
 
+// 将浮点 dual 统一量化后，同时返回模型下界和每列精确 reduced cost。后者用于
+// forced-one 诊断，避免把未量化的求解器 reduced cost 与精确下界混用。
+struct ExactModelEvaluation {
+  ExactBound bound;
+  __int128 lower_bound_numerator{};
+  std::vector<__int128> reduced_cost_numerator;
+};
+
 struct LpSolution {
   std::string solver;
   std::string solver_version;
@@ -94,6 +102,9 @@ void WriteLpSolution(const std::filesystem::path& path, const LpEpoch& epoch,
 [[nodiscard]] LpSolution SolveWithCuOpt(const LpEpoch& epoch, const std::string& library_path);
 [[nodiscard]] ExactBound BuildExactModelBound(const LpEpoch& epoch, const std::vector<double>& dual,
                                               std::uint32_t fractional_bits = 24);
+[[nodiscard]] ExactModelEvaluation BuildExactModelEvaluation(const LpEpoch& epoch,
+                                                             const std::vector<double>& dual,
+                                                             std::uint32_t fractional_bits = 24);
 [[nodiscard]] LpStableIdentity ComputeLpStableIdentity(const LpEpoch& epoch);
 [[nodiscard]] LpWarmStart BuildLpWarmStart(const LpEpoch& epoch, const LpSolution& solution);
 [[nodiscard]] LpWarmStartProjection

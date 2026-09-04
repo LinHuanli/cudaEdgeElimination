@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# FGPU-Elim 单卡全常驻复现实验：全部搜索阶段在一张 GPU 上完成，随后单独
-# CPU 精确审计并写证书。外部数据只读，所有构建与实验产物都留在本仓库。
+# FGPU-Elim 单卡全常驻复现实验：全部搜索阶段在一张 GPU 上完成。默认执行
+# 无证书、无 CPU 逐边审计的 raw 全量路径；审计仅作为显式 opt-in 回归模式。
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "${repo_root}"
@@ -11,7 +11,7 @@ instance="${1:-pcb442}"
 physical_gpu="${2:-}"
 repetitions="${3:-7}"
 if [[ ! "${instance}" =~ ^[A-Za-z0-9._-]+$ ||
-      ! "${repetitions}" =~ ^[1-9][0-9]*$ ]] || (( repetitions > 21 )); then
+      ! "${repetitions}" =~ ^[1-9][0-9]*$ ]]; then
   echo "用法：$0 [INSTANCE，默认 pcb442] [PHYSICAL_GPU] [REPETITIONS，默认 7]" >&2
   exit 2
 fi
@@ -69,17 +69,23 @@ if [[ "${CUDAEE_ALLOW_BUSY_GPU:-0}" != "1" ]] &&
 fi
 
 cuda_preset="${CUDAEE_CUDA_PRESET:-cuda-release}"
+cpu_audit_enabled="${CUDAEE_FGPU_RESIDENT_CPU_AUDIT:-0}"
 potential_candidates="${CUDAEE_FGPU_RESIDENT_POTENTIALS:-32}"
 pdlp_iterations="${CUDAEE_FGPU_RESIDENT_PDLP_ITERATIONS:-5000}"
-pdlp_epochs="${CUDAEE_FGPU_RESIDENT_PDLP_EPOCHS:-2}"
-hs_epochs="${CUDAEE_FGPU_RESIDENT_HS_EPOCHS:-100}"
-jv_rounds="${CUDAEE_FGPU_RESIDENT_JV_ROUNDS:-100}"
+# 0 表示自然固定点；默认不按审计模式偷偷恢复任何轮数上限。
+pdlp_epochs="${CUDAEE_FGPU_RESIDENT_PDLP_EPOCHS:-0}"
+hs_epochs="${CUDAEE_FGPU_RESIDENT_HS_EPOCHS:-0}"
+jv_rounds="${CUDAEE_FGPU_RESIDENT_JV_ROUNDS:-0}"
 omp_threads="${CUDAEE_FGPU_RESIDENT_OMP_THREADS:-16}"
-cpu_audit_enabled="${CUDAEE_FGPU_RESIDENT_CPU_AUDIT:-1}"
-for value in "${potential_candidates}" "${pdlp_iterations}" "${pdlp_epochs}" \
-             "${hs_epochs}" "${jv_rounds}" "${omp_threads}"; do
+for value in "${potential_candidates}" "${pdlp_iterations}" "${omp_threads}"; do
   if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
     echo "错误：resident 数值配置必须是正整数。" >&2
+    exit 5
+  fi
+done
+for value in "${pdlp_epochs}" "${hs_epochs}" "${jv_rounds}"; do
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    echo "错误：resident epoch/round 配置必须是非负整数（0 表示自然收敛）。" >&2
     exit 5
   fi
 done
@@ -95,7 +101,7 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_dir="${repo_root}/artifacts/${instance}-fgpu-resident-${timestamp}-$$"
 mkdir -p "${run_dir}"
 measurements="${run_dir}/measurements.tsv"
-printf 'run\tprocess_wall_s\tgpu_solve_ms\tcpu_audit_ms\tend_to_end_ms\ttrusted_total_ms\tfinal_edges\tfinal_hash\n' \
+printf 'run\tprocess_wall_s\tgpu_solve_ms\tcpu_audit_ms\tend_to_end_ms\ttrusted_total_ms\tfinal_edges\tfinal_hash\tgeometry_ms\tpdlp_ms\tjv_ms\tquick_hs_ms\tcompaction_ms\n' \
   >"${measurements}"
 
 reference_edge_sha=""
@@ -182,9 +188,15 @@ for ((run = 1; run <= repetitions; ++run)); do
   end_to_end="$(awk '$1 == "end_to_end_ms" { print $2 }' "${app_manifest}")"
   trusted_total="$(awk '$1 == "trusted_total_ms" { print $2 }' "${app_manifest}")"
   final_hash="$(awk '$1 == "final_hash" { print $2 }' "${app_manifest}")"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${run}" "${process_wall}" \
+  geometry_ms="$(awk '$1 == "geometry_ms" { print $2 }' "${app_manifest}")"
+  pdlp_ms="$(awk '$1 == "pdlp_ms" { print $2 }' "${app_manifest}")"
+  jv_ms="$(awk '$1 == "jv_ms" { print $2 }' "${app_manifest}")"
+  quick_hs_ms="$(awk '$1 == "quick_hs_ms" { print $2 }' "${app_manifest}")"
+  compaction_ms="$(awk '$1 == "compaction_ms" { print $2 }' "${app_manifest}")"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${run}" "${process_wall}" \
     "${gpu_solve}" "${cpu_audit_ms}" "${end_to_end}" "${trusted_total}" "${output_count}" \
-    "${final_hash}" \
+    "${final_hash}" "${geometry_ms}" "${pdlp_ms}" "${jv_ms}" "${quick_hs_ms}" \
+    "${compaction_ms}" \
     >>"${measurements}"
   cat "${output_prefix}/run.stdout"
 done
@@ -203,7 +215,16 @@ gpu_median="$(median_column 3)"
 audit_median="$(median_column 4)"
 end_to_end_median="$(median_column 5)"
 trusted_median="$(median_column 6)"
+geometry_median="$(median_column 9)"
+pdlp_median="$(median_column 10)"
+jv_median="$(median_column 11)"
+quick_hs_median="$(median_column 12)"
+compaction_median="$(median_column 13)"
 final_edges="$(awk 'NR == 2 { print $7 }' "${measurements}")"
+comparison_target_met=0
+if (( final_edges <= reference_remaining )); then
+  comparison_target_met=1
+fi
 author_single_edges="NA"
 author_single_wall="NA"
 author_fixed_edges="NA"
@@ -240,10 +261,16 @@ fi
   echo "cpu_audit_median_ms ${audit_median}"
   echo "end_to_end_median_ms ${end_to_end_median}"
   echo "trusted_total_median_ms ${trusted_median}"
+  echo "geometry_median_ms ${geometry_median}"
+  echo "pdlp_median_ms ${pdlp_median}"
+  echo "jv_median_ms ${jv_median}"
+  echo "quick_hs_median_ms ${quick_hs_median}"
+  echo "compaction_median_ms ${compaction_median}"
   echo "final_edges ${final_edges}"
   echo "edge_sha256 ${reference_edge_sha}"
   echo "certificate_sha256 ${reference_certificate_sha}"
-  echo "configured_strength_ceiling ${reference_remaining}"
+  echo "comparison_reference_edges ${reference_remaining}"
+  echo "comparison_strength_target_met ${comparison_target_met}"
   echo "author_single_pass_baseline_s ${author_single_wall}"
   echo "author_single_pass_reference_edges ${author_single_edges}"
   echo "author_single_pass_e2e_speedup ${author_speedup}"

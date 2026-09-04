@@ -97,7 +97,37 @@ struct PdlpResult {
   std::vector<double> edge_scores;
 };
 
+struct SubtourPdlpOptions {
+  std::string cuopt_library;
+  // 非空时仅作为研究期 CPU exact-mincut 强度 oracle；正式 GPU 路径必须留空。
+  std::filesystem::path mincut_oracle;
+  int device{0};
+  // 只用于判定数值 support 和严格违反割；不构成人为 epoch/规模上限。
+  double support_epsilon{1.0e-8};
+  double violation_epsilon{1.0e-7};
+  std::uint32_t fractional_bits{24U};
+};
+
+struct SubtourPdlpResult {
+  std::string backend{"cuopt-subtour-cut-loop"};
+  bool converged{false};
+  std::uint32_t epochs{};
+  std::size_t cuts{};
+  std::size_t support_components{};
+  std::size_t forced_one_candidates{};
+  double objective{};
+  double dual_objective{};
+  double solve_ms{};
+  double total_ms{};
+  ExactBound exact_bound;
+  // 与 stable edge id 对齐；非活动边为负无穷。
+  std::vector<double> edge_scores;
+};
+
 [[nodiscard]] PdlpResult RunFgpuPdlp(const GraphSnapshot& graph, const PdlpOptions& options);
+[[nodiscard]] SubtourPdlpResult RunFgpuSubtourPdlp(const GraphSnapshot& graph,
+                                                   std::int64_t incumbent_cost,
+                                                   const SubtourPdlpOptions& options);
 [[nodiscard]] EliminationResult RunLpBoxElimination(GraphSnapshot* graph, const PdlpResult& pdlp,
                                                     std::int64_t incumbent_cost);
 
@@ -171,20 +201,21 @@ struct FgpuRunReport {
   EliminationResult certificate;
 };
 
-// 显式的单 GPU 常驻搜索。默认在设备 fixed point 后进行 CPU 审计；全量性能实验
-// 可关闭审计与 trace，此时结果必须明确标记为 unaudited，不得冒充认证输出。
+// 显式的单 GPU 常驻搜索。默认是无证书、无 CPU 逐边审计的全量 raw 路径；
+// 如需正式认证可显式打开审计。raw 输出必须标记为 unaudited，不得冒充认证结果。
 struct FgpuResidentConfig {
   int device{0};
-  std::uint32_t max_hs_epochs{100U};
-  std::uint32_t max_jv_rounds{100U};
+  // 三个 max 字段取 0 时表示不设人为上限，运行到自然固定点。
+  std::uint32_t max_hs_epochs{0U};
+  std::uint32_t max_jv_rounds{0U};
   std::uint32_t potential_candidates{32U};
   std::uint32_t pdlp_iterations{5000U};
-  std::uint32_t max_pdlp_epochs{2U};
+  std::uint32_t max_pdlp_epochs{0U};
   bool enable_quick_hs{true};
   bool enable_jv{true};
   bool enable_geometry{true};
   bool enable_pdlp{true};
-  bool enable_cpu_audit{true};
+  bool enable_cpu_audit{false};
 };
 
 struct FgpuResidentRunReport {
@@ -205,6 +236,11 @@ struct FgpuResidentRunReport {
   std::uint64_t resident_bytes{};
   double upload_ms{};
   double gpu_kernel_ms{};
+  double geometry_ms{};
+  double pdlp_ms{};
+  double jv_ms{};
+  double quick_hs_ms{};
+  double compaction_ms{};
   double gpu_download_ms{};
   // 从已解析图开始，到设备 fixed point 与最终 mask 回传；不含 CPU audit/文件写出。
   double gpu_solve_wall_ms{};

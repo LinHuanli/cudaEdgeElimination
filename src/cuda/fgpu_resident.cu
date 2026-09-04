@@ -3,6 +3,7 @@
 #include "../fgpu/quick_hs_predicate.hpp"
 #include "cuda_edge_elimination/cuda_device_affinity.hpp"
 
+#include <cub/device/device_select.cuh>
 #include <cuda_runtime.h>
 #include <math_constants.h>
 
@@ -11,7 +12,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -143,6 +146,14 @@ int SelectDevice(const int requested, std::string* const reason) {
   return selected;
 }
 
+__global__ void InitializeEdgeIdsKernel(const std::int32_t edge_count,
+                                        std::int32_t* const edge_ids) {
+  const std::int32_t edge = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (edge < edge_count) {
+    edge_ids[edge] = edge;
+  }
+}
+
 __global__ void BuildAdjacencyKernel(const std::int32_t dimension, const std::uint8_t* const active,
                                      const std::int64_t* const distance, std::int32_t* const degree,
                                      std::int32_t* const neighbors) {
@@ -173,6 +184,17 @@ __global__ void BuildAdjacencyKernel(const std::int32_t dimension, const std::ui
 }
 
 constexpr std::int32_t kMaxGeometryPotential = 32;
+constexpr std::int32_t kGeometryKdStackCapacity = 32;
+
+struct GeometryKdNode {
+  std::int32_t point{-1};
+  std::int32_t left{-1};
+  std::int32_t right{-1};
+  std::int64_t min_x{};
+  std::int64_t max_x{};
+  std::int64_t min_y{};
+  std::int64_t max_y{};
+};
 
 struct DeviceInterval {
   double lower{};
@@ -411,6 +433,81 @@ __device__ void InsertGeometryCandidate(const std::int32_t node, const double sc
   nodes[position] = node;
 }
 
+__device__ double GeometryMidpointScore(const std::int32_t p, const std::int32_t q,
+                                        const std::int32_t node, const std::int64_t* const x,
+                                        const std::int64_t* const y) {
+  const double dx =
+      2.0 * static_cast<double>(x[node]) - static_cast<double>(x[p]) - static_cast<double>(x[q]);
+  const double dy =
+      2.0 * static_cast<double>(y[node]) - static_cast<double>(y[p]) - static_cast<double>(y[q]);
+  return dx * dx + dy * dy;
+}
+
+__device__ double GeometryKdLowerBound(const GeometryKdNode& node, const std::int32_t p,
+                                       const std::int32_t q, const std::int64_t* const x,
+                                       const std::int64_t* const y) {
+  const double midpoint_x = static_cast<double>(x[p]) + static_cast<double>(x[q]);
+  const double midpoint_y = static_cast<double>(y[p]) + static_cast<double>(y[q]);
+  const double minimum_x = 2.0 * static_cast<double>(node.min_x);
+  const double maximum_x = 2.0 * static_cast<double>(node.max_x);
+  const double minimum_y = 2.0 * static_cast<double>(node.min_y);
+  const double maximum_y = 2.0 * static_cast<double>(node.max_y);
+  const double dx = midpoint_x < minimum_x   ? minimum_x - midpoint_x
+                    : midpoint_x > maximum_x ? midpoint_x - maximum_x
+                                             : 0.0;
+  const double dy = midpoint_y < minimum_y   ? minimum_y - midpoint_y
+                    : midpoint_y > maximum_y ? midpoint_y - maximum_y
+                                             : 0.0;
+  // 下界使用向下舍入；即使输入接近 FP64 边界，也只会少剪枝，不会漏掉候选。
+  return __dadd_rd(__dmul_rd(dx, dx), __dmul_rd(dy, dy));
+}
+
+__device__ bool SelectGeometryCandidates(const std::int32_t p, const std::int32_t q,
+                                         const GeometryKdNode* const kd_nodes,
+                                         const std::int32_t kd_root, const std::int64_t* const x,
+                                         const std::int64_t* const y, const std::int32_t capacity,
+                                         std::int32_t* const nodes, double* const scores,
+                                         std::int32_t* const selected) {
+  std::int32_t stack[kGeometryKdStackCapacity]{};
+  std::int32_t stack_size = 0;
+  stack[stack_size++] = kd_root;
+  while (stack_size != 0) {
+    const std::int32_t tree_index = stack[--stack_size];
+    const GeometryKdNode tree_node = kd_nodes[tree_index];
+    if (*selected == capacity &&
+        GeometryKdLowerBound(tree_node, p, q, x, y) > scores[capacity - 1]) {
+      continue;
+    }
+    if (tree_node.point != p && tree_node.point != q) {
+      InsertGeometryCandidate(tree_node.point, GeometryMidpointScore(p, q, tree_node.point, x, y),
+                              capacity, nodes, scores, selected);
+    }
+
+    // 先访问 AABB 下界较小的子树。栈溢出时不能漏点，直接放弃该边的几何删除。
+    const std::int32_t first = tree_node.left;
+    const std::int32_t second = tree_node.right;
+    if (first >= 0 && second >= 0) {
+      const double first_bound = GeometryKdLowerBound(kd_nodes[first], p, q, x, y);
+      const double second_bound = GeometryKdLowerBound(kd_nodes[second], p, q, x, y);
+      const std::int32_t near_child =
+          first_bound < second_bound || (first_bound == second_bound && first < second) ? first
+                                                                                        : second;
+      const std::int32_t far_child = near_child == first ? second : first;
+      if (stack_size + 2 > kGeometryKdStackCapacity) {
+        return false;
+      }
+      stack[stack_size++] = far_child;
+      stack[stack_size++] = near_child;
+    } else if (first >= 0 || second >= 0) {
+      if (stack_size + 1 > kGeometryKdStackCapacity) {
+        return false;
+      }
+      stack[stack_size++] = first >= 0 ? first : second;
+    }
+  }
+  return true;
+}
+
 __global__ void NearestDistanceKernel(const std::int32_t dimension,
                                       const std::int64_t* const distance,
                                       std::int64_t* const nearest) {
@@ -428,17 +525,21 @@ __global__ void NearestDistanceKernel(const std::int32_t dimension,
   nearest[node] = best;
 }
 
-__global__ void GeometryKernel(const std::int32_t edge_count, const std::int32_t* const edge_u,
-                               const std::int32_t* const edge_v,
-                               const std::uint8_t* const edge_active,
-                               const std::uint8_t* const protected_edge,
-                               const quick_hs::GraphView graph, const std::int64_t* const x,
-                               const std::int64_t* const y, const std::int64_t* const nearest,
-                               const std::int32_t potential_count, std::uint8_t* const proposed,
-                               std::int32_t* const first_witness,
-                               std::int32_t* const second_witness) {
-  const std::int32_t edge = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
-  if (edge >= edge_count || edge_active[edge] == 0U || protected_edge[edge] != 0U) {
+__global__ void
+GeometryKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+               const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+               const std::uint8_t* const edge_active, const std::uint8_t* const protected_edge,
+               const quick_hs::GraphView graph, const std::int64_t* const x,
+               const std::int64_t* const y, const GeometryKdNode* const kd_nodes,
+               const std::int32_t kd_root, const std::int64_t* const nearest,
+               const std::int32_t potential_count, std::uint8_t* const proposed,
+               std::int32_t* const first_witness, std::int32_t* const second_witness) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] == 0U || protected_edge[edge] != 0U) {
     return;
   }
   const std::int32_t p = edge_u[edge];
@@ -449,15 +550,9 @@ __global__ void GeometryKernel(const std::int32_t edge_count, const std::int32_t
   std::int32_t nodes[kMaxGeometryPotential]{};
   double scores[kMaxGeometryPotential]{};
   std::int32_t selected = 0;
-  for (std::int32_t node = 0; node < graph.dimension; ++node) {
-    if (node == p || node == q) {
-      continue;
-    }
-    const double dx =
-        2.0 * static_cast<double>(x[node]) - static_cast<double>(x[p]) - static_cast<double>(x[q]);
-    const double dy =
-        2.0 * static_cast<double>(y[node]) - static_cast<double>(y[p]) - static_cast<double>(y[q]);
-    InsertGeometryCandidate(node, dx * dx + dy * dy, potential_count, nodes, scores, &selected);
+  if (!SelectGeometryCandidates(p, q, kd_nodes, kd_root, x, y, potential_count, nodes, scores,
+                                &selected)) {
+    return;
   }
   IntervalGeometryPotential potential[kMaxGeometryPotential]{};
   std::int32_t valid = 0;
@@ -571,12 +666,17 @@ __device__ std::int32_t FindJvWitness(const quick_hs::GraphView& graph, const st
   return -1;
 }
 
-__global__ void JvKernel(const std::int32_t edge_count, const std::int32_t* const edge_u,
-                         const std::int32_t* const edge_v, const std::uint8_t* const edge_active,
+__global__ void JvKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+                         const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+                         const std::uint8_t* const edge_active,
                          const std::uint8_t* const protected_edge, const quick_hs::GraphView graph,
                          std::uint8_t* const proposed, std::int32_t* const first_witness) {
-  const std::int32_t edge = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
-  if (edge >= edge_count || edge_active[edge] == 0U || protected_edge[edge] != 0U) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] == 0U || protected_edge[edge] != 0U) {
     return;
   }
   const std::int32_t a = edge_u[edge];
@@ -591,15 +691,18 @@ __global__ void JvKernel(const std::int32_t edge_count, const std::int32_t* cons
   }
 }
 
-__global__ void QuickHsKernel(const std::int32_t edge_count, const std::int32_t* const edge_u,
-                              const std::int32_t* const edge_v,
-                              const std::uint8_t* const edge_active,
-                              const std::uint8_t* const protected_edge,
-                              const quick_hs::GraphView graph, std::uint8_t* const proposed,
-                              std::int32_t* const first_witness,
-                              std::int32_t* const second_witness) {
-  const std::int32_t edge = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
-  if (edge >= edge_count || edge_active[edge] == 0U || protected_edge[edge] != 0U) {
+__global__ void
+QuickHsKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+              const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+              const std::uint8_t* const edge_active, const std::uint8_t* const protected_edge,
+              const quick_hs::GraphView graph, std::uint8_t* const proposed,
+              std::int32_t* const first_witness, std::int32_t* const second_witness) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] == 0U || protected_edge[edge] != 0U) {
     return;
   }
   const std::int32_t a = edge_u[edge];
@@ -612,25 +715,34 @@ __global__ void QuickHsKernel(const std::int32_t edge_count, const std::int32_t*
   }
 }
 
-__global__ void ActiveCostSummaryKernel(const std::int32_t edge_count,
+__global__ void ActiveCostSummaryKernel(const std::int32_t work_count,
+                                        const std::int32_t* const active_edge_ids,
                                         const std::int64_t* const edge_weight,
                                         const std::uint8_t* const edge_active,
                                         unsigned long long* const active_count,
                                         unsigned long long* const cost_sum) {
-  const std::int32_t edge = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
-  if (edge < edge_count && edge_active[edge] != 0U) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work < work_count) {
+    const std::int32_t edge = active_edge_ids[work];
+    if (edge_active[edge] == 0U) {
+      return;
+    }
     atomicAdd(active_count, 1ULL);
     atomicAdd(cost_sum, static_cast<unsigned long long>(edge_weight[edge]));
   }
 }
 
 __global__ void
-SelectDegreeBoxKernel(const std::int32_t edge_count, const std::int32_t* const edge_u,
-                      const std::int32_t* const edge_v, const std::int64_t* const edge_weight,
-                      const std::uint8_t* const edge_active, const double* const dual,
-                      std::int32_t* const selected_degree) {
-  const std::int32_t edge = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
-  if (edge >= edge_count || edge_active[edge] == 0U) {
+SelectDegreeBoxKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+                      const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+                      const std::int64_t* const edge_weight, const std::uint8_t* const edge_active,
+                      const double* const dual, std::int32_t* const selected_degree) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] == 0U) {
     return;
   }
   const std::int32_t u = edge_u[edge];
@@ -687,17 +799,17 @@ __global__ void DegreeConstantKernel(const std::int32_t dimension,
   }
 }
 
-__global__ void ReducedCostKernel(const std::int32_t edge_count, const std::int32_t* const edge_u,
-                                  const std::int32_t* const edge_v,
-                                  const std::int64_t* const edge_weight,
-                                  const std::uint8_t* const edge_active,
-                                  const std::int64_t denominator,
-                                  const std::int64_t* const quantized,
-                                  std::int64_t* const reduced_cost, long long* const lower_bound) {
-  const std::int32_t edge = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
-  if (edge >= edge_count) {
+__global__ void
+ReducedCostKernel(const std::int32_t work_count, const std::int32_t* const active_edge_ids,
+                  const std::int32_t* const edge_u, const std::int32_t* const edge_v,
+                  const std::int64_t* const edge_weight, const std::uint8_t* const edge_active,
+                  const std::int64_t denominator, const std::int64_t* const quantized,
+                  std::int64_t* const reduced_cost, long long* const lower_bound) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= work_count) {
     return;
   }
+  const std::int32_t edge = active_edge_ids[work];
   if (edge_active[edge] == 0U) {
     reduced_cost[edge] = 0;
     return;
@@ -713,13 +825,18 @@ __global__ void ReducedCostKernel(const std::int32_t edge_count, const std::int3
 
 __global__ void
 LpForcedOneKernel(const std::int32_t edge_count, const std::int32_t* const edge_u,
-                  const std::int32_t* const edge_v, const std::uint8_t* const edge_active,
-                  const std::uint8_t* const protected_edge, const std::int32_t* const degree,
-                  const std::int64_t* const reduced_cost, const long long* const lower_bound,
-                  const std::int64_t incumbent_numerator, std::uint8_t* const proposed) {
-  const std::int32_t edge = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
-  if (edge >= edge_count || edge_active[edge] == 0U || protected_edge[edge] != 0U ||
-      degree[edge_u[edge]] <= 2 || degree[edge_v[edge]] <= 2) {
+                  const std::int32_t* const active_edge_ids, const std::int32_t* const edge_v,
+                  const std::uint8_t* const edge_active, const std::uint8_t* const protected_edge,
+                  const std::int32_t* const degree, const std::int64_t* const reduced_cost,
+                  const long long* const lower_bound, const std::int64_t incumbent_numerator,
+                  std::uint8_t* const proposed) {
+  const std::int32_t work = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (work >= edge_count) {
+    return;
+  }
+  const std::int32_t edge = active_edge_ids[work];
+  if (edge_active[edge] == 0U || protected_edge[edge] != 0U || degree[edge_u[edge]] <= 2 ||
+      degree[edge_v[edge]] <= 2) {
     return;
   }
   const std::int64_t positive_reduced = reduced_cost[edge] > 0 ? reduced_cost[edge] : 0;
@@ -730,7 +847,8 @@ LpForcedOneKernel(const std::int32_t edge_count, const std::int32_t* const edge_
 
 // 候选在同一只读快照生成；提交仍按 stable edge id 串行执行最小度门禁。
 // 该 kernel 的工作远小于组合搜索，单线程可保证与 CPU replayer 完全同序。
-__global__ void CommitKernel(const std::int32_t dimension, const std::int32_t edge_count,
+__global__ void CommitKernel(const std::int32_t dimension, const std::int32_t work_count,
+                             const std::int32_t* const active_edge_ids,
                              const std::int32_t* const edge_u, const std::int32_t* const edge_v,
                              std::uint8_t* const edge_active, std::uint8_t* const active_matrix,
                              const std::uint8_t* const protected_edge,
@@ -741,7 +859,8 @@ __global__ void CommitKernel(const std::int32_t dimension, const std::int32_t ed
     return;
   }
   unsigned long long count = 0U;
-  for (std::int32_t edge = 0; edge < edge_count; ++edge) {
+  for (std::int32_t work = 0; work < work_count; ++work) {
+    const std::int32_t edge = active_edge_ids[work];
     if (edge_active[edge] == 0U || proposed[edge] == 0U || protected_edge[edge] != 0U) {
       continue;
     }
@@ -773,6 +892,65 @@ std::vector<std::int64_t> BuildDistanceMatrix(const GraphSnapshot& graph) {
   return result;
 }
 
+std::vector<GeometryKdNode> BuildGeometryKdTree(const GraphSnapshot& graph) {
+  std::vector<std::int32_t> points(static_cast<std::size_t>(graph.dimension));
+  std::iota(points.begin(), points.end(), 0);
+  std::vector<GeometryKdNode> nodes;
+  nodes.reserve(points.size());
+
+  const auto coordinate = [&](const std::int32_t point, const bool split_x) {
+    return split_x ? graph.points[static_cast<std::size_t>(point)].integer_x
+                   : graph.points[static_cast<std::size_t>(point)].integer_y;
+  };
+  std::function<std::int32_t(std::size_t, std::size_t, bool)> build =
+      [&](const std::size_t begin, const std::size_t end, const bool split_x) -> std::int32_t {
+    if (begin == end) {
+      return -1;
+    }
+    const std::size_t middle = begin + (end - begin) / 2U;
+    std::nth_element(points.begin() + static_cast<std::ptrdiff_t>(begin),
+                     points.begin() + static_cast<std::ptrdiff_t>(middle),
+                     points.begin() + static_cast<std::ptrdiff_t>(end),
+                     [&](const std::int32_t lhs, const std::int32_t rhs) {
+                       const std::int64_t lhs_coordinate = coordinate(lhs, split_x);
+                       const std::int64_t rhs_coordinate = coordinate(rhs, split_x);
+                       return lhs_coordinate < rhs_coordinate ||
+                              (lhs_coordinate == rhs_coordinate && lhs < rhs);
+                     });
+    const std::int32_t tree_index = static_cast<std::int32_t>(nodes.size());
+    const std::int32_t point = points[middle];
+    const auto& source = graph.points[static_cast<std::size_t>(point)];
+    nodes.push_back({.point = point,
+                     .left = -1,
+                     .right = -1,
+                     .min_x = source.integer_x,
+                     .max_x = source.integer_x,
+                     .min_y = source.integer_y,
+                     .max_y = source.integer_y});
+    const std::int32_t left = build(begin, middle, !split_x);
+    const std::int32_t right = build(middle + 1U, end, !split_x);
+    GeometryKdNode& output = nodes[static_cast<std::size_t>(tree_index)];
+    output.left = left;
+    output.right = right;
+    for (const std::int32_t child : {left, right}) {
+      if (child < 0) {
+        continue;
+      }
+      const GeometryKdNode& child_node = nodes[static_cast<std::size_t>(child)];
+      output.min_x = std::min(output.min_x, child_node.min_x);
+      output.max_x = std::max(output.max_x, child_node.max_x);
+      output.min_y = std::min(output.min_y, child_node.min_y);
+      output.max_y = std::max(output.max_y, child_node.max_y);
+    }
+    return tree_index;
+  };
+  const std::int32_t root = build(0U, points.size(), true);
+  if (root != 0 || nodes.size() != points.size()) {
+    throw std::logic_error("resident geometry KD-tree 构造不完整");
+  }
+  return nodes;
+}
+
 } // namespace
 
 bool ResidentEliminationCudaAvailable(std::string* const reason) {
@@ -784,7 +962,6 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
                                              const ResidentGpuOptions& options) {
   if (graph.dimension <= 0 || graph.edges.empty() || !graph.integer_coordinates ||
       !graph.integer_distance_safe || protected_edges.size() != graph.edges.size() ||
-      options.max_hs_epochs == 0U || options.max_jv_rounds == 0U || options.max_pdlp_epochs == 0U ||
       options.pdlp_iterations == 0U || options.potential_candidates < 2U ||
       options.potential_candidates > 32U || options.fractional_bits > 30U ||
       (options.enable_pdlp && options.incumbent_cost < 0) ||
@@ -792,9 +969,8 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
        !options.enable_pdlp)) {
     throw std::invalid_argument("resident GPU 输入图、tour mask、阶段开关或预算非法");
   }
-  if (graph.dimension > kMaxResidentDimension ||
-      graph.edges.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
-    throw std::overflow_error("resident GPU 当前维度上限为 4096，edge id 为 int32");
+  if (graph.edges.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+    throw std::overflow_error("resident GPU 的 int32 edge id 无法表示当前图");
   }
   std::string reason;
   const int device = SelectDevice(options.device, &reason);
@@ -824,6 +1000,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     }
   }
   const std::vector<std::int64_t> host_distance = BuildDistanceMatrix(graph);
+  const std::vector<GeometryKdNode> host_geometry_kd = BuildGeometryKdTree(graph);
   std::vector<std::int64_t> host_x(dimension);
   std::vector<std::int64_t> host_y(dimension);
   for (std::size_t node = 0U; node < dimension; ++node) {
@@ -860,11 +1037,15 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   DeviceBuffer<std::int32_t> device_edge_v(edge_count, device);
   DeviceBuffer<std::int64_t> device_edge_weight(edge_count, device);
   DeviceBuffer<std::uint8_t> device_edge_active(edge_count, device);
+  DeviceBuffer<std::int32_t> device_all_edge_ids(edge_count, device);
+  DeviceBuffer<std::int32_t> device_active_edge_ids(edge_count, device);
+  DeviceBuffer<std::int32_t> device_active_edge_count(1U, device);
   DeviceBuffer<std::uint8_t> device_protected(protected_edges.size(), device);
   DeviceBuffer<std::uint8_t> device_active_matrix(matrix_size, device);
   DeviceBuffer<std::int64_t> device_distance(matrix_size, device);
   DeviceBuffer<std::int64_t> device_x(dimension, device);
   DeviceBuffer<std::int64_t> device_y(dimension, device);
+  DeviceBuffer<GeometryKdNode> device_geometry_kd(host_geometry_kd.size(), device);
   DeviceBuffer<std::int64_t> device_nearest(dimension, device);
   DeviceBuffer<std::int32_t> device_degree(dimension, device);
   DeviceBuffer<std::int32_t> device_neighbors(matrix_size, device);
@@ -881,6 +1062,13 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   DeviceBuffer<unsigned long long> device_summary(2U, device);
   DeviceBuffer<long long> device_lower_bound(1U, device);
   DeviceBuffer<std::int32_t> device_invalid(1U, device);
+  std::size_t active_select_temp_bytes = 0U;
+  CheckCuda(cub::DeviceSelect::Flagged(nullptr, active_select_temp_bytes, device_all_edge_ids.get(),
+                                       device_edge_active.get(), device_active_edge_ids.get(),
+                                       device_active_edge_count.get(),
+                                       static_cast<std::int32_t>(edge_count)),
+            "cub::DeviceSelect::Flagged size query");
+  DeviceBuffer<std::uint8_t> device_active_select_temp(active_select_temp_bytes, device);
 
   ResidentGpuResult result;
   result.selected_device = device;
@@ -888,8 +1076,10 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   result.initial_edges = graph.ActiveEdgeCount();
   result.resident_bytes =
       device_edge_u.bytes() + device_edge_v.bytes() + device_edge_weight.bytes() +
-      device_edge_active.bytes() + device_protected.bytes() + device_active_matrix.bytes() +
-      device_distance.bytes() + device_x.bytes() + device_y.bytes() + device_nearest.bytes() +
+      device_edge_active.bytes() + device_all_edge_ids.bytes() + device_active_edge_ids.bytes() +
+      device_active_edge_count.bytes() + device_active_select_temp.bytes() +
+      device_protected.bytes() + device_active_matrix.bytes() + device_distance.bytes() +
+      device_x.bytes() + device_y.bytes() + device_geometry_kd.bytes() + device_nearest.bytes() +
       device_degree.bytes() + device_neighbors.bytes() + device_proposed.bytes() +
       device_committed.bytes() + device_first_witness.bytes() + device_second_witness.bytes() +
       device_committed_count.bytes() + device_selected_degree.bytes() + device_dual.bytes() +
@@ -901,25 +1091,48 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   device_edge_v.CopyFromHost(host_edge_v.data(), edge_count);
   device_edge_weight.CopyFromHost(host_edge_weight.data(), edge_count);
   device_edge_active.CopyFromHost(host_edge_active.data(), edge_count);
+  constexpr int kThreads = 128;
+  const int all_edge_blocks =
+      static_cast<int>((static_cast<std::int64_t>(edge_count) + kThreads - 1) / kThreads);
+  InitializeEdgeIdsKernel<<<all_edge_blocks, kThreads>>>(static_cast<std::int32_t>(edge_count),
+                                                         device_all_edge_ids.get());
+  CheckCuda(cudaGetLastError(), "InitializeEdgeIdsKernel launch");
   device_protected.CopyFromHost(protected_edges.data(), protected_edges.size());
   device_active_matrix.CopyFromHost(host_active_matrix.data(), matrix_size);
   device_distance.CopyFromHost(host_distance.data(), matrix_size);
   device_x.CopyFromHost(host_x.data(), dimension);
   device_y.CopyFromHost(host_y.data(), dimension);
+  device_geometry_kd.CopyFromHost(host_geometry_kd.data(), host_geometry_kd.size());
   result.upload_ms = ElapsedMilliseconds(upload_begin);
 
-  constexpr int kThreads = 128;
-  const int edge_blocks = (static_cast<std::int32_t>(edge_count) + kThreads - 1) / kThreads;
-  const int vertex_blocks = (graph.dimension + kThreads - 1) / kThreads;
+  const int vertex_blocks =
+      static_cast<int>((static_cast<std::int64_t>(graph.dimension) + kThreads - 1) / kThreads);
   const quick_hs::GraphView view{.dimension = graph.dimension,
                                  .degree = device_degree.get(),
                                  .neighbors = device_neighbors.get(),
                                  .distance = device_distance.get(),
                                  .active = device_active_matrix.get()};
   std::size_t current_edges = result.initial_edges;
+  std::int32_t active_edge_count = 0;
   std::vector<std::uint8_t> host_committed(options.collect_trace ? edge_count : 0U);
   std::vector<std::int32_t> host_first_witness(options.collect_trace ? edge_count : 0U);
   std::vector<std::int32_t> host_second_witness(options.collect_trace ? edge_count : 0U);
+
+  const auto compact_active_edges = [&] {
+    const SteadyClock::time_point compact_begin = SteadyClock::now();
+    CheckCuda(cub::DeviceSelect::Flagged(
+                  device_active_select_temp.get(), active_select_temp_bytes,
+                  device_all_edge_ids.get(), device_edge_active.get(), device_active_edge_ids.get(),
+                  device_active_edge_count.get(), static_cast<std::int32_t>(edge_count)),
+              "cub::DeviceSelect::Flagged active edges");
+    device_active_edge_count.CopyToHost(&active_edge_count, 1U);
+    if (active_edge_count < 0 || static_cast<std::size_t>(active_edge_count) != current_edges) {
+      throw std::logic_error("resident GPU 活动 edge-id 压缩计数不一致");
+    }
+    result.compaction_ms += ElapsedMilliseconds(compact_begin);
+  };
+  // CUB 的 Flagged selection 保留输入次序，因此列表始终按 stable edge id 递增。
+  compact_active_edges();
 
   const auto rebuild = [&] {
     BuildAdjacencyKernel<<<vertex_blocks, kThreads>>>(graph.dimension, device_active_matrix.get(),
@@ -929,6 +1142,12 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   };
   const auto run_epoch = [&](const EliminationMethod method) -> std::size_t {
     const SteadyClock::time_point kernel_begin = SteadyClock::now();
+    const std::int32_t work_count = active_edge_count;
+    const int work_blocks =
+        static_cast<int>((static_cast<std::int64_t>(work_count) + kThreads - 1) / kThreads);
+    if (work_count <= 0) {
+      throw std::logic_error("resident epoch 收到空活动边集");
+    }
     rebuild();
     CheckCuda(cudaMemset(device_proposed.get(), 0, edge_count * sizeof(std::uint8_t)),
               "cudaMemset resident proposed");
@@ -940,29 +1159,30 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
               "cudaMemset resident second witness");
     std::vector<std::int64_t> host_quantized_dual;
     if (method == EliminationMethod::kJv) {
-      JvKernel<<<edge_blocks, kThreads>>>(static_cast<std::int32_t>(edge_count),
+      JvKernel<<<work_blocks, kThreads>>>(work_count, device_active_edge_ids.get(),
                                           device_edge_u.get(), device_edge_v.get(),
                                           device_edge_active.get(), device_protected.get(), view,
                                           device_proposed.get(), device_first_witness.get());
     } else if (method == EliminationMethod::kGpuQuickHs) {
-      QuickHsKernel<<<edge_blocks, kThreads>>>(
-          static_cast<std::int32_t>(edge_count), device_edge_u.get(), device_edge_v.get(),
+      QuickHsKernel<<<work_blocks, kThreads>>>(
+          work_count, device_active_edge_ids.get(), device_edge_u.get(), device_edge_v.get(),
           device_edge_active.get(), device_protected.get(), view, device_proposed.get(),
           device_first_witness.get(), device_second_witness.get());
     } else if (method == EliminationMethod::kGeometryMain) {
       NearestDistanceKernel<<<vertex_blocks, kThreads>>>(graph.dimension, device_distance.get(),
                                                          device_nearest.get());
-      GeometryKernel<<<edge_blocks, kThreads>>>(
-          static_cast<std::int32_t>(edge_count), device_edge_u.get(), device_edge_v.get(),
+      GeometryKernel<<<work_blocks, kThreads>>>(
+          work_count, device_active_edge_ids.get(), device_edge_u.get(), device_edge_v.get(),
           device_edge_active.get(), device_protected.get(), view, device_x.get(), device_y.get(),
-          device_nearest.get(), static_cast<std::int32_t>(options.potential_candidates),
-          device_proposed.get(), device_first_witness.get(), device_second_witness.get());
+          device_geometry_kd.get(), 0, device_nearest.get(),
+          static_cast<std::int32_t>(options.potential_candidates), device_proposed.get(),
+          device_first_witness.get(), device_second_witness.get());
     } else if (method == EliminationMethod::kLpBox) {
       CheckCuda(cudaMemset(device_summary.get(), 0, 2U * sizeof(unsigned long long)),
                 "cudaMemset resident PDLP summary");
-      ActiveCostSummaryKernel<<<edge_blocks, kThreads>>>(
-          static_cast<std::int32_t>(edge_count), device_edge_weight.get(), device_edge_active.get(),
-          device_summary.get(), device_summary.get() + 1);
+      ActiveCostSummaryKernel<<<work_blocks, kThreads>>>(
+          work_count, device_active_edge_ids.get(), device_edge_weight.get(),
+          device_edge_active.get(), device_summary.get(), device_summary.get() + 1);
       CheckCuda(cudaDeviceSynchronize(), "resident PDLP summary synchronize");
       unsigned long long host_summary[2]{};
       device_summary.CopyToHost(host_summary, 2U);
@@ -981,8 +1201,8 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
       for (std::uint32_t iteration = 0U; iteration < options.pdlp_iterations; ++iteration) {
         CheckCuda(cudaMemset(device_selected_degree.get(), 0, dimension * sizeof(std::int32_t)),
                   "cudaMemset resident PDLP selected degree");
-        SelectDegreeBoxKernel<<<edge_blocks, kThreads>>>(
-            static_cast<std::int32_t>(edge_count), device_edge_u.get(), device_edge_v.get(),
+        SelectDegreeBoxKernel<<<work_blocks, kThreads>>>(
+            work_count, device_active_edge_ids.get(), device_edge_u.get(), device_edge_v.get(),
             device_edge_weight.get(), device_edge_active.get(), device_dual.get(),
             device_selected_degree.get());
         const double step = initial_step / sqrt(1.0 + static_cast<double>(iteration) / 8.0);
@@ -1000,12 +1220,12 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
                 "cudaMemset resident PDLP lower bound");
       DegreeConstantKernel<<<vertex_blocks, kThreads>>>(
           graph.dimension, device_quantized_dual.get(), device_lower_bound.get());
-      ReducedCostKernel<<<edge_blocks, kThreads>>>(
-          static_cast<std::int32_t>(edge_count), device_edge_u.get(), device_edge_v.get(),
+      ReducedCostKernel<<<work_blocks, kThreads>>>(
+          work_count, device_active_edge_ids.get(), device_edge_u.get(), device_edge_v.get(),
           device_edge_weight.get(), device_edge_active.get(), denominator,
           device_quantized_dual.get(), device_reduced_cost.get(), device_lower_bound.get());
-      LpForcedOneKernel<<<edge_blocks, kThreads>>>(
-          static_cast<std::int32_t>(edge_count), device_edge_u.get(), device_edge_v.get(),
+      LpForcedOneKernel<<<work_blocks, kThreads>>>(
+          work_count, device_edge_u.get(), device_active_edge_ids.get(), device_edge_v.get(),
           device_edge_active.get(), device_protected.get(), device_degree.get(),
           device_reduced_cost.get(), device_lower_bound.get(), options.incumbent_cost * denominator,
           device_proposed.get());
@@ -1019,7 +1239,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
       throw std::logic_error("resident run_epoch 收到不支持的方法");
     }
     CheckCuda(cudaGetLastError(), "resident elimination kernel launch");
-    CommitKernel<<<1, 1>>>(graph.dimension, static_cast<std::int32_t>(edge_count),
+    CommitKernel<<<1, 1>>>(graph.dimension, work_count, device_active_edge_ids.get(),
                            device_edge_u.get(), device_edge_v.get(), device_edge_active.get(),
                            device_active_matrix.get(), device_protected.get(),
                            device_proposed.get(), device_degree.get(), device_committed.get(),
@@ -1028,6 +1248,15 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     CheckCuda(cudaDeviceSynchronize(), "resident epoch synchronize");
     const double device_ms = ElapsedMilliseconds(kernel_begin);
     result.kernel_ms += device_ms;
+    if (method == EliminationMethod::kGeometryMain) {
+      result.geometry_ms += device_ms;
+    } else if (method == EliminationMethod::kLpBox) {
+      result.pdlp_ms += device_ms;
+    } else if (method == EliminationMethod::kJv) {
+      result.jv_ms += device_ms;
+    } else if (method == EliminationMethod::kGpuQuickHs) {
+      result.quick_hs_ms += device_ms;
+    }
 
     unsigned long long committed_count = 0U;
     CheckCuda(cudaMemcpy(&committed_count, device_committed_count.get(), sizeof(committed_count),
@@ -1039,49 +1268,47 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     if (committed_count > current_edges) {
       throw std::logic_error("resident committed count 超过活动边数");
     }
-    if (!options.collect_trace) {
-      // 全量 raw benchmark 不构造逐边主机 trace；固定点调度只需要提交计数。
-      current_edges -= static_cast<std::size_t>(committed_count);
-      return static_cast<std::size_t>(committed_count);
-    }
-    const SteadyClock::time_point download_begin = SteadyClock::now();
-    device_committed.CopyToHost(host_committed.data(), edge_count);
-    device_first_witness.CopyToHost(host_first_witness.data(), edge_count);
-    if (method == EliminationMethod::kGpuQuickHs || method == EliminationMethod::kGeometryMain) {
-      device_second_witness.CopyToHost(host_second_witness.data(), edge_count);
-    }
-    if (method == EliminationMethod::kLpBox) {
-      host_quantized_dual.resize(dimension);
-      device_quantized_dual.CopyToHost(host_quantized_dual.data(), dimension);
-    }
-    result.download_ms += ElapsedMilliseconds(download_begin);
-
-    ResidentTraceEpoch trace;
-    trace.method = method;
-    trace.edges_before = current_edges;
-    trace.device_ms = device_ms;
-    trace.vertex_dual_numerator = std::move(host_quantized_dual);
-    trace.fractional_bits = options.fractional_bits;
-    trace.incumbent_cost = options.incumbent_cost;
-    trace.edge_ids.reserve(static_cast<std::size_t>(committed_count));
-    trace.first_witness.reserve(static_cast<std::size_t>(committed_count));
-    trace.second_witness.reserve(static_cast<std::size_t>(committed_count));
-    for (std::size_t edge = 0U; edge < edge_count; ++edge) {
-      if (host_committed[edge] == 0U) {
-        continue;
+    if (options.collect_trace) {
+      const SteadyClock::time_point download_begin = SteadyClock::now();
+      device_committed.CopyToHost(host_committed.data(), edge_count);
+      device_first_witness.CopyToHost(host_first_witness.data(), edge_count);
+      if (method == EliminationMethod::kGpuQuickHs || method == EliminationMethod::kGeometryMain) {
+        device_second_witness.CopyToHost(host_second_witness.data(), edge_count);
       }
-      trace.edge_ids.push_back(static_cast<std::int32_t>(edge));
-      trace.first_witness.push_back(host_first_witness[edge]);
-      trace.second_witness.push_back(
-          (method == EliminationMethod::kGpuQuickHs || method == EliminationMethod::kGeometryMain)
-              ? host_second_witness[edge]
-              : -1);
-    }
-    if (trace.edge_ids.size() != static_cast<std::size_t>(committed_count)) {
-      throw std::logic_error("resident committed bitmap 与计数不一致");
+      if (method == EliminationMethod::kLpBox) {
+        host_quantized_dual.resize(dimension);
+        device_quantized_dual.CopyToHost(host_quantized_dual.data(), dimension);
+      }
+      result.download_ms += ElapsedMilliseconds(download_begin);
+
+      ResidentTraceEpoch trace;
+      trace.method = method;
+      trace.edges_before = current_edges;
+      trace.device_ms = device_ms;
+      trace.vertex_dual_numerator = std::move(host_quantized_dual);
+      trace.fractional_bits = options.fractional_bits;
+      trace.incumbent_cost = options.incumbent_cost;
+      trace.edge_ids.reserve(static_cast<std::size_t>(committed_count));
+      trace.first_witness.reserve(static_cast<std::size_t>(committed_count));
+      trace.second_witness.reserve(static_cast<std::size_t>(committed_count));
+      for (std::size_t edge = 0U; edge < edge_count; ++edge) {
+        if (host_committed[edge] == 0U) {
+          continue;
+        }
+        trace.edge_ids.push_back(static_cast<std::int32_t>(edge));
+        trace.first_witness.push_back(host_first_witness[edge]);
+        trace.second_witness.push_back(
+            (method == EliminationMethod::kGpuQuickHs || method == EliminationMethod::kGeometryMain)
+                ? host_second_witness[edge]
+                : -1);
+      }
+      if (trace.edge_ids.size() != static_cast<std::size_t>(committed_count)) {
+        throw std::logic_error("resident committed bitmap 与计数不一致");
+      }
+      result.epochs.push_back(std::move(trace));
     }
     current_edges -= static_cast<std::size_t>(committed_count);
-    result.epochs.push_back(std::move(trace));
+    compact_active_edges();
     return static_cast<std::size_t>(committed_count);
   };
 
@@ -1089,7 +1316,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     if (!options.enable_jv) {
       return true;
     }
-    for (std::uint32_t round = 0U; round < options.max_jv_rounds; ++round) {
+    std::uint32_t round = 0U;
+    while (options.max_jv_rounds == 0U || round < options.max_jv_rounds) {
+      ++round;
       ++result.jv_rounds;
       const std::size_t committed = run_epoch(EliminationMethod::kJv);
       result.jv_committed += committed;
@@ -1105,10 +1334,13 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     result.geometry_committed += committed;
   }
 
-  const std::uint32_t orchestration_limit = options.enable_pdlp ? options.max_pdlp_epochs : 1U;
   bool orchestration_converged = false;
   bool local_converged = false;
-  for (std::uint32_t orchestration = 0U; orchestration < orchestration_limit; ++orchestration) {
+  std::uint32_t orchestration = 0U;
+  while ((!options.enable_pdlp && orchestration == 0U) ||
+         (options.enable_pdlp &&
+          (options.max_pdlp_epochs == 0U || orchestration < options.max_pdlp_epochs))) {
+    ++orchestration;
     const std::size_t edges_before = current_edges;
     if (options.enable_pdlp) {
       ++result.pdlp_epochs;
@@ -1119,7 +1351,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     bool jv_converged = run_jv_fixed_point();
     bool hs_converged = !options.enable_quick_hs;
     if (jv_converged && options.enable_quick_hs) {
-      for (std::uint32_t epoch = 0U; epoch < options.max_hs_epochs; ++epoch) {
+      std::uint32_t epoch = 0U;
+      while (options.max_hs_epochs == 0U || epoch < options.max_hs_epochs) {
+        ++epoch;
         ++result.hs_epochs;
         const std::size_t committed = run_epoch(EliminationMethod::kGpuQuickHs);
         result.quick_hs_committed += committed;

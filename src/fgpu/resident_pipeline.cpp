@@ -128,6 +128,11 @@ void WriteResidentManifest(const std::filesystem::path& path, const FgpuInput& i
   output << "resident_bytes " << report.resident_bytes << '\n';
   output << "upload_ms " << report.upload_ms << '\n';
   output << "gpu_kernel_ms " << report.gpu_kernel_ms << '\n';
+  output << "geometry_ms " << report.geometry_ms << '\n';
+  output << "pdlp_ms " << report.pdlp_ms << '\n';
+  output << "jv_ms " << report.jv_ms << '\n';
+  output << "quick_hs_ms " << report.quick_hs_ms << '\n';
+  output << "compaction_ms " << report.compaction_ms << '\n';
   output << "gpu_download_ms " << report.gpu_download_ms << '\n';
   output << "gpu_solve_wall_ms " << report.gpu_solve_wall_ms << '\n';
   output << "cpu_audit_ms " << report.cpu_audit_ms << '\n';
@@ -160,9 +165,8 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
     throw std::invalid_argument(
         "resident 需要 instance、边/fixed/nonpairs/manifest，启用审计时还需要 certificate");
   }
-  if (config.device < 0 || config.max_hs_epochs == 0U || config.max_jv_rounds == 0U ||
-      config.max_pdlp_epochs == 0U || config.pdlp_iterations == 0U ||
-      config.potential_candidates < 2U || config.potential_candidates > 32U ||
+  if (config.device < 0 || config.pdlp_iterations == 0U || config.potential_candidates < 2U ||
+      config.potential_candidates > 32U ||
       (!config.enable_quick_hs && !config.enable_jv && !config.enable_geometry &&
        !config.enable_pdlp)) {
     throw std::invalid_argument("resident device、预算或阶段开关非法");
@@ -173,9 +177,6 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   GraphSnapshot initial = input.input_edges.empty()
                               ? GraphSnapshot::LoadComplete(input.instance)
                               : GraphSnapshot::Load(input.instance, input.input_edges);
-  if (initial.dimension > detail::kMaxResidentDimension) {
-    throw std::overflow_error("resident GPU 当前维度上限为 4096");
-  }
   std::vector<std::int32_t> tour;
   ProtectedTourCheck initial_tour_check;
   if (!input.tour.empty()) {
@@ -221,6 +222,11 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   report.resident_bytes = device.resident_bytes;
   report.upload_ms = device.upload_ms;
   report.gpu_kernel_ms = device.kernel_ms;
+  report.geometry_ms = device.geometry_ms;
+  report.pdlp_ms = device.pdlp_ms;
+  report.jv_ms = device.jv_ms;
+  report.quick_hs_ms = device.quick_hs_ms;
+  report.compaction_ms = device.compaction_ms;
   report.gpu_download_ms = device.download_ms;
   report.gpu_solve_wall_ms = device.solve_wall_ms;
   report.certificate.backend =

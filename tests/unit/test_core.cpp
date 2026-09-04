@@ -72,6 +72,14 @@ void TestLpEpochAndExactBound() {
   Check(bound.certified, bound.reason);
   Check(bound.numerator == "16777216", "exact lower-bound numerator");
   Check(bound.denominator == 16777216, "exact lower-bound denominator");
+  const cudaee::ExactModelEvaluation evaluation = cudaee::BuildExactModelEvaluation(epoch, {1.0});
+  Check(evaluation.bound.certified && evaluation.bound.numerator == bound.numerator,
+        "exact model evaluation preserves bound");
+  Check(evaluation.lower_bound_numerator == static_cast<__int128>(16777216) &&
+            evaluation.reduced_cost_numerator.size() == 2U &&
+            evaluation.reduced_cost_numerator[0] == 0 &&
+            evaluation.reduced_cost_numerator[1] == static_cast<__int128>(16777216),
+        "exact model evaluation exposes quantized reduced costs");
 
   const std::filesystem::path directory = CUDAEE_TEST_TMP_DIR;
   std::filesystem::create_directories(directory);

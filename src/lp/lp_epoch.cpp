@@ -531,12 +531,14 @@ LpWarmStartProjection ProjectLpWarmStart(const LpWarmStart& source, const LpEpoc
   return projection;
 }
 
-ExactBound BuildExactModelBound(const LpEpoch& epoch, const std::vector<double>& dual,
-                                const std::uint32_t fractional_bits) {
-  ExactBound result;
+ExactModelEvaluation BuildExactModelEvaluation(const LpEpoch& epoch,
+                                               const std::vector<double>& dual,
+                                               const std::uint32_t fractional_bits) {
+  ExactModelEvaluation evaluation;
+  ExactBound& result = evaluation.bound;
   if (dual.size() != static_cast<std::size_t>(epoch.rows) || fractional_bits > 40) {
     result.reason = "对偶维度不匹配或定点位数超限";
-    return result;
+    return evaluation;
   }
   const std::uint64_t denominator = std::uint64_t{1} << fractional_bits;
   result.denominator = denominator;
@@ -546,7 +548,7 @@ ExactBound BuildExactModelBound(const LpEpoch& epoch, const std::vector<double>&
     double value = dual[static_cast<std::size_t>(row)];
     if (!std::isfinite(value)) {
       result.reason = "对偶包含 NaN/Inf";
-      return result;
+      return evaluation;
     }
     if (epoch.senses[static_cast<std::size_t>(row)] == 'L') {
       value = std::min(value, 0.0);
@@ -556,7 +558,7 @@ ExactBound BuildExactModelBound(const LpEpoch& epoch, const std::vector<double>&
     const long double scaled = static_cast<long double>(value) * denominator;
     if (std::abs(scaled) > 1.0e15L) {
       result.reason = "量化对偶超过保守范围";
-      return result;
+      return evaluation;
     }
     q[static_cast<std::size_t>(row)] = static_cast<std::int64_t>(std::round(scaled));
   }
@@ -564,12 +566,12 @@ ExactBound BuildExactModelBound(const LpEpoch& epoch, const std::vector<double>&
   std::int64_t offset = 0;
   if (!ToConservativeInteger(epoch.objective_offset, &offset)) {
     result.reason = "目标偏置不是受支持的整数";
-    return result;
+    return evaluation;
   }
   __int128 lower_bound = 0;
   if (!CheckedMultiply(offset, denominator, &lower_bound)) {
     result.reason = "目标偏置定点乘法溢出";
-    return result;
+    return evaluation;
   }
 
   std::vector<__int128> reduced_numerator(static_cast<std::size_t>(epoch.columns));
@@ -579,7 +581,7 @@ ExactBound BuildExactModelBound(const LpEpoch& epoch, const std::vector<double>&
         !CheckedMultiply(coefficient, denominator,
                          &reduced_numerator[static_cast<std::size_t>(column)])) {
       result.reason = "目标系数不是受支持的整数或发生溢出";
-      return result;
+      return evaluation;
     }
   }
 
@@ -587,13 +589,13 @@ ExactBound BuildExactModelBound(const LpEpoch& epoch, const std::vector<double>&
     std::int64_t rhs = 0;
     if (!ToConservativeInteger(epoch.rhs[static_cast<std::size_t>(row)], &rhs)) {
       result.reason = "RHS 不是受支持的整数";
-      return result;
+      return evaluation;
     }
     __int128 term = 0;
     if (!CheckedMultiply(rhs, q[static_cast<std::size_t>(row)], &term) ||
         !CheckedAdd(lower_bound, term, &lower_bound)) {
       result.reason = "对偶常数项溢出";
-      return result;
+      return evaluation;
     }
     for (std::int32_t offset_index = epoch.row_offsets[static_cast<std::size_t>(row)];
          offset_index < epoch.row_offsets[static_cast<std::size_t>(row) + 1]; ++offset_index) {
@@ -602,13 +604,13 @@ ExactBound BuildExactModelBound(const LpEpoch& epoch, const std::vector<double>&
                                  &coefficient) ||
           !CheckedMultiply(coefficient, q[static_cast<std::size_t>(row)], &term)) {
         result.reason = "矩阵系数不是受支持的整数或发生溢出";
-        return result;
+        return evaluation;
       }
       const std::int32_t column = epoch.column_indices[static_cast<std::size_t>(offset_index)];
       if (!CheckedAdd(reduced_numerator[static_cast<std::size_t>(column)], -term,
                       &reduced_numerator[static_cast<std::size_t>(column)])) {
         result.reason = "reduced cost 定点累加溢出";
-        return result;
+        return evaluation;
       }
     }
   }
@@ -621,19 +623,26 @@ ExactBound BuildExactModelBound(const LpEpoch& epoch, const std::vector<double>&
     std::int64_t bound = 0;
     if (!ToConservativeInteger(selected_bound, &bound)) {
       result.reason = "最小化 reduced cost 需要的变量边界不是有限整数";
-      return result;
+      return evaluation;
     }
     __int128 term = 0;
     if (!CheckedMultiply(reduced, bound, &term) || !CheckedAdd(lower_bound, term, &lower_bound)) {
       result.reason = "变量边界贡献溢出";
-      return result;
+      return evaluation;
     }
   }
 
   result.certified = true;
   result.numerator = Int128ToString(lower_bound);
   result.reason = "仅认证 lp-epoch-v1 中显式变量；TSP 删除仍需 Concorde 完整图精确定价";
-  return result;
+  evaluation.lower_bound_numerator = lower_bound;
+  evaluation.reduced_cost_numerator = std::move(reduced_numerator);
+  return evaluation;
+}
+
+ExactBound BuildExactModelBound(const LpEpoch& epoch, const std::vector<double>& dual,
+                                const std::uint32_t fractional_bits) {
+  return BuildExactModelEvaluation(epoch, dual, fractional_bits).bound;
 }
 
 } // namespace cudaee

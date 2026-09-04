@@ -77,5 +77,6 @@
 73. [FGPU One-Shot 实现与首轮基准](research/66_FGPU_OneShot_实现与基准.md)：geometry→LP-box→JV→HT 单 GPU 链路、pcb442/pr1002 结果、性能修复与剩余差距。
 74. [FGPU 证书与数值边界](research/67_FGPU_证书与数值边界.md)：V4 sidecar、`__int128` 下界、原子 epoch、输出绑定与负向测试。
 75. [FGPU 单卡全常驻实现与端到端基准](research/68_FGPU_单卡全常驻实现与端到端基准.md)：同卡 Geometry→PDLP→JV→Quick-HS 固定点、GPU 区间证明、pcb442 七次确定性复跑与可信端到端加速。
+76. [FGPU 无上限 raw 与 pcb3038 LP 诊断](research/69_FGPU_无上限Raw与pcb3038_LP诊断.md)：默认无证书固定点、阶段画像、warp 并行否决，以及 degree/1-tree/subtour LP 强度分解。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

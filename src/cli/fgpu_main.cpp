@@ -42,9 +42,14 @@ void PrintHelp() {
             << "    [--max-pdlp-epochs N] [--max-hs-epochs N] [--max-jv-rounds N]\n"
             << "    [--enable-geometry 0|1] [--enable-pdlp 0|1]\n"
             << "    [--enable-quick-hs 0|1] [--enable-jv 0|1]，输出参数同上\n"
+            << "  fgpu-elim pdlp-inspect --instance FILE [--input-edges FILE]\n"
+            << "    --pdlp native|cuopt-baseline|cuopt-subtour --expected-cost N [--device N]\n"
+            << "    [--pdlp-iterations N] [--cuopt-library FILE]\n"
+            << "    [--mincut-oracle FILE（仅 CPU 强度诊断）]\n"
             << "  fgpu-elim verify --instance FILE [--input-edges FILE] --certificate FILE\n"
             << "    --output-edges FILE [--fixed FILE --nonpairs FILE]\n"
             << "    [--tour FILE --tour-role incumbent|known-optimum --expected-cost N]\n\n"
+            << "resident 的三个 max epoch/round 参数取 0 表示运行到自然固定点。\n"
             << "--gpus 0 可作为 --device 0 的兼容写法；多 GPU 列表会显式拒绝。\n";
 }
 
@@ -293,11 +298,11 @@ void ResidentLocalCommand(const Arguments& arguments) {
                 "fixed", "nonpairs", "certificate", "manifest", "cpu-audit"});
   cudaee::FgpuResidentConfig config;
   config.device = ParseDevice(arguments);
-  config.max_hs_epochs = OptionalInteger<std::uint32_t>(arguments, "max-hs-epochs", 100U);
-  config.max_jv_rounds = OptionalInteger<std::uint32_t>(arguments, "max-jv-rounds", 100U);
+  config.max_hs_epochs = OptionalInteger<std::uint32_t>(arguments, "max-hs-epochs", 0U);
+  config.max_jv_rounds = OptionalInteger<std::uint32_t>(arguments, "max-jv-rounds", 0U);
   config.enable_quick_hs = OptionalBoolean(arguments, "enable-quick-hs", true);
   config.enable_jv = OptionalBoolean(arguments, "enable-jv", true);
-  config.enable_cpu_audit = OptionalBoolean(arguments, "cpu-audit", true);
+  config.enable_cpu_audit = OptionalBoolean(arguments, "cpu-audit", false);
   const cudaee::FgpuResidentRunReport report = cudaee::RunFgpuResidentLocal(
       ParseInput(arguments), ParseRunOutputs(arguments, config.enable_cpu_audit), config);
   std::cout << "status=OK mode=resident-local initial_edges=" << report.initial_edges
@@ -309,6 +314,9 @@ void ResidentLocalCommand(const Arguments& arguments) {
             << " selected_device=" << report.selected_device
             << " resident_bytes=" << report.resident_bytes << " upload_ms=" << std::fixed
             << std::setprecision(3) << report.upload_ms << " gpu_kernel_ms=" << report.gpu_kernel_ms
+            << " geometry_ms=" << report.geometry_ms << " pdlp_ms=" << report.pdlp_ms
+            << " jv_ms=" << report.jv_ms << " quick_hs_ms=" << report.quick_hs_ms
+            << " compaction_ms=" << report.compaction_ms
             << " gpu_download_ms=" << report.gpu_download_ms
             << " gpu_solve_wall_ms=" << report.gpu_solve_wall_ms
             << " cpu_audit_ms=" << report.cpu_audit_ms << " output_ms=" << report.output_ms
@@ -345,14 +353,14 @@ void ResidentCommand(const Arguments& arguments) {
   config.potential_candidates =
       OptionalInteger<std::uint32_t>(arguments, "potential-candidates", 32U);
   config.pdlp_iterations = OptionalInteger<std::uint32_t>(arguments, "pdlp-iterations", 5000U);
-  config.max_pdlp_epochs = OptionalInteger<std::uint32_t>(arguments, "max-pdlp-epochs", 2U);
-  config.max_hs_epochs = OptionalInteger<std::uint32_t>(arguments, "max-hs-epochs", 100U);
-  config.max_jv_rounds = OptionalInteger<std::uint32_t>(arguments, "max-jv-rounds", 100U);
+  config.max_pdlp_epochs = OptionalInteger<std::uint32_t>(arguments, "max-pdlp-epochs", 0U);
+  config.max_hs_epochs = OptionalInteger<std::uint32_t>(arguments, "max-hs-epochs", 0U);
+  config.max_jv_rounds = OptionalInteger<std::uint32_t>(arguments, "max-jv-rounds", 0U);
   config.enable_geometry = OptionalBoolean(arguments, "enable-geometry", true);
   config.enable_pdlp = OptionalBoolean(arguments, "enable-pdlp", true);
   config.enable_quick_hs = OptionalBoolean(arguments, "enable-quick-hs", true);
   config.enable_jv = OptionalBoolean(arguments, "enable-jv", true);
-  config.enable_cpu_audit = OptionalBoolean(arguments, "cpu-audit", true);
+  config.enable_cpu_audit = OptionalBoolean(arguments, "cpu-audit", false);
   const cudaee::FgpuResidentRunReport report = cudaee::RunFgpuResidentElimination(
       ParseInput(arguments), ParseRunOutputs(arguments, config.enable_cpu_audit), config);
   std::cout << "status=OK mode=resident initial_edges=" << report.initial_edges
@@ -366,12 +374,74 @@ void ResidentCommand(const Arguments& arguments) {
             << " selected_device=" << report.selected_device
             << " resident_bytes=" << report.resident_bytes << " upload_ms=" << std::fixed
             << std::setprecision(3) << report.upload_ms << " gpu_kernel_ms=" << report.gpu_kernel_ms
+            << " geometry_ms=" << report.geometry_ms << " pdlp_ms=" << report.pdlp_ms
+            << " jv_ms=" << report.jv_ms << " quick_hs_ms=" << report.quick_hs_ms
+            << " compaction_ms=" << report.compaction_ms
             << " gpu_download_ms=" << report.gpu_download_ms
             << " gpu_solve_wall_ms=" << report.gpu_solve_wall_ms
             << " cpu_audit_ms=" << report.cpu_audit_ms << " output_ms=" << report.output_ms
             << " end_to_end_ms=" << report.end_to_end_ms
             << " trusted_total_ms=" << report.trusted_total_ms
             << " certificate_bytes=" << report.certificate_bytes << '\n';
+}
+
+void PdlpInspectCommand(const Arguments& arguments) {
+  ValidateKeys(arguments, {"instance", "input-edges", "expected-cost", "device", "gpus", "pdlp",
+                           "pdlp-iterations", "cuopt-library", "mincut-oracle"});
+  const std::filesystem::path instance = Required(arguments, "instance");
+  const std::filesystem::path input_edges = Optional(arguments, "input-edges");
+  cudaee::GraphSnapshot graph = input_edges.empty()
+                                    ? cudaee::GraphSnapshot::LoadComplete(instance)
+                                    : cudaee::GraphSnapshot::Load(instance, input_edges);
+  const std::int64_t incumbent =
+      ParseInteger<std::int64_t>(Required(arguments, "expected-cost"), "--expected-cost");
+  if (incumbent < 0) {
+    throw std::invalid_argument("--expected-cost 必须是非负整数");
+  }
+
+  const std::string backend = Optional(arguments, "pdlp", "cuopt-baseline");
+  if (backend == "cuopt-subtour") {
+    cudaee::SubtourPdlpOptions options;
+    options.device = ParseDevice(arguments);
+    options.cuopt_library = Optional(arguments, "cuopt-library");
+    options.mincut_oracle = Optional(arguments, "mincut-oracle");
+    const cudaee::SubtourPdlpResult subtour = cudaee::RunFgpuSubtourPdlp(graph, incumbent, options);
+    std::cout << "status=OK mode=pdlp-inspect backend=" << subtour.backend
+              << " initial_edges=" << graph.ActiveEdgeCount() << " epochs=" << subtour.epochs
+              << " cuts=" << subtour.cuts << " support_components=" << subtour.support_components
+              << " forced_one_candidates=" << subtour.forced_one_candidates
+              << " objective=" << std::setprecision(15) << subtour.objective
+              << " dual_objective=" << subtour.dual_objective
+              << " exact_bound_numerator=" << subtour.exact_bound.numerator
+              << " exact_bound_denominator=" << subtour.exact_bound.denominator
+              << " cuopt_solve_ms=" << std::fixed << std::setprecision(3) << subtour.solve_ms
+              << " total_ms=" << subtour.total_ms << " separation="
+              << (options.mincut_oracle.empty() ? "host-heuristic" : "concorde-cpu-oracle")
+              << " output_files=0\n";
+    return;
+  }
+
+  cudaee::PdlpOptions options;
+  options.backend = ParsePdlp(backend);
+  if (options.backend == cudaee::PdlpBackend::kOff) {
+    throw std::invalid_argument("pdlp-inspect 不接受 --pdlp off");
+  }
+  options.device = ParseDevice(arguments);
+  options.iterations = OptionalInteger<std::uint32_t>(arguments, "pdlp-iterations", 5000U);
+  options.cuopt_library = Optional(arguments, "cuopt-library");
+
+  const cudaee::PdlpResult pdlp = cudaee::RunFgpuPdlp(graph, options);
+  cudaee::GraphSnapshot reduced = graph;
+  const cudaee::EliminationResult diagnostic =
+      cudaee::RunLpBoxElimination(&reduced, pdlp, incumbent);
+  std::cout << "status=OK mode=pdlp-inspect backend=" << pdlp.backend
+            << " initial_edges=" << graph.ActiveEdgeCount()
+            << " eliminable_edges=" << diagnostic.proof.size()
+            << " remaining_edges=" << reduced.ActiveEdgeCount()
+            << " exact_bound_numerator=" << pdlp.exact_bound.numerator
+            << " exact_bound_denominator=" << pdlp.exact_bound.denominator
+            << " pdlp_solve_ms=" << std::fixed << std::setprecision(3) << pdlp.solve_ms
+            << " diagnostic_cpu_int128=1 output_files=0\n";
 }
 
 void VerifyCommand(const Arguments& arguments) {
@@ -408,6 +478,8 @@ int main(const int argc, char** argv) {
       ResidentLocalCommand(arguments);
     } else if (command == "resident") {
       ResidentCommand(arguments);
+    } else if (command == "pdlp-inspect") {
+      PdlpInspectCommand(arguments);
     } else if (command == "verify") {
       VerifyCommand(arguments);
     } else {

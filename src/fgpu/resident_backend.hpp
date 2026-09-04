@@ -10,12 +10,11 @@
 
 namespace cudaee::detail {
 
-inline constexpr std::int32_t kMaxResidentDimension = 4096;
-
 struct ResidentGpuOptions {
   int device{-1};
-  std::uint32_t max_hs_epochs{100U};
-  std::uint32_t max_jv_rounds{100U};
+  // 0 表示不设人为轮数上限，直到该阶段自然达到固定点。
+  std::uint32_t max_hs_epochs{0U};
+  std::uint32_t max_jv_rounds{0U};
   bool enable_quick_hs{true};
   bool enable_jv{true};
   bool enable_geometry{false};
@@ -24,7 +23,8 @@ struct ResidentGpuOptions {
   bool collect_trace{true};
   std::uint32_t potential_candidates{32U};
   std::uint32_t pdlp_iterations{5000U};
-  std::uint32_t max_pdlp_epochs{2U};
+  // 0 表示持续交错 LP/local，直到整个 orchestration 无新增删除。
+  std::uint32_t max_pdlp_epochs{0U};
   std::uint32_t fractional_bits{24U};
   std::int64_t incumbent_cost{-1};
 };
@@ -59,6 +59,11 @@ struct ResidentGpuResult {
   bool converged{false};
   double upload_ms{};
   double kernel_ms{};
+  double geometry_ms{};
+  double pdlp_ms{};
+  double jv_ms{};
+  double quick_hs_ms{};
+  double compaction_ms{};
   double download_ms{};
   double solve_wall_ms{};
   std::uint64_t resident_bytes{};
