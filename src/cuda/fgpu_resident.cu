@@ -917,9 +917,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
                                  .distance = device_distance.get(),
                                  .active = device_active_matrix.get()};
   std::size_t current_edges = result.initial_edges;
-  std::vector<std::uint8_t> host_committed(edge_count);
-  std::vector<std::int32_t> host_first_witness(edge_count);
-  std::vector<std::int32_t> host_second_witness(edge_count);
+  std::vector<std::uint8_t> host_committed(options.collect_trace ? edge_count : 0U);
+  std::vector<std::int32_t> host_first_witness(options.collect_trace ? edge_count : 0U);
+  std::vector<std::int32_t> host_second_witness(options.collect_trace ? edge_count : 0U);
 
   const auto rebuild = [&] {
     BuildAdjacencyKernel<<<vertex_blocks, kThreads>>>(graph.dimension, device_active_matrix.get(),
@@ -1038,6 +1038,11 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     }
     if (committed_count > current_edges) {
       throw std::logic_error("resident committed count 超过活动边数");
+    }
+    if (!options.collect_trace) {
+      // 全量 raw benchmark 不构造逐边主机 trace；固定点调度只需要提交计数。
+      current_edges -= static_cast<std::size_t>(committed_count);
+      return static_cast<std::size_t>(committed_count);
     }
     const SteadyClock::time_point download_begin = SteadyClock::now();
     device_committed.CopyToHost(host_committed.data(), edge_count);

@@ -34,7 +34,8 @@ void PrintHelp() {
             << "  fgpu-elim resident-local --instance FILE --input-edges FILE [--tour FILE]\n"
             << "    --device N [--max-hs-epochs N] [--max-jv-rounds N]\n"
             << "    [--enable-quick-hs 0|1] [--enable-jv 0|1]\n"
-            << "    --certificate FILE --output-edges FILE --fixed FILE --nonpairs FILE\n"
+            << "    [--cpu-audit 0|1] --output-edges FILE --fixed FILE --nonpairs FILE\n"
+            << "    [--certificate FILE（cpu-audit=1 时必需）]\n"
             << "    --manifest FILE\n"
             << "  fgpu-elim resident --instance FILE [--input-edges FILE] --tour FILE\n"
             << "    --device N [--potential-candidates 2..32] [--pdlp-iterations N]\n"
@@ -202,12 +203,15 @@ cudaee::FgpuInput ParseInput(const Arguments& arguments) {
   return input;
 }
 
-cudaee::FgpuOutputPaths ParseRunOutputs(const Arguments& arguments) {
+cudaee::FgpuOutputPaths ParseRunOutputs(const Arguments& arguments,
+                                        const bool require_certificate = true) {
   cudaee::FgpuOutputPaths outputs;
   outputs.edges = CheckedOutput(Required(arguments, "output-edges"));
   outputs.fixed = CheckedOutput(Required(arguments, "fixed"));
   outputs.nonpairs = CheckedOutput(Required(arguments, "nonpairs"));
-  outputs.certificate = CheckedOutput(Required(arguments, "certificate"));
+  if (require_certificate || arguments.contains("certificate")) {
+    outputs.certificate = CheckedOutput(Required(arguments, "certificate"));
+  }
   outputs.manifest = CheckedOutput(Required(arguments, "manifest"));
   return outputs;
 }
@@ -286,19 +290,21 @@ void ResidentLocalCommand(const Arguments& arguments) {
   ValidateKeys(arguments,
                {"instance", "input-edges", "tour", "tour-role", "expected-cost", "device", "gpus",
                 "max-hs-epochs", "max-jv-rounds", "enable-quick-hs", "enable-jv", "output-edges",
-                "fixed", "nonpairs", "certificate", "manifest"});
+                "fixed", "nonpairs", "certificate", "manifest", "cpu-audit"});
   cudaee::FgpuResidentConfig config;
   config.device = ParseDevice(arguments);
   config.max_hs_epochs = OptionalInteger<std::uint32_t>(arguments, "max-hs-epochs", 100U);
   config.max_jv_rounds = OptionalInteger<std::uint32_t>(arguments, "max-jv-rounds", 100U);
   config.enable_quick_hs = OptionalBoolean(arguments, "enable-quick-hs", true);
   config.enable_jv = OptionalBoolean(arguments, "enable-jv", true);
-  const cudaee::FgpuResidentRunReport report =
-      cudaee::RunFgpuResidentLocal(ParseInput(arguments), ParseRunOutputs(arguments), config);
+  config.enable_cpu_audit = OptionalBoolean(arguments, "cpu-audit", true);
+  const cudaee::FgpuResidentRunReport report = cudaee::RunFgpuResidentLocal(
+      ParseInput(arguments), ParseRunOutputs(arguments, config.enable_cpu_audit), config);
   std::cout << "status=OK mode=resident-local initial_edges=" << report.initial_edges
             << " jv_deleted=" << report.jv_committed
             << " quick_hs_deleted=" << report.quick_hs_committed
             << " final_edges=" << report.final_edges << " converged=" << (report.converged ? 1 : 0)
+            << " cpu_audited=" << (report.cpu_audited ? 1 : 0)
             << " final_hash=" << cudaee::HexHash(report.final_hash)
             << " selected_device=" << report.selected_device
             << " resident_bytes=" << report.resident_bytes << " upload_ms=" << std::fixed
@@ -306,6 +312,7 @@ void ResidentLocalCommand(const Arguments& arguments) {
             << " gpu_download_ms=" << report.gpu_download_ms
             << " gpu_solve_wall_ms=" << report.gpu_solve_wall_ms
             << " cpu_audit_ms=" << report.cpu_audit_ms << " output_ms=" << report.output_ms
+            << " end_to_end_ms=" << report.end_to_end_ms
             << " trusted_total_ms=" << report.trusted_total_ms
             << " certificate_bytes=" << report.certificate_bytes << '\n';
 }
@@ -327,6 +334,7 @@ void ResidentCommand(const Arguments& arguments) {
                            "enable-pdlp",
                            "enable-quick-hs",
                            "enable-jv",
+                           "cpu-audit",
                            "output-edges",
                            "fixed",
                            "nonpairs",
@@ -344,14 +352,16 @@ void ResidentCommand(const Arguments& arguments) {
   config.enable_pdlp = OptionalBoolean(arguments, "enable-pdlp", true);
   config.enable_quick_hs = OptionalBoolean(arguments, "enable-quick-hs", true);
   config.enable_jv = OptionalBoolean(arguments, "enable-jv", true);
-  const cudaee::FgpuResidentRunReport report =
-      cudaee::RunFgpuResidentElimination(ParseInput(arguments), ParseRunOutputs(arguments), config);
+  config.enable_cpu_audit = OptionalBoolean(arguments, "cpu-audit", true);
+  const cudaee::FgpuResidentRunReport report = cudaee::RunFgpuResidentElimination(
+      ParseInput(arguments), ParseRunOutputs(arguments, config.enable_cpu_audit), config);
   std::cout << "status=OK mode=resident initial_edges=" << report.initial_edges
             << " geometry_deleted=" << report.geometry_committed
             << " lp_deleted=" << report.lp_committed << " pdlp_epochs=" << report.pdlp_epochs
             << " jv_deleted=" << report.jv_committed
             << " quick_hs_deleted=" << report.quick_hs_committed
             << " final_edges=" << report.final_edges << " converged=" << (report.converged ? 1 : 0)
+            << " cpu_audited=" << (report.cpu_audited ? 1 : 0)
             << " final_hash=" << cudaee::HexHash(report.final_hash)
             << " selected_device=" << report.selected_device
             << " resident_bytes=" << report.resident_bytes << " upload_ms=" << std::fixed
@@ -359,6 +369,7 @@ void ResidentCommand(const Arguments& arguments) {
             << " gpu_download_ms=" << report.gpu_download_ms
             << " gpu_solve_wall_ms=" << report.gpu_solve_wall_ms
             << " cpu_audit_ms=" << report.cpu_audit_ms << " output_ms=" << report.output_ms
+            << " end_to_end_ms=" << report.end_to_end_ms
             << " trusted_total_ms=" << report.trusted_total_ms
             << " certificate_bytes=" << report.certificate_bytes << '\n';
 }

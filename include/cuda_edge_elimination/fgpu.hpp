@@ -171,8 +171,8 @@ struct FgpuRunReport {
   EliminationResult certificate;
 };
 
-// 显式的单 GPU 常驻局部搜索。设备先独立跑到 fixed point，CPU 不向搜索
-// 回传逐边判断；随后在计时分栏中重放紧凑整数证书，满足正式删边安全边界。
+// 显式的单 GPU 常驻搜索。默认在设备 fixed point 后进行 CPU 审计；全量性能实验
+// 可关闭审计与 trace，此时结果必须明确标记为 unaudited，不得冒充认证输出。
 struct FgpuResidentConfig {
   int device{0};
   std::uint32_t max_hs_epochs{100U};
@@ -184,6 +184,7 @@ struct FgpuResidentConfig {
   bool enable_jv{true};
   bool enable_geometry{true};
   bool enable_pdlp{true};
+  bool enable_cpu_audit{true};
 };
 
 struct FgpuResidentRunReport {
@@ -199,6 +200,7 @@ struct FgpuResidentRunReport {
   std::uint32_t jv_rounds{};
   std::uint32_t pdlp_epochs{};
   bool converged{false};
+  bool cpu_audited{false};
   int selected_device{-1};
   std::uint64_t resident_bytes{};
   double upload_ms{};
@@ -208,6 +210,7 @@ struct FgpuResidentRunReport {
   double gpu_solve_wall_ms{};
   double cpu_audit_ms{};
   double output_ms{};
+  double end_to_end_ms{};
   double trusted_total_ms{};
   std::uintmax_t certificate_bytes{};
   EliminationResult certificate;

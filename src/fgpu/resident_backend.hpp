@@ -20,6 +20,8 @@ struct ResidentGpuOptions {
   bool enable_jv{true};
   bool enable_geometry{false};
   bool enable_pdlp{false};
+  // 关闭时不回传逐 epoch bitmap/witness，只保留计数与最终 active mask。
+  bool collect_trace{true};
   std::uint32_t potential_candidates{32U};
   std::uint32_t pdlp_iterations{5000U};
   std::uint32_t max_pdlp_epochs{2U};

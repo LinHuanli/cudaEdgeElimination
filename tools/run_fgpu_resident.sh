@@ -75,6 +75,7 @@ pdlp_epochs="${CUDAEE_FGPU_RESIDENT_PDLP_EPOCHS:-2}"
 hs_epochs="${CUDAEE_FGPU_RESIDENT_HS_EPOCHS:-100}"
 jv_rounds="${CUDAEE_FGPU_RESIDENT_JV_ROUNDS:-100}"
 omp_threads="${CUDAEE_FGPU_RESIDENT_OMP_THREADS:-16}"
+cpu_audit_enabled="${CUDAEE_FGPU_RESIDENT_CPU_AUDIT:-1}"
 for value in "${potential_candidates}" "${pdlp_iterations}" "${pdlp_epochs}" \
              "${hs_epochs}" "${jv_rounds}" "${omp_threads}"; do
   if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
@@ -82,6 +83,10 @@ for value in "${potential_candidates}" "${pdlp_iterations}" "${pdlp_epochs}" \
     exit 5
   fi
 done
+if [[ "${cpu_audit_enabled}" != "0" && "${cpu_audit_enabled}" != "1" ]]; then
+  echo "错误：CUDAEE_FGPU_RESIDENT_CPU_AUDIT 必须是 0 或 1。" >&2
+  exit 5
+fi
 
 cmake --preset "${cuda_preset}"
 cmake --build --preset "${cuda_preset}" --target fgpu-elim --parallel
@@ -90,7 +95,7 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_dir="${repo_root}/artifacts/${instance}-fgpu-resident-${timestamp}-$$"
 mkdir -p "${run_dir}"
 measurements="${run_dir}/measurements.tsv"
-printf 'run\tprocess_wall_s\tgpu_solve_ms\tcpu_audit_ms\ttrusted_total_ms\tfinal_edges\tfinal_hash\n' \
+printf 'run\tprocess_wall_s\tgpu_solve_ms\tcpu_audit_ms\tend_to_end_ms\ttrusted_total_ms\tfinal_edges\tfinal_hash\n' \
   >"${measurements}"
 
 reference_edge_sha=""
@@ -119,21 +124,26 @@ for ((run = 1; run <= repetitions; ++run)); do
     --enable-pdlp 1
     --enable-quick-hs 1
     --enable-jv 1
+    --cpu-audit "${cpu_audit_enabled}"
     --output-edges "${output_edges}"
     --fixed "${fixed}"
     --nonpairs "${nonpairs}"
-    --certificate "${certificate}"
     --manifest "${app_manifest}"
   )
+  if [[ "${cpu_audit_enabled}" == "1" ]]; then
+    command+=(--certificate "${certificate}")
+  fi
 
   /usr/bin/time -f '%e' -o "${output_prefix}/process.wall-seconds" \
     env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="${gpu_uuid}" \
       OMP_NUM_THREADS="${omp_threads}" "${command[@]}" \
       >"${output_prefix}/run.stdout" 2>"${output_prefix}/run.stderr"
-  "${exe}" verify --instance "${tsp}" --tour "${tour}" --tour-role known-optimum \
-    --expected-cost "${optimum}" --output-edges "${output_edges}" --fixed "${fixed}" \
-    --nonpairs "${nonpairs}" --certificate "${certificate}" \
-    >"${output_prefix}/verify.stdout" 2>"${output_prefix}/verify.stderr"
+  if [[ "${cpu_audit_enabled}" == "1" ]]; then
+    "${exe}" verify --instance "${tsp}" --tour "${tour}" --tour-role known-optimum \
+      --expected-cost "${optimum}" --output-edges "${output_edges}" --fixed "${fixed}" \
+      --nonpairs "${nonpairs}" --certificate "${certificate}" \
+      >"${output_prefix}/verify.stdout" 2>"${output_prefix}/verify.stderr"
+  fi
 
   read -r output_dimension output_count <"${output_edges}"
   if [[ "${output_dimension}" != "${dimension}" ||
@@ -141,14 +151,22 @@ for ((run = 1; run <= repetitions; ++run)); do
     echo "错误：第 ${run} 次最终边文件规模门禁失败。" >&2
     exit 6
   fi
-  if ! grep -q 'status=OK mode=resident.*converged=1' "${output_prefix}/run.stdout" ||
+  if ! grep -q "status=OK mode=resident.*converged=1.*cpu_audited=${cpu_audit_enabled}" \
+      "${output_prefix}/run.stdout"; then
+    echo "错误：第 ${run} 次运行未收敛或所选审计模式未完成。" >&2
+    exit 6
+  fi
+  if [[ "${cpu_audit_enabled}" == "1" ]] &&
      ! grep -q 'status=VERIFIED' "${output_prefix}/verify.stdout"; then
-    echo "错误：第 ${run} 次运行未收敛或证书未通过独立重放。" >&2
+    echo "错误：第 ${run} 次证书未通过独立重放。" >&2
     exit 6
   fi
 
   edge_sha="$(sha256sum "${output_edges}" | awk '{print $1}')"
-  certificate_sha="$(sha256sum "${certificate}" | awk '{print $1}')"
+  certificate_sha="none"
+  if [[ "${cpu_audit_enabled}" == "1" ]]; then
+    certificate_sha="$(sha256sum "${certificate}" | awk '{print $1}')"
+  fi
   if (( run == 1 )); then
     reference_edge_sha="${edge_sha}"
     reference_certificate_sha="${certificate_sha}"
@@ -160,11 +178,13 @@ for ((run = 1; run <= repetitions; ++run)); do
 
   process_wall="$(<"${output_prefix}/process.wall-seconds")"
   gpu_solve="$(awk '$1 == "gpu_solve_wall_ms" { print $2 }' "${app_manifest}")"
-  cpu_audit="$(awk '$1 == "cpu_audit_ms" { print $2 }' "${app_manifest}")"
+  cpu_audit_ms="$(awk '$1 == "cpu_audit_ms" { print $2 }' "${app_manifest}")"
+  end_to_end="$(awk '$1 == "end_to_end_ms" { print $2 }' "${app_manifest}")"
   trusted_total="$(awk '$1 == "trusted_total_ms" { print $2 }' "${app_manifest}")"
   final_hash="$(awk '$1 == "final_hash" { print $2 }' "${app_manifest}")"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${run}" "${process_wall}" \
-    "${gpu_solve}" "${cpu_audit}" "${trusted_total}" "${output_count}" "${final_hash}" \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${run}" "${process_wall}" \
+    "${gpu_solve}" "${cpu_audit_ms}" "${end_to_end}" "${trusted_total}" "${output_count}" \
+    "${final_hash}" \
     >>"${measurements}"
   cat "${output_prefix}/run.stdout"
 done
@@ -181,8 +201,9 @@ median_column() {
 process_median="$(median_column 2)"
 gpu_median="$(median_column 3)"
 audit_median="$(median_column 4)"
-trusted_median="$(median_column 5)"
-final_edges="$(awk 'NR == 2 { print $6 }' "${measurements}")"
+end_to_end_median="$(median_column 5)"
+trusted_median="$(median_column 6)"
+final_edges="$(awk 'NR == 2 { print $7 }' "${measurements}")"
 author_single_edges="NA"
 author_single_wall="NA"
 author_fixed_edges="NA"
@@ -199,7 +220,7 @@ if [[ -n "${baseline_row}" ]]; then
 fi
 
 {
-  echo "CUDAEE_FGPU_RESIDENT_BENCHMARK_V1"
+  echo "CUDAEE_FGPU_RESIDENT_BENCHMARK_V2"
   echo "git_commit $(git rev-parse HEAD)"
   echo "git_dirty $([[ -n "$(git status --porcelain)" ]] && echo 1 || echo 0)"
   echo "instance ${instance}"
@@ -213,9 +234,11 @@ fi
   nvidia-smi --query-gpu=name,driver_version --format=csv,noheader -i "${physical_gpu}" |
     sed 's/^/gpu /'
   echo "repetitions ${repetitions}"
+  echo "cpu_audit_enabled ${cpu_audit_enabled}"
   echo "process_wall_median_s ${process_median}"
   echo "gpu_solve_median_ms ${gpu_median}"
   echo "cpu_audit_median_ms ${audit_median}"
+  echo "end_to_end_median_ms ${end_to_end_median}"
   echo "trusted_total_median_ms ${trusted_median}"
   echo "final_edges ${final_edges}"
   echo "edge_sha256 ${reference_edge_sha}"
@@ -231,4 +254,8 @@ fi
 } >"${run_dir}/benchmark.manifest"
 
 echo "完成：${run_dir}"
-echo "可信进程端到端中位数 ${process_median}s；最终边 ${final_edges}；相对作者固定点 ${fixed_point_speedup}x。"
+if [[ "${cpu_audit_enabled}" == "1" ]]; then
+  echo "可信进程端到端中位数 ${process_median}s；最终边 ${final_edges}；相对作者固定点 ${fixed_point_speedup}x。"
+else
+  echo "GPU raw 进程端到端中位数 ${process_median}s；最终边 ${final_edges}；未生成证书。"
+fi

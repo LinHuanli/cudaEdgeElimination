@@ -106,6 +106,8 @@ void WriteResidentManifest(const std::filesystem::path& path, const FgpuInput& i
   output << "enable_jv " << (config.enable_jv ? 1 : 0) << '\n';
   output << "enable_geometry " << (config.enable_geometry ? 1 : 0) << '\n';
   output << "enable_pdlp " << (config.enable_pdlp ? 1 : 0) << '\n';
+  output << "cpu_audit_enabled " << (config.enable_cpu_audit ? 1 : 0) << '\n';
+  output << "result_trust " << (report.cpu_audited ? "cpu-audited" : "gpu-raw") << '\n';
   output << "potential_candidates " << config.potential_candidates << '\n';
   output << "pdlp_iterations_budget " << config.pdlp_iterations << '\n';
   output << "max_pdlp_epochs " << config.max_pdlp_epochs << '\n';
@@ -130,6 +132,7 @@ void WriteResidentManifest(const std::filesystem::path& path, const FgpuInput& i
   output << "gpu_solve_wall_ms " << report.gpu_solve_wall_ms << '\n';
   output << "cpu_audit_ms " << report.cpu_audit_ms << '\n';
   output << "output_ms " << report.output_ms << '\n';
+  output << "end_to_end_ms " << report.end_to_end_ms << '\n';
   output << "trusted_total_ms " << report.trusted_total_ms << '\n';
   output << "certificate_records " << report.certificate.proof.size() << '\n';
   output << "certificate_bytes " << report.certificate_bytes << '\n';
@@ -152,8 +155,10 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
                                                  const FgpuResidentConfig& config) {
   const SteadyClock::time_point total_begin = SteadyClock::now();
   if (input.instance.empty() || outputs.edges.empty() || outputs.fixed.empty() ||
-      outputs.nonpairs.empty() || outputs.certificate.empty() || outputs.manifest.empty()) {
-    throw std::invalid_argument("resident 需要 instance 和五个输出路径");
+      outputs.nonpairs.empty() || outputs.manifest.empty() ||
+      (config.enable_cpu_audit && outputs.certificate.empty())) {
+    throw std::invalid_argument(
+        "resident 需要 instance、边/fixed/nonpairs/manifest，启用审计时还需要 certificate");
   }
   if (config.device < 0 || config.max_hs_epochs == 0U || config.max_jv_rounds == 0U ||
       config.max_pdlp_epochs == 0U || config.pdlp_iterations == 0U ||
@@ -191,6 +196,7 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   device_options.enable_jv = config.enable_jv;
   device_options.enable_geometry = config.enable_geometry;
   device_options.enable_pdlp = config.enable_pdlp;
+  device_options.collect_trace = config.enable_cpu_audit;
   device_options.potential_candidates = config.potential_candidates;
   device_options.pdlp_iterations = config.pdlp_iterations;
   device_options.max_pdlp_epochs = config.max_pdlp_epochs;
@@ -210,123 +216,144 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   report.jv_rounds = device.jv_rounds;
   report.pdlp_epochs = device.pdlp_epochs;
   report.converged = device.converged;
+  report.cpu_audited = config.enable_cpu_audit;
   report.selected_device = device.selected_device;
   report.resident_bytes = device.resident_bytes;
   report.upload_ms = device.upload_ms;
   report.gpu_kernel_ms = device.kernel_ms;
   report.gpu_download_ms = device.download_ms;
   report.gpu_solve_wall_ms = device.solve_wall_ms;
-  report.certificate.backend = "cuda-fully-resident-cpu-audited";
+  report.certificate.backend =
+      config.enable_cpu_audit ? "cuda-fully-resident-cpu-audited" : "cuda-fully-resident-gpu-raw";
   report.certificate.initial_hash = report.initial_hash;
   report.certificate.final_hash = report.initial_hash;
 
-  const SteadyClock::time_point audit_begin = SteadyClock::now();
   GraphSnapshot audited = initial;
-  std::uint32_t proof_epoch = 0U;
-  for (const detail::ResidentTraceEpoch& trace : device.epochs) {
-    if (trace.edge_ids.size() != trace.first_witness.size() ||
-        trace.edge_ids.size() != trace.second_witness.size() ||
-        trace.edges_before != audited.ActiveEdgeCount()) {
-      throw std::logic_error("resident trace 的数组或活动边计数不一致");
-    }
-    const std::uint64_t snapshot_hash = audited.ContentHash();
-    std::vector<Candidate> candidates;
-    candidates.reserve(trace.edge_ids.size());
-    for (std::size_t index = 0U; index < trace.edge_ids.size(); ++index) {
-      candidates.push_back({trace.edge_ids[index], trace.first_witness[index], trace.method,
-                            trace.second_witness[index]});
-    }
-    std::vector<std::uint8_t> valid(candidates.size(), 0U);
-    std::vector<std::string> reasons(candidates.size());
-    std::optional<detail::QuickHsVerificationData> quick_hs_data;
-    std::optional<GeometryVerificationData> geometry_data;
-    std::optional<LpBoxProof> lp_proof;
-    std::optional<LpBoxVerificationData> lp_data;
-    std::uint32_t lp_certificate_index = kNoEliminationCertificate;
-    if (trace.method == EliminationMethod::kGpuQuickHs) {
-      quick_hs_data.emplace(detail::BuildQuickHsVerificationData(audited));
-    } else if (trace.method == EliminationMethod::kGeometryMain) {
-      geometry_data.emplace(BuildGeometryVerificationData(audited));
-    } else if (trace.method == EliminationMethod::kLpBox) {
-      if (trace.vertex_dual_numerator.size() != static_cast<std::size_t>(audited.dimension)) {
-        throw std::runtime_error("resident LP trace 的 dual 维度非法");
+  if (config.enable_cpu_audit) {
+    const SteadyClock::time_point audit_begin = SteadyClock::now();
+    std::uint32_t proof_epoch = 0U;
+    for (const detail::ResidentTraceEpoch& trace : device.epochs) {
+      if (trace.edge_ids.size() != trace.first_witness.size() ||
+          trace.edge_ids.size() != trace.second_witness.size() ||
+          trace.edges_before != audited.ActiveEdgeCount()) {
+        throw std::logic_error("resident trace 的数组或活动边计数不一致");
       }
-      lp_proof.emplace(LpBoxProof{snapshot_hash, trace.fractional_bits, trace.incumbent_cost,
-                                  trace.vertex_dual_numerator});
-      lp_data.emplace(BuildLpBoxVerificationData(audited, *lp_proof));
-      if (!lp_data->certified) {
-        throw std::runtime_error("resident LP 共享证明未通过 CPU audit: " + lp_data->reason);
+      const std::uint64_t snapshot_hash = audited.ContentHash();
+      std::vector<Candidate> candidates;
+      candidates.reserve(trace.edge_ids.size());
+      for (std::size_t index = 0U; index < trace.edge_ids.size(); ++index) {
+        candidates.push_back({trace.edge_ids[index], trace.first_witness[index], trace.method,
+                              trace.second_witness[index]});
       }
-      if (report.certificate.lp_box_proofs.size() >=
-          static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
-        throw std::overflow_error("resident LP sidecar 索引溢出");
+      std::vector<std::uint8_t> valid(candidates.size(), 0U);
+      std::vector<std::string> reasons(candidates.size());
+      std::optional<detail::QuickHsVerificationData> quick_hs_data;
+      std::optional<GeometryVerificationData> geometry_data;
+      std::optional<LpBoxProof> lp_proof;
+      std::optional<LpBoxVerificationData> lp_data;
+      std::uint32_t lp_certificate_index = kNoEliminationCertificate;
+      if (trace.method == EliminationMethod::kGpuQuickHs) {
+        quick_hs_data.emplace(detail::BuildQuickHsVerificationData(audited));
+      } else if (trace.method == EliminationMethod::kGeometryMain) {
+        geometry_data.emplace(BuildGeometryVerificationData(audited));
+      } else if (trace.method == EliminationMethod::kLpBox) {
+        if (trace.vertex_dual_numerator.size() != static_cast<std::size_t>(audited.dimension)) {
+          throw std::runtime_error("resident LP trace 的 dual 维度非法");
+        }
+        lp_proof.emplace(LpBoxProof{snapshot_hash, trace.fractional_bits, trace.incumbent_cost,
+                                    trace.vertex_dual_numerator});
+        lp_data.emplace(BuildLpBoxVerificationData(audited, *lp_proof));
+        if (!lp_data->certified) {
+          throw std::runtime_error("resident LP 共享证明未通过 CPU audit: " + lp_data->reason);
+        }
+        if (report.certificate.lp_box_proofs.size() >=
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+          throw std::overflow_error("resident LP sidecar 索引溢出");
+        }
+        lp_certificate_index = static_cast<std::uint32_t>(report.certificate.lp_box_proofs.size());
       }
-      lp_certificate_index = static_cast<std::uint32_t>(report.certificate.lp_box_proofs.size());
-    }
 #ifdef CUDAEE_HAS_OPENMP
 #pragma omp parallel for schedule(dynamic, 1)
 #endif
-    for (std::int64_t index = 0; index < static_cast<std::int64_t>(candidates.size()); ++index) {
-      const std::size_t offset = static_cast<std::size_t>(index);
-      bool accepted = false;
-      if (trace.method == EliminationMethod::kJv) {
-        accepted = VerifyJvCandidate(audited, candidates[offset], &reasons[offset]);
-      } else if (trace.method == EliminationMethod::kGpuQuickHs) {
-        accepted = detail::VerifyQuickHsCandidate(audited, *quick_hs_data, candidates[offset],
-                                                  &reasons[offset]);
-      } else if (trace.method == EliminationMethod::kGeometryMain) {
-        accepted =
-            VerifyGeometryCandidate(audited, *geometry_data, candidates[offset], &reasons[offset]);
-      } else if (trace.method == EliminationMethod::kLpBox) {
-        accepted = detail::VerifyLpBoxCandidateForSnapshot(
-            audited, *lp_proof, *lp_data, candidates[offset], snapshot_hash, &reasons[offset]);
-      } else {
-        reasons[offset] = "resident trace 方法不受支持";
+      for (std::int64_t index = 0; index < static_cast<std::int64_t>(candidates.size()); ++index) {
+        const std::size_t offset = static_cast<std::size_t>(index);
+        bool accepted = false;
+        if (trace.method == EliminationMethod::kJv) {
+          accepted = VerifyJvCandidate(audited, candidates[offset], &reasons[offset]);
+        } else if (trace.method == EliminationMethod::kGpuQuickHs) {
+          accepted = detail::VerifyQuickHsCandidate(audited, *quick_hs_data, candidates[offset],
+                                                    &reasons[offset]);
+        } else if (trace.method == EliminationMethod::kGeometryMain) {
+          accepted = VerifyGeometryCandidate(audited, *geometry_data, candidates[offset],
+                                             &reasons[offset]);
+        } else if (trace.method == EliminationMethod::kLpBox) {
+          accepted = detail::VerifyLpBoxCandidateForSnapshot(
+              audited, *lp_proof, *lp_data, candidates[offset], snapshot_hash, &reasons[offset]);
+        } else {
+          reasons[offset] = "resident trace 方法不受支持";
+        }
+        valid[offset] = static_cast<std::uint8_t>(accepted);
       }
-      valid[offset] = static_cast<std::uint8_t>(accepted);
+      for (std::size_t index = 0U; index < valid.size(); ++index) {
+        if (valid[index] == 0U) {
+          throw std::runtime_error(ToString(trace.method) +
+                                   " GPU 命中未通过 CPU audit: " + reasons[index]);
+        }
+      }
+      const std::vector<Candidate> committed =
+          detail::CommitVerifiedCandidates(&audited, candidates, snapshot_hash);
+      if (committed.size() != candidates.size()) {
+        throw std::runtime_error("resident GPU 与 CPU 最小度提交结果不一致");
+      }
+      if (lp_proof.has_value()) {
+        report.certificate.lp_box_proofs.push_back(std::move(*lp_proof));
+      }
+      for (const Candidate& candidate : committed) {
+        const Edge& edge = audited.edges[static_cast<std::size_t>(candidate.edge_id)];
+        report.certificate.proof.push_back({proof_epoch, snapshot_hash, candidate.edge_id, edge.u,
+                                            edge.v, candidate.witness, candidate.method,
+                                            candidate.method == EliminationMethod::kLpBox
+                                                ? lp_certificate_index
+                                                : kNoEliminationCertificate,
+                                            candidate.second_witness});
+      }
+      report.certificate.epochs.push_back({.epoch = proof_epoch,
+                                           .edges_before = trace.edges_before,
+                                           .proposed = candidates.size(),
+                                           .verified = candidates.size(),
+                                           .rejected = 0U,
+                                           .committed = committed.size()});
+      ++proof_epoch;
     }
-    for (std::size_t index = 0U; index < valid.size(); ++index) {
-      if (valid[index] == 0U) {
-        throw std::runtime_error(ToString(trace.method) +
-                                 " GPU 命中未通过 CPU audit: " + reasons[index]);
+    if (device.final_active.size() != audited.edges.size()) {
+      throw std::runtime_error("resident GPU 最终 mask 长度与 stable edge 数不一致");
+    }
+    for (std::size_t edge = 0U; edge < audited.edges.size(); ++edge) {
+      if (static_cast<std::uint8_t>(audited.edges[edge].active) != device.final_active[edge]) {
+        throw std::runtime_error("resident GPU 最终 mask 与 CPU audit 边集不一致");
       }
     }
-    const std::vector<Candidate> committed =
-        detail::CommitVerifiedCandidates(&audited, candidates, snapshot_hash);
-    if (committed.size() != candidates.size()) {
-      throw std::runtime_error("resident GPU 与 CPU 最小度提交结果不一致");
+    report.certificate.final_hash = audited.ContentHash();
+    report.final_hash = report.certificate.final_hash;
+    report.cpu_audit_ms = ElapsedMilliseconds(audit_begin);
+  } else {
+    if (!device.epochs.empty()) {
+      throw std::logic_error("resident raw 模式不应回传逐边 trace");
     }
-    if (lp_proof.has_value()) {
-      report.certificate.lp_box_proofs.push_back(std::move(*lp_proof));
+    if (device.final_active.size() != audited.edges.size()) {
+      throw std::runtime_error("resident GPU 最终 mask 长度与 stable edge 数不一致");
     }
-    for (const Candidate& candidate : committed) {
-      const Edge& edge = audited.edges[static_cast<std::size_t>(candidate.edge_id)];
-      report.certificate.proof.push_back({proof_epoch, snapshot_hash, candidate.edge_id, edge.u,
-                                          edge.v, candidate.witness, candidate.method,
-                                          candidate.method == EliminationMethod::kLpBox
-                                              ? lp_certificate_index
-                                              : kNoEliminationCertificate,
-                                          candidate.second_witness});
+    for (std::size_t edge = 0U; edge < audited.edges.size(); ++edge) {
+      audited.edges[edge].active = device.final_active[edge] != 0U;
     }
-    report.certificate.epochs.push_back({.epoch = proof_epoch,
-                                         .edges_before = trace.edges_before,
-                                         .proposed = candidates.size(),
-                                         .verified = candidates.size(),
-                                         .rejected = 0U,
-                                         .committed = committed.size()});
-    ++proof_epoch;
+    // raw 模式只将设备最终位图物化为输出图，不逐边构造或验证证明。
+    audited.RebuildCsr();
+    if (audited.ActiveEdgeCount() != device.final_edges) {
+      throw std::logic_error("resident GPU 最终 mask 与活动边计数不一致");
+    }
+    report.final_hash = audited.ContentHash();
+    report.certificate.final_hash = report.final_hash;
   }
-  if (device.final_active.size() != audited.edges.size()) {
-    throw std::runtime_error("resident GPU 最终 mask 长度与 stable edge 数不一致");
-  }
-  for (std::size_t edge = 0U; edge < audited.edges.size(); ++edge) {
-    if (static_cast<std::uint8_t>(audited.edges[edge].active) != device.final_active[edge]) {
-      throw std::runtime_error("resident GPU 最终 mask 与 CPU audit 边集不一致");
-    }
-  }
-  report.certificate.final_hash = audited.ContentHash();
-  report.final_hash = report.certificate.final_hash;
-  report.cpu_audit_ms = ElapsedMilliseconds(audit_begin);
 
   ProtectedTourCheck final_tour_check;
   ProtectedTourCheck* final_tour_ptr = nullptr;
@@ -340,17 +367,20 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   }
 
   const SteadyClock::time_point output_begin = SteadyClock::now();
-  WriteProof(outputs.certificate, report.certificate);
-  std::error_code size_error;
-  report.certificate_bytes = std::filesystem::file_size(outputs.certificate, size_error);
-  if (size_error) {
-    throw std::runtime_error("无法读取 resident certificate 大小");
+  if (config.enable_cpu_audit) {
+    WriteProof(outputs.certificate, report.certificate);
+    std::error_code size_error;
+    report.certificate_bytes = std::filesystem::file_size(outputs.certificate, size_error);
+    if (size_error) {
+      throw std::runtime_error("无法读取 resident certificate 大小");
+    }
   }
   audited.WriteActiveEdges(outputs.edges);
   WriteFixedEdges(outputs.fixed, audited.dimension, DeriveDegreeTwoFixedEdges(audited));
   WriteEmptyNonpairs(outputs.nonpairs, audited.dimension);
   report.output_ms = ElapsedMilliseconds(output_begin);
-  report.trusted_total_ms = ElapsedMilliseconds(total_begin);
+  report.end_to_end_ms = ElapsedMilliseconds(total_begin);
+  report.trusted_total_ms = config.enable_cpu_audit ? report.end_to_end_ms : 0.0;
   WriteResidentManifest(outputs.manifest, input, config, report, final_tour_ptr);
   return report;
 }

@@ -250,6 +250,34 @@ if(CUDAEE_ENABLE_CUDA)
     PASS_REGULAR_EXPRESSION "status=VERIFIED.*geometry=[1-9].*lp=[1-9].*active_edges=8"
     LABELS "integration;fgpu;resident;certificate;gpu;correctness")
 
+  set(FGPU_RESIDENT_RAW_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-resident-raw")
+  add_test(
+    NAME integration.fgpu_resident_raw_run
+    COMMAND fgpu-elim resident
+      --instance "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.tsp"
+      --tour "${CMAKE_CURRENT_SOURCE_DIR}/data/recursive-point.opt.tour"
+      --tour-role known-optimum
+      --expected-cost 251
+      --device 0
+      --potential-candidates 6
+      --pdlp-iterations 2000
+      --max-pdlp-epochs 2
+      --max-hs-epochs 10
+      --max-jv-rounds 10
+      --enable-geometry 1
+      --enable-pdlp 1
+      --enable-quick-hs 1
+      --enable-jv 1
+      --cpu-audit 0
+      --output-edges "${FGPU_RESIDENT_RAW_TEST_DIR}/recursive-point.edg"
+      --fixed "${FGPU_RESIDENT_RAW_TEST_DIR}/recursive-point.fix"
+      --nonpairs "${FGPU_RESIDENT_RAW_TEST_DIR}/recursive-point.nonpairs"
+      --manifest "${FGPU_RESIDENT_RAW_TEST_DIR}/recursive-point.manifest")
+  set_tests_properties(integration.fgpu_resident_raw_run PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "status=OK mode=resident.*final_edges=8.*converged=1.*cpu_audited=0.*certificate_bytes=0"
+    LABELS "integration;fgpu;resident;raw;gpu;performance")
+
   if(EXISTS "${PROJECT_SOURCE_DIR}/third_party/ElimTSP/KH-elim/pr299.tsp")
     set(FGPU_RESIDENT_HS_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-resident-hs")
     set(FGPU_RESIDENT_HS_TEST_EDGES "${FGPU_RESIDENT_HS_TEST_DIR}/pr299.edg")
