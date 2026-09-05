@@ -222,8 +222,12 @@ MetricExcessAdmitsPair(const quick_hs::GraphView& graph, const std::int32_t z,
         continue;
       }
       const std::int32_t z2 = quick_hs::Neighbor(graph, z, second_slot);
-      if (z2 != s2 && z2 != s3 && (z1 != s1 || z2 != s4) && (z1 != s4 || z2 != s1) &&
-          Opt34(graph, z1, z, z2, s1, s2, s3, s4)) {
+      const bool closes = (z1 == s1 && z2 == s4) || (z1 == s4 && z2 == s1);
+      const quick_hs::SmallPath circuit{.size = 5, .node = {s1, s2, s3, s4, z}};
+      // z 连接路径两端时，只能排除真子环；五节点图上这可能是最优全图环。
+      if (z2 != s2 && z2 != s3 &&
+          (!closes || quick_hs::ClosedPathsMayCoverWholeGraph(graph, circuit)) &&
+          main_edge::Opt34(graph, z1, z, z2, s1, s2, s3, s4)) {
         return true;
       }
     }
@@ -248,7 +252,8 @@ StrongThreeCompatible(const quick_hs::GraphView& graph, std::int32_t p, std::int
     for (std::int32_t path_orientation = 0; path_orientation < 2; ++path_orientation) {
       if (q == x) {
         if (quick_hs::Fixed(graph, p, y)) {
-          return false;
+          const quick_hs::SmallPath circuit{.size = 4, .node = {p, q, middle, y}};
+          return quick_hs::ClosedPathsMayCoverWholeGraph(graph, circuit);
         }
         if (graph.degree[q] > kMetricExcessMaximumDegree ||
             graph.degree[middle] > kMetricExcessMaximumDegree) {
@@ -286,7 +291,8 @@ StrongThreeCompatible(const quick_hs::GraphView& graph, std::int32_t p, std::int
         return true;
       }
       if (y == p && quick_hs::Fixed(graph, q, x)) {
-        return false;
+        const quick_hs::SmallPath circuit{.size = 4, .node = {q, p, middle, x}};
+        return quick_hs::ClosedPathsMayCoverWholeGraph(graph, circuit);
       }
       const std::int32_t saved_x = x;
       x = y;

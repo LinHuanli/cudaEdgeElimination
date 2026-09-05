@@ -1,0 +1,12 @@
+#pragma once
+
+namespace cudaee::build_identity {
+inline constexpr char kCommit[] = "@CUDAEE_IDENTITY_COMMIT@";
+inline constexpr char kDiffSha256[] = "@CUDAEE_IDENTITY_DIFF_SHA256@";
+inline constexpr char kSourceSha256[] = "@CUDAEE_IDENTITY_SOURCE_SHA256@";
+inline constexpr bool kDirty = @CUDAEE_IDENTITY_DIRTY@;
+inline constexpr char kCompiler[] = "@CUDAEE_IDENTITY_COMPILER@";
+inline constexpr char kCudaCompiler[] = "@CUDAEE_IDENTITY_CUDA_COMPILER@";
+inline constexpr char kArchitecture[] = "@CUDAEE_IDENTITY_ARCHITECTURE@";
+inline constexpr char kConfiguration[] = "@CUDAEE_IDENTITY_CONFIGURATION@";
+} // namespace cudaee::build_identity

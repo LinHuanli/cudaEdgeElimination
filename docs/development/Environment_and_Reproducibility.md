@@ -3,7 +3,8 @@
 ## 固定环境
 
 - Linux x86_64，NVIDIA 驱动支持所选 CUDA toolkit；
-- CMake >= 3.27、Ninja、C++20 编译器、`pkg-config`、MPFR 开发包，以及可选的 OpenMP C++ runtime；
+- CMake >= 3.27、Ninja、C++20 编译器、`pkg-config`、MPFR 与 OpenSSL Crypto 开发包，
+  以及可选的 OpenMP C++ runtime；OpenSSL 用于流式 SHA-256 构建／输入身份，不参与数值求解；
 - 主环境 CUDA toolkit 13.x、目标 `sm_89`；远端门禁另验证 CUDA 12.6、`sm_86`；
 - 项目内 `.venv` 安装 `libcuopt-cu13==26.8.0`；
 - ElimTSP 子模块固定提交 `d7bacf0d...`；
@@ -18,6 +19,12 @@
 ## GPU 选择
 
 `tools/select_gpu.sh` 从 `nvidia-smi` 查询每卡利用率和空闲显存，选择利用率最低、空闲显存最大的卡并打印索引。调用者设置 `CUDA_VISIBLE_DEVICES`；记录原始物理索引和查询结果。无法查询时不猜测，CPU 自动回退。
+
+上述 CPU 回退仅适用于旧的自动候选器入口；正式 `fgpu-elim solve --mode gpu-safe`
+没有 CPU 求解回退。性能对照优先按 UUID 固定设备，并使用
+[`tools/benchmark_fgpu.py`](../../tools/benchmark_fgpu.py) 检查运行边界、记录真实
+进程 wall 和可执行文件 SHA-256。当前 native sparse PDHG 不依赖 cuOpt wheel；
+cuOpt 仍供独立的历史 LP 实验入口使用。
 
 ## 构建档位
 

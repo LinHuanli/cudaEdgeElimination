@@ -1,5 +1,20 @@
 # 实现状态（2026-09-05）
 
+最新开发结果见 [快照事务、稀疏 PDHG 与完整端点 OR](71_FGPU_Transaction_PDHG_and_PathEnd.md)。
+本次已接入原生稀疏 PDHG、SEC 独立成员验证、同快照事务和四端点 OR；完整
+local-cut/comb LP、通用深层 HT 与 GPU 工作队列仍未完成。修复后的最终构建
+`pr299` 同卡三次中位进程 wall：旧版 10.162 s，当前 4-CTA 21.011 s；non-pair
+从 298 增至 387，剩余边同为 828。当前 4-CTA 相对当前 2-CTA 为 1.312x，但
+相对旧版仍慢 2.068 倍。开发中额外小图暴露五节点全图环和测试 oracle 集合别名
+问题，已修复；最新 CPU
+35/35、CUDA 62/62 均通过，包含修复后的 42 次多后端全最优解求解；额外 36 次
+小图完整 GPU 求解也通过。最新 sanitizer 的覆盖范围和零错误记录见新报告，
+不能用之前 60/60 或中断的 racecheck 代替最终回归。
+最新 `pcb3038` 完整 LP 输入单次 pilot：`6,883 -> 6,324`，427 fixed、1,789
+non-pairs；进程 wall 585.679 s，内部 E2E 585.561 s，Point 占 92.79%。这不是
+完全图输入基准，也未达到论文的 5,548-edge 强度门禁。
+下文已有历史基准不应当成最新源码计时；构建／输入身份和原始日志按新报告核对。
+
 | 工作包 | 状态 | 已验证证据 |
 |---|---|---|
 | M0 仓库与复现 | 完成 | 项目内依赖/构建目录、固定子模块、CPU CI、路径门禁 |
@@ -13,7 +28,9 @@
 | FGPU fully-resident 终态 | 部分完成 | GPU 候选/成本/传播已接入；最终 exact replay、HT 控制与完全图物化仍含 CPU；subtour cuts/tile certificate 待实现 |
 | FGPU resident raw 固定点 | 完成（degree-LP/local raw） | 默认无 CPU audit/证书/epoch 上限/节点上限；pcb3038 七次 clean 中位 56.33 s，4,613,203 → 23,720，七份 SHA-256 一致；强度仍不等价论文完整 LP |
 | FGPU strength-upgrade `solve` | 部分完成（P0–P8 核心子集） | 单 GPU sparse resident；Signed128 LP；connectivity/local SEC；Main/metric；KH `-e2`；point non-pair；Direct Fix；联合固定点；安全修复后 pcb3038 论文 LP 图 `6883 -> 6326` |
-| FGPU GPU-safe trust boundary | 完成（当前正式规则） | 无 CPU 逐边 audit；proposal/device replay pass 分离；并行 commit；小图全部最优 tour 穷举；CPU 30/30、CUDA 53/53、memcheck/racecheck 0 errors |
+| FGPU GPU-safe trust boundary | 当前实现回归通过 | 无 CPU 逐边 audit；同不可变快照 replay 后联合事务验证；独立 SEC 成员／incidence 检查；CPU 35/35、CUDA 62/62；sanitizer 的精确覆盖范围见新报告 |
+| FGPU native sparse PDHG | 部分完成 | CSR/CSC、warm start、CUDA Graph 批次、量化精确 bound；当前适配器仍是有限 SEC，尚无真正 primal mincut 与通用 cut pool |
+| FGPU Point 完整端点 OR | 完成（不相交 3+3 根形态） | 四端点全部尝试、端点内完整 AND、独立 replay；共享端点全图环回归修复；3 叶后端 × 2 CTA × 7 小图全最优检查；通用 overlap/HT 仍缺 |
 | FGPU non-pair/fixing 固定点 | 部分完成 | LP/fixed-anchor/完整一层 point non-pair、non-pair-implied fixing、degree-2 propagation；深度 2–4 pair HT 与一般 fixing HT 尚缺 |
 | M4.1 path-system 组合层 | 完成 | 路径规范化；固定哈希表；`m<=6` CPU/CUDA 差分；`m=6` 表为 4,989,600 bytes，`m=7` CPU fallback |
 | M4.2a CPU k-opt 叶证明 | 完成 | proper 3/4/5-opt `4/25/208` 模板；ElimTSP oracle 差分；`path-kopt-proof-v1` 独立重放 |

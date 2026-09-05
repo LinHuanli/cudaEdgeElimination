@@ -25,6 +25,9 @@ void PrintHelp() {
             << "    --output-edges FILE --fixed FILE --nonpairs FILE --manifest FILE\n"
             << "    [--certificate FILE] [--tour-role incumbent|known-optimum]\n"
             << "    [--expected-cost N]\n"
+            << "    [--lp-backend primal-dual-sec|sec-dual]（LP 求解器消融）\n"
+            << "    [--point-leaf-kernel permutation|prescreen-permutation|prescreen-subset-dp]\n"
+            << "    [--point-cta-blocks 2|4]（寄存器/驻留策略，不限制任务数量）\n"
             << "  fgpu-elim run --instance FILE [--input-edges FILE] [--tour FILE]\n"
             << "    --device N --numeric mixed-safe|fp64|aggressive-fp32\n"
             << "    --verification epoch|deferred --pdlp off|native|cuopt-baseline\n"
@@ -376,11 +379,32 @@ void ResidentLocalCommand(const Arguments& arguments) {
 void SolveCommand(const Arguments& arguments) {
   ValidateKeys(arguments,
                {"instance", "input-edges", "tour", "tour-role", "expected-cost", "device", "gpus",
-                "mode", "output-edges", "fixed", "nonpairs", "certificate", "manifest"});
+                "mode", "output-edges", "fixed", "nonpairs", "certificate", "manifest",
+                "lp-backend", "point-leaf-kernel", "point-cta-blocks"});
   cudaee::FgpuSolveOptions options;
   options.device = ParseSolveDevice(arguments);
   options.mode = ParseSolveMode(Optional(arguments, "mode", "gpu-safe"));
   options.serialize_certificate = arguments.contains("certificate");
+  const std::string lp_backend = Optional(arguments, "lp-backend", "primal-dual-sec");
+  if (lp_backend != "primal-dual-sec" && lp_backend != "sec-dual") {
+    throw std::invalid_argument("--lp-backend 必须为 primal-dual-sec 或 sec-dual");
+  }
+  options.primal_dual_lp = lp_backend == "primal-dual-sec";
+  const std::string leaf = Optional(arguments, "point-leaf-kernel", "permutation");
+  if (leaf == "permutation") {
+    options.point_leaf_kernel = cudaee::PointLeafKernel::kPermutation;
+  } else if (leaf == "prescreen-permutation") {
+    options.point_leaf_kernel = cudaee::PointLeafKernel::kPrescreenPermutation;
+  } else if (leaf == "prescreen-subset-dp") {
+    options.point_leaf_kernel = cudaee::PointLeafKernel::kPrescreenSubsetDp;
+  } else {
+    throw std::invalid_argument("--point-leaf-kernel 的后端名称无效");
+  }
+  const std::string cta = Optional(arguments, "point-cta-blocks", "4");
+  if (cta != "2" && cta != "4") {
+    throw std::invalid_argument("--point-cta-blocks 只能为 2 或 4");
+  }
+  options.point_cta_blocks = cta == "4" ? 4U : 2U;
   const cudaee::FgpuSolveReport report =
       cudaee::RunFgpuElimination(ParseInput(arguments), ParseRunOutputs(arguments, false), options);
   std::cout << "status=OK mode=" << cudaee::ToString(options.mode)
@@ -398,6 +422,7 @@ void SolveCommand(const Arguments& arguments) {
             << " proof_rejected=" << report.proof_rejected
             << " lp_connectivity_cuts=" << report.lp_connectivity_cuts
             << " lp_path_closed_replies=" << report.lp_path_closed_replies
+            << " point_path_end_closed_replies=" << report.point_path_end_closed_replies
             << " lp_degree_snapshots=" << report.lp_degree_snapshots
             << " lp_strong_snapshots=" << report.lp_strong_snapshots
             << " lp_lower_bound=" << report.lp_lower_bound
@@ -493,6 +518,7 @@ void ResidentCommand(const Arguments& arguments, const bool one_shot = false) {
             << " lp_deleted=" << report.lp_committed << " pdlp_epochs=" << report.pdlp_epochs
             << " lp_connectivity_cuts=" << report.lp_connectivity_cuts
             << " lp_path_closed_replies=" << report.lp_path_closed_replies
+            << " point_path_end_closed_replies=" << report.point_path_end_closed_replies
             << " lp_degree_snapshots=" << report.lp_degree_snapshots
             << " lp_strong_snapshots=" << report.lp_strong_snapshots
             << " lp_lower_bound=" << report.lp_lower_bound << " jv_deleted=" << report.jv_committed

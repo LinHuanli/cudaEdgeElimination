@@ -1,5 +1,10 @@
 # FGPU 强度升级 P0–P8：实现边界、正确性修复与论文对齐
 
+> 本文保留 `563d78a` 及此前实验的历史口径。后续发现并修复了 fixed 提前写入的
+> 快照事务问题，新增稀疏 PDHG、独立 SEC incidence 校验和完整四端点 OR；最新状态
+> 见 [71 号实现记录](71_FGPU_Transaction_PDHG_and_PathEnd.md)。下文的“cutting-plane
+> dual”实为静态窗口/有限族 connectivity SEC 次梯度，不是完整强 LP cutting-plane。
+
 本文是 [FGPU 强度升级与纯 GPU 架构方案](../design/FGPU-Elim_Strength_Upgrade_and_Pure_GPU_Architecture.md)
 的实现记录。设计中的 P0–P8 是依赖优先级，不是可以跳过正确性门禁的发布阶段。
 

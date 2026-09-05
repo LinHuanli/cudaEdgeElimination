@@ -5,6 +5,10 @@
 执行独立 GPU replay，CPU 不参与逐边删除、non-pair 或 fixing 决策。浮点 LP 只生成
 guidance，最终授权统一使用量化 dual 和设备端精确定点比较。
 
+最新开发记录：[快照事务、稀疏 PDHG 与端点 OR](docs/research/71_FGPU_Transaction_PDHG_and_PathEnd.md)。
+当前还不是设计中的完整 local-cut/comb LP 与通用深层 HT；历史计时不能当作最新版本的性能。
+完整运行的交错对照及身份记录见[基准协议](docs/research/72_FGPU_Reproducible_Paired_Benchmarks.md)。
+
 当前实现范围：
 
 - TSPLIB `EUC_2D` / `CEIL_2D` 与 Concorde 稀疏边文件读取；
@@ -61,7 +65,8 @@ guidance，最终授权统一使用量化 dual 和设备端精确定点比较。
 - 正式 `fgpu-elim solve` 的单 GPU sparse resident 主链加入 GPU Signed128 LP
   delete/fix/path bound、connectivity/local SEC、Main-Edge/metric-excess、KH `-e2`、
   persistent non-pairs、完整一层 point move、Direct/non-pair implied fixing、device
-  replay 和 edge/pair/fixed 联合固定点。修复 `-e2` 重叠路径的安全问题后，同论文
+  replay 和 edge/pair/fixed 联合固定点。以下是 `563d78a` 的历史结果，不是当前
+  开发版计时：修复 `-e2` 重叠路径的安全问题后，同论文
   6,883-edge `pcb3038` 输入上可靠结果为 6,326 edges、424 fixed、6.1687%
   non-pairs，三次隔离 clean E2E 中位 153.220 s；相对论文完整 5,548-edge 结果仍多
   778 条。正式完全图单次 run 为 `4,613,203 -> 17,872`、E2E 7,495.652 s：边数

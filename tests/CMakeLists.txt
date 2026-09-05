@@ -1,6 +1,14 @@
 find_package(Python3 COMPONENTS Interpreter QUIET)
 
 if(Python3_Interpreter_FOUND)
+  add_test(NAME unit.fgpu_benchmark
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_benchmark_fgpu.py")
+  set_tests_properties(unit.fgpu_benchmark PROPERTIES
+    LABELS "correctness;reproducibility" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+  add_test(NAME unit.optimal_tour_oracle
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_optimal_tour_oracle.py")
+  set_tests_properties(unit.optimal_tour_oracle PROPERTIES
+    LABELS "correctness;exhaustive" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
   add_test(
     NAME negative.fgpu_output_boundary
     COMMAND "${Python3_EXECUTABLE}"
@@ -19,8 +27,50 @@ target_compile_definitions(cudaee_unit PRIVATE CUDAEE_TEST_TMP_DIR="${CMAKE_CURR
 target_compile_options(cudaee_unit PRIVATE -Wall -Wextra -Wconversion -Wshadow -Wformat=2)
 
 add_test(NAME unit.core COMMAND cudaee_unit)
+add_executable(cudaee_optimal_filters_unit exhaustive/test_fgpu_optimal_filters.cpp)
+target_link_libraries(cudaee_optimal_filters_unit PRIVATE cudaee_core)
+target_compile_options(cudaee_optimal_filters_unit PRIVATE -Wall -Wextra -Wconversion -Wshadow)
+add_test(NAME exhaustive.fgpu_optimal_filters COMMAND cudaee_optimal_filters_unit)
+set_tests_properties(exhaustive.fgpu_optimal_filters PROPERTIES LABELS "correctness;exhaustive;fgpu")
+add_executable(cudaee_build_identity_unit unit/test_build_identity.cpp)
+target_link_libraries(cudaee_build_identity_unit PRIVATE cudaee_core)
+target_compile_definitions(cudaee_build_identity_unit PRIVATE
+  CUDAEE_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}/tmp/build-identity")
+add_test(NAME unit.build_identity COMMAND cudaee_build_identity_unit)
+set_tests_properties(unit.build_identity PROPERTIES LABELS "correctness;reproducibility")
+add_executable(cudaee_transaction_unit unit/test_resident_transaction.cpp)
+target_link_libraries(cudaee_transaction_unit PRIVATE cudaee_core)
+target_compile_options(cudaee_transaction_unit PRIVATE -Wall -Wextra -Wconversion -Wshadow)
+add_test(NAME unit.resident_transaction COMMAND cudaee_transaction_unit)
+set_tests_properties(unit.resident_transaction PROPERTIES LABELS "correctness;transaction")
 if(CUDAEE_ENABLE_CUDA)
   set_tests_properties(unit.core PROPERTIES LABELS "correctness;gpu")
+  add_executable(cudaee_transaction_cuda_unit unit/test_resident_transaction_cuda.cu)
+  target_link_libraries(cudaee_transaction_cuda_unit PRIVATE cudaee_core)
+  set_target_properties(cudaee_transaction_cuda_unit PROPERTIES
+    CUDA_ARCHITECTURES "${CUDAEE_CUDA_ARCHITECTURES}" CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON)
+  add_test(NAME unit.resident_transaction_cuda COMMAND cudaee_transaction_cuda_unit)
+  add_executable(cudaee_sparse_pdhg_unit unit/test_sparse_pdhg.cu)
+  target_link_libraries(cudaee_sparse_pdhg_unit PRIVATE cudaee_core)
+  set_target_properties(cudaee_sparse_pdhg_unit PROPERTIES
+    CUDA_ARCHITECTURES "${CUDAEE_CUDA_ARCHITECTURES}" CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON)
+  add_test(NAME unit.sparse_pdhg COMMAND cudaee_sparse_pdhg_unit)
+  add_executable(cudaee_sec_replay_unit unit/test_resident_sec_replay.cu)
+  target_link_libraries(cudaee_sec_replay_unit PRIVATE cudaee_core)
+  set_target_properties(cudaee_sec_replay_unit PROPERTIES
+    CUDA_ARCHITECTURES "${CUDAEE_CUDA_ARCHITECTURES}" CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON)
+  add_test(NAME unit.sec_replay COMMAND cudaee_sec_replay_unit)
+  set_tests_properties(unit.sec_replay PROPERTIES LABELS "correctness;gpu;lp;replay" SKIP_RETURN_CODE 77)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME exhaustive.fgpu_variants
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/exhaustive/check_fgpu_variants.py"
+        "$<TARGET_FILE:fgpu-elim>" "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-variants")
+    set_tests_properties(exhaustive.fgpu_variants PROPERTIES
+      LABELS "correctness;gpu;fgpu;exhaustive" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+  endif()
+  set_tests_properties(unit.sparse_pdhg PROPERTIES LABELS "correctness;gpu;lp;pdhg" SKIP_RETURN_CODE 77)
+  set_tests_properties(unit.resident_transaction_cuda PROPERTIES
+    LABELS "correctness;gpu;transaction" SKIP_RETURN_CODE 77)
 else()
   set_tests_properties(unit.core PROPERTIES LABELS "correctness")
 endif()
@@ -302,10 +352,11 @@ if(CUDAEE_ENABLE_CUDA)
         "${CMAKE_CURRENT_SOURCE_DIR}/data/e2-overlap-regression.edg"
         "${CMAKE_CURRENT_SOURCE_DIR}/data/e2-overlap-regression.opt.tour"
         "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-solve-e2-overlap"
-        "ht_extra_edge_deleted")
+        "ht_extra_edge_deleted"
+        "point_path_end_closed_replies")
     set_tests_properties(exhaustive.fgpu_solve_e2_overlap PROPERTIES
       PASS_REGULAR_EXPRESSION "FGPU solve exhaustive check passed"
-      LABELS "exhaustive;integration;fgpu;gpu;gpu-replay;correctness;solve;e2")
+      LABELS "exhaustive;integration;fgpu;gpu;gpu-replay;correctness;solve;e2;point-path-end")
 
     add_test(
       NAME exhaustive.fgpu_e2_distinct

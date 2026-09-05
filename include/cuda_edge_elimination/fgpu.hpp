@@ -1,4 +1,6 @@
 #pragma once
+#include "cuda_edge_elimination/fgpu_execution.hpp"
+#include "cuda_edge_elimination/fgpu_metrics.hpp"
 
 #include "cuda_edge_elimination/elimination.hpp"
 #include "cuda_edge_elimination/graph.hpp"
@@ -196,9 +198,15 @@ struct FgpuSolveOptions {
   int device{-1};
   FgpuSolveMode mode{FgpuSolveMode::kGpuSafe};
   bool serialize_certificate{false};
+  // 消融只切换 multiplier 求解器，不改变 GPU replay 或完整目标集。
+  bool primal_dual_lp{true};
+  PointLeafKernel point_leaf_kernel{PointLeafKernel::kPermutation};
+  // 编译期驻留策略的运行期选择，不限制搜索任务或回复数量。
+  std::uint32_t point_cta_blocks{4U};
 };
 
 struct FgpuSolveReport {
+  FgpuLpMetrics lp;
   FgpuTermination termination{FgpuTermination::kFixedPoint};
   bool gpu_replayed{false};
   bool unaudited{false};
@@ -220,6 +228,7 @@ struct FgpuSolveReport {
   std::size_t proof_rejected{};
   std::size_t lp_connectivity_cuts{};
   std::size_t lp_path_closed_replies{};
+  std::size_t point_path_end_closed_replies{};
   std::uint32_t lp_degree_snapshots{};
   std::uint32_t lp_strong_snapshots{};
   double lp_lower_bound{};
@@ -272,6 +281,10 @@ struct FgpuResidentConfig {
   bool enable_jv{true};
   bool enable_geometry{true};
   bool enable_pdlp{true};
+  // SEC 上的原始-对偶候选与旧 degree-box ensemble 比较精确下界。
+  bool enable_primal_dual_lp{false};
+  PointLeafKernel point_leaf_kernel{PointLeafKernel::kPermutation};
+  std::uint32_t point_cta_blocks{4U};
   // 新 one-shot 路径启用；旧 resident 默认关闭以冻结既有基线语义。
   bool enable_main_edge{false};
   // 低度数 Main-Edge reply 启用 KH strong-3-opt/metric-excess。
@@ -293,6 +306,7 @@ struct FgpuResidentConfig {
 };
 
 struct FgpuResidentRunReport {
+  FgpuLpMetrics lp;
   std::uint64_t initial_hash{};
   std::uint64_t final_hash{};
   std::uint64_t final_state_hash{};
@@ -323,6 +337,7 @@ struct FgpuResidentRunReport {
   std::uint32_t pdlp_epochs{};
   std::size_t lp_connectivity_cuts{};
   std::size_t lp_path_closed_replies{};
+  std::size_t point_path_end_closed_replies{};
   std::uint32_t lp_degree_snapshots{};
   std::uint32_t lp_strong_snapshots{};
   double lp_lower_bound{};

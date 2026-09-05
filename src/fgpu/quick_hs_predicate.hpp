@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cuda_edge_elimination/fgpu_execution.hpp"
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -49,6 +50,7 @@ struct GraphView {
   std::int64_t edge_count{};
   std::uint8_t distance_type{};
   bool complete_graph{};
+  PointLeafKernel point_leaf_kernel{PointLeafKernel::kPermutation};
 };
 
 struct Witness {
@@ -60,6 +62,48 @@ struct SmallPath {
   std::int32_t size{};
   std::int32_t node[kMaxPathNodes]{};
 };
+
+// 只有真子环才能直接关闭。fixed 连接与共享端点同时出现时，两条
+// 路径可能恰好构成覆盖全图的 Hamilton 环；它不是局部不可能状态。
+// 大实例首先由节点数上界 O(1) 排除，小图才精确去重计数。
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+ClosedPathsMayCoverWholeGraph(const GraphView& graph, const SmallPath& first,
+                              const SmallPath* const second = nullptr,
+                              const SmallPath* const third = nullptr) {
+  const std::int32_t upper =
+      first.size + (second == nullptr ? 0 : second->size) + (third == nullptr ? 0 : third->size);
+  if (graph.dimension > upper) {
+    return false;
+  }
+  const SmallPath* const paths[3] = {&first, second, third};
+  int distinct = 0;
+  for (int p = 0; p < 3; ++p) {
+    if (paths[p] == nullptr) {
+      continue;
+    }
+    if (paths[p]->size < 1 || paths[p]->size > kMaxPathNodes) {
+      return true;
+    }
+    for (int index = 0; index < paths[p]->size; ++index) {
+      const auto node = paths[p]->node[index];
+      if (node < 0 || node >= graph.dimension) {
+        return true;
+      }
+      bool seen = false;
+      for (int q = 0; q <= p; ++q) {
+        if (paths[q] == nullptr) {
+          continue;
+        }
+        const int end = q == p ? index : paths[q]->size;
+        for (int previous = 0; previous < end; ++previous) {
+          seen = seen || paths[q]->node[previous] == node;
+        }
+      }
+      distinct += seen ? 0 : 1;
+    }
+  }
+  return distinct == graph.dimension;
+}
 
 // endpoint/fixed 合并完成后，各路径必须顶点互异，path-order DP 才能把
 // 每个数组位置当成一个 Hamilton 顶点。作者实现只处理共享端点；若内部
@@ -292,8 +336,12 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
 Opt23(const GraphView& graph, const std::int32_t a, const std::int32_t b, const std::int32_t c1,
       const std::int32_t c, const std::int32_t c2, const std::int64_t cab, const std::int64_t cc1c,
       const std::int64_t ccc2) {
-  if ((c1 == a && c2 == b) || (c1 == b && c2 == a) ||
-      cab + cc1c + ccc2 > Distance(graph, a, c) + Distance(graph, c, b) + Distance(graph, c1, c2)) {
+  if ((c1 == a && c2 == b) || (c1 == b && c2 == a)) {
+    const SmallPath triangle{.size = 3, .node = {a, c, b}};
+    return ClosedPathsMayCoverWholeGraph(graph, triangle);
+  }
+  if (cab + cc1c + ccc2 >
+      Distance(graph, a, c) + Distance(graph, c, b) + Distance(graph, c1, c2)) {
     return false;
   }
   // 对齐 KH 默认 strong_3_opt=0 的两个固定边门禁。
@@ -306,7 +354,11 @@ Opt23(const GraphView& graph, const std::int32_t a, const std::int32_t b, const 
       return false;
     }
   }
-  return !Fixed(graph, c1, c2);
+  if (Fixed(graph, c1, c2)) {
+    const SmallPath triangle{.size = 3, .node = {c1, c, c2}};
+    return ClosedPathsMayCoverWholeGraph(graph, triangle);
+  }
+  return true;
 }
 
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool HasCycle(const std::int32_t* const endpoints,
@@ -466,14 +518,14 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Opt(const GraphView& graph,
       const std::int32_t b1 = paths[i].node[0];
       const std::int32_t b2 = paths[i].node[paths[i].size - 1];
       if ((b1 == b2 && paths[i].size > 1) || (paths[i].size > 2 && Fixed(graph, b1, b2))) {
-        return false;
+        return ClosedPathsMayCoverWholeGraph(graph, paths[i]);
       }
       for (std::int32_t j = 0; j < i && !merged; ++j) {
         const std::int32_t a1 = paths[j].node[0];
         const std::int32_t a2 = paths[j].node[paths[j].size - 1];
         if (j == 0 &&
             ((a1 == a2 && paths[j].size > 1) || (paths[j].size > 2 && Fixed(graph, a1, a2)))) {
-          return false;
+          return ClosedPathsMayCoverWholeGraph(graph, paths[j]);
         }
 
         std::int32_t first_direction = 1;
@@ -482,27 +534,27 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Opt(const GraphView& graph,
         bool shared = false;
         if (a2 == b1 || (a2 != b2 && b1 != a1 && Fixed(graph, a2, b1))) {
           if (a1 == b2) {
-            return false;
+            return ClosedPathsMayCoverWholeGraph(graph, paths[j], &paths[i]);
           }
           join = true;
           shared = a2 == b1;
         } else if (a2 == b2 || (a2 != b1 && b2 != a1 && Fixed(graph, a2, b2))) {
           if (a1 == b1) {
-            return false;
+            return ClosedPathsMayCoverWholeGraph(graph, paths[j], &paths[i]);
           }
           join = true;
           shared = a2 == b2;
           second_direction = -1;
         } else if (a1 == b1 || (a1 != b2 && b1 != a2 && Fixed(graph, a1, b1))) {
           if (a2 == b2) {
-            return false;
+            return ClosedPathsMayCoverWholeGraph(graph, paths[j], &paths[i]);
           }
           join = true;
           shared = a1 == b1;
           first_direction = -1;
         } else if (a1 == b2 || (a1 != b1 && b2 != a2 && Fixed(graph, a1, b2))) {
           if (a2 == b1) {
-            return false;
+            return ClosedPathsMayCoverWholeGraph(graph, paths[j], &paths[i]);
           }
           join = true;
           shared = a1 == b2;
@@ -546,7 +598,8 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Opt(const GraphView& graph,
     endpoints[2 * path + 1] = paths[path].node[paths[path].size - 1];
   }
   if (HasCycle(endpoints, path_count)) {
-    return false;
+    return ClosedPathsMayCoverWholeGraph(graph, paths[0], path_count > 1 ? &paths[1] : nullptr,
+                                         path_count > 2 ? &paths[2] : nullptr);
   }
   if (path_count > 3) {
     return true;
@@ -635,6 +688,37 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Opt33(const GraphView& graph, con
   const SmallPath paths[kMaxPathCount] = {
       {.size = 3, .node = {a1, a2, a3}},
       {.size = 3, .node = {b1, b2, b3}},
+  };
+  return Opt(graph, paths, 2);
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool Opt34(const GraphView& graph, const std::int32_t a1,
+                                                     const std::int32_t a2, const std::int32_t a3,
+                                                     const std::int32_t b1, const std::int32_t b2,
+                                                     const std::int32_t b3, const std::int32_t b4) {
+  // 3+4 path system 包含七个 2+3 子系统。任一子系统已存在严格更短
+  // 重连时，完整 forced-edge 超集也不可能属于最优 tour。该预筛只在
+  // 七个角色互异时使用；共享端点继续交给通用 path normalization。
+  const std::int32_t nodes[7] = {a1, a2, a3, b1, b2, b3, b4};
+  if (AllNodesDistinct(nodes, 7) && (!Opt23(graph, a1, a2, b1, b2, b3, Distance(graph, a1, a2),
+                                            Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
+                                     !Opt23(graph, a1, a2, b2, b3, b4, Distance(graph, a1, a2),
+                                            Distance(graph, b2, b3), Distance(graph, b3, b4)) ||
+                                     !Opt23(graph, a2, a3, b1, b2, b3, Distance(graph, a2, a3),
+                                            Distance(graph, b1, b2), Distance(graph, b2, b3)) ||
+                                     !Opt23(graph, a2, a3, b2, b3, b4, Distance(graph, a2, a3),
+                                            Distance(graph, b2, b3), Distance(graph, b3, b4)) ||
+                                     !Opt23(graph, b1, b2, a1, a2, a3, Distance(graph, b1, b2),
+                                            Distance(graph, a1, a2), Distance(graph, a2, a3)) ||
+                                     !Opt23(graph, b2, b3, a1, a2, a3, Distance(graph, b2, b3),
+                                            Distance(graph, a1, a2), Distance(graph, a2, a3)) ||
+                                     !Opt23(graph, b3, b4, a1, a2, a3, Distance(graph, b3, b4),
+                                            Distance(graph, a1, a2), Distance(graph, a2, a3)))) {
+    return false;
+  }
+  const SmallPath paths[kMaxPathCount] = {
+      {.size = 3, .node = {a1, a2, a3}},
+      {.size = 4, .node = {b1, b2, b3, b4}},
   };
   return Opt(graph, paths, 2);
 }
@@ -788,6 +872,21 @@ HasCycle222(const std::int32_t a, const std::int32_t b, const std::int32_t c1,
 }
 
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
+HasProperCycle233(const GraphView& graph, const std::int32_t a, const std::int32_t b,
+                  const std::int32_t c1, const std::int32_t c, const std::int32_t c2,
+                  const std::int32_t d1, const std::int32_t d, const std::int32_t d2) {
+  if (!HasCycle222(a, b, c1, c2, d1, d2)) {
+    return false;
+  }
+  // 端点收缩后出现的三角环可能就是完整的五节点 Hamilton 环。
+  // fast filter 必须和通用 normalization 一样区分真子环与覆盖全图的环。
+  const SmallPath first{.size = 2, .node = {a, b}};
+  const SmallPath second{.size = 3, .node = {c1, c, c2}};
+  const SmallPath third{.size = 3, .node = {d1, d, d2}};
+  return !ClosedPathsMayCoverWholeGraph(graph, first, &second, &third);
+}
+
+CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE bool
 Compatible(const GraphView& graph, const std::int32_t a, const std::int32_t b, const std::int32_t c,
            const std::int32_t d, const std::int64_t cab) {
   const std::int64_t ccd = Distance(graph, c, d);
@@ -885,7 +984,8 @@ ReplyPassesFastFilters(const GraphView& graph, const std::int32_t a, const std::
       (d2 == a && (d1 == b || c1 == d2 || c2 == d2)) ||
       (d2 == b && (d1 == a || c1 == d2 || c2 == d2)) ||
       (d2 == c1 && (d1 == c2 || a == d2 || b == d2)) ||
-      (d2 == c2 && (d1 == c1 || a == d2 || b == d2)) || HasCycle222(a, b, c1, c2, d1, d2)) {
+      (d2 == c2 && (d1 == c1 || a == d2 || b == d2)) ||
+      HasProperCycle233(graph, a, b, c1, c, c2, d1, d, d2)) {
     return false;
   }
   const std::int64_t cab = Distance(graph, a, b);
@@ -981,7 +1081,8 @@ CanEliminateWithWitness(const GraphView& graph, const std::int32_t a, const std:
           if (d2 == c || (d2 == a && (d1 == b || c1 == d2 || c2 == d2)) ||
               (d2 == b && (d1 == a || c1 == d2 || c2 == d2)) ||
               (d2 == c1 && (d1 == c2 || a == d2 || b == d2)) ||
-              (d2 == c2 && (d1 == c1 || a == d2 || b == d2)) || HasCycle222(a, b, c1, c2, d1, d2)) {
+              (d2 == c2 && (d1 == c1 || a == d2 || b == d2)) ||
+              HasProperCycle233(graph, a, b, c1, c, c2, d1, d, d2)) {
             continue;
           }
           const std::int64_t cdd2 = Distance(graph, d, d2);

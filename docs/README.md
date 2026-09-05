@@ -80,5 +80,7 @@
 76. [FGPU 无上限 raw 与 pcb3038 LP 诊断](research/69_FGPU_无上限Raw与pcb3038_LP诊断.md)：默认无证书固定点、阶段画像、warp 并行否决，以及 degree/1-tree/subtour LP 强度分解。
 77. [FGPU 强度升级与纯 GPU 架构方案](design/FGPU-Elim_Strength_Upgrade_and_Pure_GPU_Architecture.md)：P0–P8 总设计、数学授权边界、完整单 GPU 数据流与论文对齐门禁。
 78. [FGPU 强度升级 P0–P8 实现与论文对齐](research/70_FGPU_Strength_Upgrade_P0_P8_Implementation.md)：纯 GPU-safe 固定点、Signed128 LP、Main/`-e2`、non-pair/fixing、正确性修复、pcb3038 论文 LP 图三次基准、完全图正式运行及尚未完成项。
+79. [FGPU 快照事务、稀疏 PDHG 与完整端点 OR](research/71_FGPU_Transaction_PDHG_and_PathEnd.md)：同快照联合提交、独立 SEC replay、原生 PDHG、四端点与 Opt34／occupancy 消融、全最优回归及真实性能回退。
+80. [FGPU 可复现交错基准](research/72_FGPU_Reproducible_Paired_Benchmarks.md)：冻结构建与输入身份、同卡 AB/BA、进程墙钟、终态一致性及 clean 边界。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

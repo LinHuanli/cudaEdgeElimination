@@ -52,9 +52,11 @@ def optimal_tour_facts(
         }
         if optimum is None or cost < optimum:
             optimum = cost
-            union = edges
-            intersection = edges
-            pair_union = pairs
+            # 并集与交集必须持有独立集合；共享同一对象会让 intersection_update
+            # 悄悄缩小 union，把多最优解测试退化成只保留最后一条 tour。
+            union = set(edges)
+            intersection = set(edges)
+            pair_union = set(pairs)
         elif cost == optimum:
             union.update(edges)
             intersection.intersection_update(edges)
@@ -95,30 +97,33 @@ def nonpair_set(path: pathlib.Path, dimension: int) -> set[tuple[int, int, int]]
 
 
 def run(executable: pathlib.Path, tsp: pathlib.Path, edge_input: pathlib.Path,
-        tour: pathlib.Path, output: pathlib.Path, optimum: int) -> dict[str, object]:
+        tour: pathlib.Path, output: pathlib.Path, optimum: int,
+        extra_args: tuple[str, ...] = ()) -> dict[str, object]:
     output.mkdir(parents=True, exist_ok=True)
     command = [
         str(executable), "solve", "--instance", str(tsp), "--input-edges", str(edge_input),
         "--tour", str(tour), "--tour-role", "known-optimum", "--expected-cost", str(optimum),
         "--mode", "gpu-safe", "--device", "auto", "--output-edges", str(output / "out.edg"),
         "--fixed", str(output / "out.fix"), "--nonpairs", str(output / "out.nonpairs"),
-        "--manifest", str(output / "out.json"),
+        "--manifest", str(output / "out.json"), *extra_args,
     ]
-    completed = subprocess.run(command, check=True, text=True, capture_output=True)
+    completed = subprocess.run(command, check=False, text=True, capture_output=True)
+    if completed.returncode != 0:
+        raise RuntimeError(f"solve failed ({completed.returncode}): {completed.stderr}\n{completed.stdout}")
     if "termination=fixed-point" not in completed.stdout or "gpu_replayed=1" not in completed.stdout:
         raise RuntimeError(f"solve 未进入 GPU-safe 不动点: {completed.stdout}")
     return json.loads((output / "out.json").read_text(encoding="utf-8"))
 
 
 def main() -> int:
-    if len(sys.argv) not in (6, 7):
+    if len(sys.argv) < 6:
         raise SystemExit(
-            "usage: check_fgpu_solve.py EXE TSP EDGES TOUR OUTPUT_DIR [REQUIRED_COUNTER]"
+            "usage: check_fgpu_solve.py EXE TSP EDGES TOUR OUTPUT_DIR [REQUIRED_COUNTER ...]"
         )
     executable, tsp, edges, tour, output = map(
         lambda value: pathlib.Path(value).resolve(), sys.argv[1:6]
     )
-    required_counter = sys.argv[6] if len(sys.argv) == 7 else ""
+    required_counters = sys.argv[6:]
     points = coordinates(tsp)
     optimum, required, mandatory, optimal_pairs = optimal_tour_facts(points)
     first = run(executable, tsp, edges, tour, output / "first", optimum)
@@ -130,8 +135,9 @@ def main() -> int:
             raise RuntimeError(f"gpu-safe 重复运行的 {filename} 不一致")
     if int(first["proof_rejected"]) != 0 or not bool(first["gpu_replayed"]):
         raise RuntimeError("manifest 的 GPU replay 状态非法")
-    if required_counter and int(first.get(required_counter, 0)) <= 0:
-        raise RuntimeError(f"正式回归未实际触发 {required_counter}")
+    for required_counter in required_counters:
+        if int(first.get(required_counter, 0)) <= 0:
+            raise RuntimeError(f"正式回归未实际触发 {required_counter}")
     missing = required - edge_set(output / "first" / "out.edg")
     if missing:
         raise RuntimeError(f"gpu-safe 删除了某个最优 tour 边: {sorted(missing)}")

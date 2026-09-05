@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cuda_edge_elimination/fgpu_execution.hpp"
+#include "cuda_edge_elimination/fgpu_metrics.hpp"
 #include "cuda_edge_elimination/graph.hpp"
 #include "cuda_edge_elimination/types.hpp"
 
@@ -19,6 +21,9 @@ struct ResidentGpuOptions {
   bool enable_jv{true};
   bool enable_geometry{false};
   bool enable_pdlp{false};
+  bool enable_primal_dual_lp{false};
+  PointLeafKernel point_leaf_kernel{PointLeafKernel::kPermutation};
+  std::uint32_t point_cta_blocks{2U};
   bool enable_main_edge{false};
   bool enable_strong_metric{false};
   // KH-ElimTSP -e1/-e2：在基础 2/3/3 reply 上继续揭示相邻边。
@@ -72,6 +77,7 @@ struct ResidentNonpair {
 };
 
 struct ResidentGpuResult {
+  FgpuLpMetrics lp;
   int selected_device{-1};
   std::string backend{"none"};
   std::vector<std::uint8_t> final_active;
@@ -105,6 +111,8 @@ struct ResidentGpuResult {
   std::size_t lp_connectivity_cuts{};
   // 已发布的精确 LP dual 在 Quick/HT reply 层关闭的路径系统数。
   std::size_t lp_path_closed_replies{};
+  // point move 的 3+3 reply 经完整 path-end 分支后才关闭的数量。
+  std::size_t point_path_end_closed_replies{};
   std::uint32_t lp_degree_snapshots{};
   std::uint32_t lp_strong_snapshots{};
   double lp_lower_bound{};

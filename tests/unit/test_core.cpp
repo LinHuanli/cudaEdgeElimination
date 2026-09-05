@@ -8,6 +8,7 @@
 #include "../../src/fgpu/resident_backend.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -124,6 +125,10 @@ void TestMetricPathDistanceCache() {
                                            node[5], node[6]) ==
               cudaee::detail::quick_hs::Opt(graph, paths34, 2),
           "cached opt34 equals generic path oracle");
+    Check(cudaee::detail::quick_hs::Opt34(graph, node[0], node[1], node[2], node[3], node[4],
+                                          node[5], node[6]) ==
+              cudaee::detail::quick_hs::Opt(graph, paths34, 2),
+          "fast opt34 equals generic path oracle");
 
     const cudaee::detail::quick_hs::SmallPath paths33[3] = {
         {.size = 3, .node = {node[0], node[1], node[2]}},
@@ -148,6 +153,20 @@ void TestMetricPathDistanceCache() {
                                               overlapping[1], overlapping[2]) ==
                   cudaee::detail::quick_hs::Opt(graph, overlap_paths, 2),
               "fast opt33 overlap equals generic path oracle");
+      }
+    }
+    for (std::int32_t root_position = 0; root_position < 3; ++root_position) {
+      for (std::int32_t extended_position = 0; extended_position < 4; ++extended_position) {
+        std::int32_t overlapping[4] = {node[3], node[4], node[5], node[6]};
+        overlapping[extended_position] = node[root_position];
+        const cudaee::detail::quick_hs::SmallPath overlap_paths[3] = {
+            {.size = 3, .node = {node[0], node[1], node[2]}},
+            {.size = 4, .node = {overlapping[0], overlapping[1], overlapping[2], overlapping[3]}},
+        };
+        Check(cudaee::detail::quick_hs::Opt34(graph, node[0], node[1], node[2], overlapping[0],
+                                              overlapping[1], overlapping[2], overlapping[3]) ==
+                  cudaee::detail::quick_hs::Opt(graph, overlap_paths, 2),
+              "fast opt34 overlap equals generic path oracle");
       }
     }
   }
@@ -268,6 +287,103 @@ void TestFixedAnchorNonpairTheorem() {
         }
       }
     }
+  }
+}
+
+void TestWholeCyclePathNormalization() {
+  namespace hs = cudaee::detail::quick_hs;
+  constexpr int n = 6;
+  const std::array<int, n> tour{0, 4, 3, 1, 2, 5};
+  std::array<int, n> degree{2, 2, 2, 2, 2, 2};
+  std::array<int, n * n> neighbors{};
+  std::array<std::uint8_t, n * n> active{};
+  std::array<int, 15> u{}, v{};
+  std::array<std::uint8_t, 15> fixed{};
+  const std::array<std::int64_t, n> x{37, 57, 77, 46, 51, 11}, y{79, 31, 2, 29, 43, 8};
+  for (int i = 0; i < n; ++i) {
+    const int a = tour[i], b = tour[(i + 1) % n];
+    active[a * n + b] = active[b * n + a] = 1U;
+    neighbors[a * n] = b;
+    neighbors[a * n + 1] = tour[(i + n - 1) % n];
+  }
+  for (int a = 0; a < n; ++a) {
+    for (int b = a + 1; b < n; ++b) {
+      const int edge = CompleteEdgeId(n, a, b);
+      u[edge] = a;
+      v[edge] = b;
+      fixed[edge] = active[a * n + b];
+    }
+  }
+  const hs::GraphView graph{.dimension = n,
+                            .degree = degree.data(),
+                            .neighbors = neighbors.data(),
+                            .active = active.data(),
+                            .edge_u = u.data(),
+                            .edge_v = v.data(),
+                            .fixed_edge = fixed.data(),
+                            .coordinate_x = x.data(),
+                            .coordinate_y = y.data(),
+                            .edge_count = 15,
+                            .complete_graph = true};
+  for (int i = 0; i < n; ++i) {
+    const int a = tour[i], b = tour[(i + 1) % n], c = tour[(i + 2) % n];
+    const int d = tour[(i + 3) % n], e = tour[(i + 4) % n], f = tour[(i + 5) % n];
+    Check(hs::Opt33(graph, a, b, c, d, e, f), "whole Hamilton cycle admits 3+3");
+    // 第二种同时含共享端点 d 与 fixed 连接 f--a，旧代码把全图环误作真子环。
+    Check(hs::Opt34(graph, d, e, f, f, a, b, c), "whole Hamilton cycle admits left extension");
+    Check(hs::Opt34(graph, d, e, f, a, b, c, d), "whole Hamilton cycle admits right extension");
+  }
+  // 输入是合法开放路径；合并后形成环。单条重复首尾的 closed walk
+  // 不属于此局部路径接口的输入域（歧义输入原本就保守开放）。
+  const hs::SmallPath proper[2] = {{.size = 3, .node = {0, 4, 3}}, {.size = 3, .node = {3, 1, 0}}};
+  Check(!hs::Opt(graph, proper, 2), "proper cycle remains impossible");
+  const hs::SmallPath whole[2] = {{.size = 4, .node = {0, 4, 3, 1}},
+                                  {.size = 4, .node = {1, 2, 5, 0}}};
+  Check(hs::Opt(graph, whole, 2), "explicit whole Hamilton cycle is not a proper subtour");
+
+  // 同一个 2+3+3 系统在 n=5 时是完整环，在 n=6 时才是真子环。
+  hs::GraphView five_view = graph;
+  five_view.dimension = 5;
+  Check(!hs::HasProperCycle233(five_view, 0, 3, 2, 1, 3, 0, 4, 2),
+        "compressed endpoint triangle can cover the whole five-node graph");
+  Check(hs::HasProperCycle233(graph, 0, 3, 2, 1, 3, 0, 4, 2),
+        "same five-node cycle is proper in a six-node graph");
+  const std::array<std::int64_t, 5> tied_x{0, 9, 5, 5, 1}, tied_y{5, 3, 2, 11, 5};
+  std::array<std::int32_t, 5> tied_degree{};
+  std::array<std::int32_t, 25> tied_neighbors{};
+  std::array<std::uint8_t, 25> tied_active{};
+  const std::array<std::array<int, 2>, 7> tied_edges{
+      {{0, 2}, {0, 3}, {0, 4}, {1, 2}, {1, 3}, {2, 4}, {3, 4}}};
+  for (const auto edge : tied_edges) {
+    tied_active[edge[0] * 5 + edge[1]] = tied_active[edge[1] * 5 + edge[0]] = 1U;
+    tied_neighbors[edge[0] * 5 + tied_degree[edge[0]]++] = edge[1];
+    tied_neighbors[edge[1] * 5 + tied_degree[edge[1]]++] = edge[0];
+  }
+  const hs::GraphView tied_view{.dimension = 5,
+                                .degree = tied_degree.data(),
+                                .neighbors = tied_neighbors.data(),
+                                .active = tied_active.data(),
+                                .coordinate_x = tied_x.data(),
+                                .coordinate_y = tied_y.data()};
+  Check(hs::ReplyAdmitsTour(tied_view, 0, 3, 2, 1, 3, 0, 4, 2),
+        "five-node optimal reply is not rejected by fast filters");
+  Check(!hs::CanEliminateWithWitness(tied_view, 0, 3, 1, 4),
+        "five-node Quick-HS witness preserves both optimal tours");
+  Check(cudaee::detail::main_edge::MetricExcessAdmitsPair(tied_view, 4, 0, 2, 1, 3, 6, 4, 9),
+        "metric excess retains the whole five-node Hamilton reply");
+  Check(cudaee::detail::main_edge::StrongThreeCompatible(tied_view, 0, 2, 2, 1, 3),
+        "strong close-point filter preserves the tied optimum");
+  for (const auto edge : tied_edges) {
+    std::array<std::int32_t, 3> potentials{};
+    std::int32_t count = 0;
+    for (std::int32_t vertex = 0; vertex < 5; ++vertex) {
+      if (vertex != edge[0] && vertex != edge[1]) {
+        potentials[count++] = vertex;
+      }
+    }
+    Check(!cudaee::detail::main_edge::CanEliminate(tied_view, edge[0], edge[1], potentials.data(),
+                                                  count),
+          "Main Edge preserves every edge in the union of tied optimal tours");
   }
 }
 
@@ -561,6 +677,7 @@ int main() {
   TestCompleteGraphLoader();
   TestJvCudaResidentCache();
   TestQuickHsWarpPathDifferential();
+  TestWholeCyclePathNormalization();
   std::cout << "unit tests passed\n";
   return 0;
 }

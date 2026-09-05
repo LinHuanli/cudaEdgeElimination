@@ -17,6 +17,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(ZLIB QUIET)
 find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MPFR REQUIRED IMPORTED_TARGET mpfr)
 if(CUDAEE_ENABLE_OPENMP)
@@ -24,6 +25,7 @@ if(CUDAEE_ENABLE_OPENMP)
 endif()
 
 set(CUDAEE_SOURCES
+    src/common/build_identity.cpp
     src/common/types.cpp
     src/common/distance.cpp
     src/common/graph.cpp
@@ -59,6 +61,9 @@ if(CUDAEE_ENABLE_CUDA)
   endif()
   enable_language(CUDA)
   list(APPEND CUDAEE_SOURCES
+      src/cuda/runtime_identity.cu
+      src/cuda/sparse_pdhg.cu
+      src/cuda/resident_lp_model.cu
       src/cuda/device_affinity.cu
       src/cuda/exact_tour_dp.cu
       src/cuda/ht_cd.cu
@@ -72,6 +77,7 @@ if(CUDAEE_ENABLE_CUDA)
       src/cuda/path_compatibility.cu)
 else()
   list(APPEND CUDAEE_SOURCES
+      src/cuda/sparse_pdhg_stub.cpp
       src/cuda/device_affinity_stub.cpp
       src/cuda/exact_tour_dp_stub.cpp
       src/cuda/ht_cd_stub.cpp
@@ -86,10 +92,25 @@ else()
 endif()
 
 add_library(cudaee_core STATIC ${CUDAEE_SOURCES})
+add_custom_target(cudaee_build_identity
+  COMMAND "${CMAKE_COMMAND}"
+    "-DCUDAEE_IDENTITY_ROOT=${CMAKE_SOURCE_DIR}"
+    "-DCUDAEE_IDENTITY_OUTPUT=${CMAKE_BINARY_DIR}/generated/cudaee_build_identity.hpp"
+    "-DCUDAEE_IDENTITY_COMPILER=${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}"
+    "-DCUDAEE_IDENTITY_CUDA_COMPILER=${CMAKE_CUDA_COMPILER_ID} ${CMAKE_CUDA_COMPILER_VERSION}"
+    "-DCUDAEE_IDENTITY_ARCHITECTURE=${CUDAEE_CUDA_ARCHITECTURES}"
+    "-DCUDAEE_IDENTITY_CONFIGURATION=${CMAKE_BUILD_TYPE}"
+    -P "${CMAKE_SOURCE_DIR}/cmake/WriteBuildIdentity.cmake"
+  BYPRODUCTS "${CMAKE_BINARY_DIR}/generated/cudaee_build_identity.hpp"
+  COMMENT "记录本次构建的 commit、源码及配置身份"
+  VERBATIM)
+add_dependencies(cudaee_core cudaee_build_identity)
+target_include_directories(cudaee_core PRIVATE "${CMAKE_BINARY_DIR}/generated")
 target_include_directories(cudaee_core PUBLIC include)
 target_compile_features(cudaee_core PUBLIC cxx_std_20)
 target_compile_definitions(cudaee_core PUBLIC CUDAEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(cudaee_core PUBLIC ${CMAKE_DL_LIBS} PRIVATE Threads::Threads PkgConfig::MPFR)
+target_link_libraries(cudaee_core PRIVATE OpenSSL::Crypto)
 
 if(CUDAEE_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
   target_link_libraries(cudaee_core PRIVATE OpenMP::OpenMP_CXX)

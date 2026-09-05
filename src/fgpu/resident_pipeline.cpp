@@ -1,3 +1,4 @@
+#include "cuda_edge_elimination/build_identity.hpp"
 #include "cuda_edge_elimination/fgpu.hpp"
 
 #include "../cpu/elimination_commit.hpp"
@@ -322,6 +323,7 @@ void WriteResidentManifest(const std::filesystem::path& path, const FgpuInput& i
   output << "pdlp_epochs " << report.pdlp_epochs << '\n';
   output << "lp_connectivity_cuts " << report.lp_connectivity_cuts << '\n';
   output << "lp_path_closed_replies " << report.lp_path_closed_replies << '\n';
+  output << "point_path_end_closed_replies " << report.point_path_end_closed_replies << '\n';
   output << "lp_degree_snapshots " << report.lp_degree_snapshots << '\n';
   output << "lp_strong_snapshots " << report.lp_strong_snapshots << '\n';
   output << "lp_lower_bound " << report.lp_lower_bound << '\n';
@@ -366,20 +368,35 @@ void WriteSolveManifest(const std::filesystem::path& path, const FgpuInput& inpu
   if (!output) {
     throw std::runtime_error("无法创建 solve manifest: " + path.string());
   }
-  output << "{\n"
+  output << "{\n  \"build_identity\": ";
+  WriteBuildIdentityJson(output);
+  output << ",\n  \"gpu_identity\": ";
+  WriteGpuIdentityJson(output, report.selected_device);
+  output << ",\n  \"instance_sha256\": " << JsonString(Sha256File(input.instance))
+         << ",\n  \"input_edges_sha256\": "
+         << (input.input_edges.empty() ? "null" : JsonString(Sha256File(input.input_edges)))
+         << ",\n  \"tour_sha256\": "
+         << (input.tour.empty() ? "null" : JsonString(Sha256File(input.tour))) << ",\n"
          << "  \"format\": \"FGPU_SOLVE_MANIFEST_V1\",\n"
-         << "  \"instance\": " << std::quoted(input.instance.string()) << ",\n"
-         << "  \"input_edges\": " << std::quoted(input.input_edges.string()) << ",\n"
-         << "  \"mode\": " << std::quoted(ToString(options.mode)) << ",\n"
+         << "  \"instance\": " << JsonString(input.instance.string()) << ",\n"
+         << "  \"input_edges\": " << JsonString(input.input_edges.string()) << ",\n"
+         << "  \"mode\": " << JsonString(ToString(options.mode)) << ",\n"
          << "  \"strong_metric\": true,\n"
          << "  \"point_nonpair\": true,\n"
-         << "  \"termination\": " << std::quoted(ToString(report.termination)) << ",\n"
+         << "  \"point_path_end_branches\": 4,\n"
+         << "  \"point_leaf_kernel\": " << JsonString(ToString(options.point_leaf_kernel)) << ",\n"
+         << "  \"point_cta_blocks\": " << options.point_cta_blocks << ",\n"
+         << "  \"point_registers\": " << report.lp.point_registers << ",\n"
+         << "  \"point_active_blocks_per_sm\": " << report.lp.point_active_blocks_per_sm << ",\n"
+         << "  \"point_local_bytes_per_thread\": " << report.lp.point_local_bytes_per_thread
+         << ",\n"
+         << "  \"termination\": " << JsonString(ToString(report.termination)) << ",\n"
          << "  \"gpu_replayed\": " << (report.gpu_replayed ? "true" : "false") << ",\n"
          << "  \"unaudited\": " << (report.unaudited ? "true" : "false") << ",\n"
          << "  \"selected_device\": " << report.selected_device << ",\n"
-         << "  \"initial_hash\": " << std::quoted(HexHash(report.initial_hash)) << ",\n"
-         << "  \"final_hash\": " << std::quoted(HexHash(report.final_hash)) << ",\n"
-         << "  \"final_state_hash\": " << std::quoted(HexHash(report.final_state_hash)) << ",\n"
+         << "  \"initial_hash\": " << JsonString(HexHash(report.initial_hash)) << ",\n"
+         << "  \"final_hash\": " << JsonString(HexHash(report.final_hash)) << ",\n"
+         << "  \"final_state_hash\": " << JsonString(HexHash(report.final_state_hash)) << ",\n"
          << "  \"initial_edges\": " << report.initial_edges << ",\n"
          << "  \"final_edges\": " << report.final_edges << ",\n"
          << "  \"fixed_edges\": " << report.fixed_edges << ",\n"
@@ -402,6 +419,8 @@ void WriteSolveManifest(const std::filesystem::path& path, const FgpuInput& inpu
          << "  \"lp_deleted\": " << resident.lp_committed << ",\n"
          << "  \"lp_connectivity_cuts\": " << resident.lp_connectivity_cuts << ",\n"
          << "  \"lp_path_closed_replies\": " << resident.lp_path_closed_replies << ",\n"
+         << "  \"point_path_end_closed_replies\": " << resident.point_path_end_closed_replies
+         << ",\n"
          << "  \"lp_degree_snapshots\": " << resident.lp_degree_snapshots << ",\n"
          << "  \"lp_strong_snapshots\": " << resident.lp_strong_snapshots << ",\n"
          << "  \"lp_lower_bound\": " << resident.lp_lower_bound << ",\n"
@@ -417,6 +436,20 @@ void WriteSolveManifest(const std::filesystem::path& path, const FgpuInput& inpu
          << "  \"upload_ms\": " << resident.upload_ms << ",\n"
          << "  \"geometry_ms\": " << resident.geometry_ms << ",\n"
          << "  \"lp_ms\": " << resident.pdlp_ms << ",\n"
+         << "  \"lp_backend\": "
+         << JsonString(resident.lp.pdhg_iterations != 0U ? "primal-dual-sec" : "sec-dual") << ",\n"
+         << "  \"lp_solver_ms\": " << resident.lp.solver_ms << ",\n"
+         << "  \"lp_cut_separation_ms\": " << resident.lp.cut_separation_ms << ",\n"
+         << "  \"lp_point_ms\": " << resident.lp.point_ms << ",\n"
+         << "  \"lp_fixing_ms\": " << resident.lp.fixing_ms << ",\n"
+         << "  \"lp_pair_filter_ms\": " << resident.lp.pair_filter_ms << ",\n"
+         << "  \"pdhg_model_ms\": " << resident.lp.pdhg_model_ms << ",\n"
+         << "  \"pdhg_ms\": " << resident.lp.pdhg_ms << ",\n"
+         << "  \"pdhg_primal_violation\": " << resident.lp.pdhg_primal_violation << ",\n"
+         << "  \"pdhg_relative_gap\": " << resident.lp.pdhg_relative_gap << ",\n"
+         << "  \"pdhg_iterations\": " << resident.lp.pdhg_iterations << ",\n"
+         << "  \"pdhg_selected_snapshots\": " << resident.lp.pdhg_selected_snapshots << ",\n"
+         << "  \"validated_transactions\": " << resident.lp.validated_transactions << ",\n"
          << "  \"jv_ms\": " << resident.jv_ms << ",\n"
          << "  \"quick_hs_ms\": " << resident.quick_hs_ms << ",\n"
          << "  \"main_edge_ms\": " << resident.main_edge_ms << ",\n"
@@ -487,6 +520,9 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   device_options.enable_jv = config.enable_jv;
   device_options.enable_geometry = config.enable_geometry;
   device_options.enable_pdlp = config.enable_pdlp;
+  device_options.enable_primal_dual_lp = config.enable_primal_dual_lp;
+  device_options.point_leaf_kernel = config.point_leaf_kernel;
+  device_options.point_cta_blocks = config.point_cta_blocks;
   device_options.enable_main_edge = config.enable_main_edge;
   device_options.enable_strong_metric = config.enable_strong_metric;
   device_options.enable_extra_edge = config.enable_extra_edge;
@@ -535,7 +571,9 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   report.pdlp_epochs = device.pdlp_epochs;
   report.lp_connectivity_cuts = device.lp_connectivity_cuts;
   report.lp_path_closed_replies = device.lp_path_closed_replies;
+  report.point_path_end_closed_replies = device.point_path_end_closed_replies;
   report.lp_degree_snapshots = device.lp_degree_snapshots;
+  report.lp = device.lp;
   report.lp_strong_snapshots = device.lp_strong_snapshots;
   report.lp_lower_bound = device.lp_lower_bound;
   report.main_edge_epochs = device.main_edge_epochs;
@@ -760,6 +798,15 @@ FgpuSolveReport RunFgpuElimination(const FgpuInput& input, const FgpuOutputPaths
   config.max_pdlp_epochs = 0U;
   config.enable_geometry = true;
   config.enable_pdlp = true;
+  config.enable_primal_dual_lp = options.primal_dual_lp && !options.serialize_certificate;
+  if (ToString(options.point_leaf_kernel) == "invalid") {
+    throw std::invalid_argument("未知 Point leaf kernel");
+  }
+  config.point_leaf_kernel = options.point_leaf_kernel;
+  if (options.point_cta_blocks != 2U && options.point_cta_blocks != 4U) {
+    throw std::invalid_argument("Point CTA 驻留策略只能为 2 或 4");
+  }
+  config.point_cta_blocks = options.point_cta_blocks;
   config.enable_jv = true;
   config.enable_quick_hs = true;
   config.enable_main_edge = true;
@@ -808,7 +855,9 @@ FgpuSolveReport RunFgpuElimination(const FgpuInput& input, const FgpuOutputPaths
   report.proof_rejected = resident.proof_rejected;
   report.lp_connectivity_cuts = resident.lp_connectivity_cuts;
   report.lp_path_closed_replies = resident.lp_path_closed_replies;
+  report.point_path_end_closed_replies = resident.point_path_end_closed_replies;
   report.lp_degree_snapshots = resident.lp_degree_snapshots;
+  report.lp = resident.lp;
   report.lp_strong_snapshots = resident.lp_strong_snapshots;
   report.lp_lower_bound = resident.lp_lower_bound;
   report.selected_device = resident.selected_device;
