@@ -111,7 +111,9 @@ int main() {
         }
         // 无向边计数 = degree sum / 2，quick_hs_candidates = 2。
         const bool deferred = pairs > degree_sum;
-        for (const bool prime : {false, true}) {
+        cudaee::detail::ResidentGpuResult raw_result;
+        for (int variant = 0; variant < 4; ++variant) {
+          const bool prime = variant / 2 != 0, compact = variant % 2 != 0;
           cudaee::detail::ResidentGpuOptions options;
           options.device = 0;
           options.collect_trace = false;
@@ -121,6 +123,7 @@ int main() {
           options.point_near_first = true;
           options.point_adaptive_start = true;
           options.point_prime_near = prime;
+          options.quick_reply_cache = compact;
           // 2/4 CTA 驻留策略与目录有/无均覆盖；不改变叶子的完整枚举域。
           options.point_cta_blocks = sample % 2 ? 4U : 2U;
           options.permutation_orders = sample % 3 ? bootstrap.permutations() : nullptr;
@@ -128,6 +131,19 @@ int main() {
           options.quick_hs_pair_trials = 0;
           const auto result = cudaee::detail::RunResidentEliminationCuda(
               input, std::vector<std::uint8_t>(u.size(), 0U), options);
+          if (!compact)
+            raw_result = result;
+          else if (result.final_active != raw_result.final_active ||
+                   result.final_fixed != raw_result.final_fixed ||
+                   result.final_nonpairs.size() != raw_result.final_nonpairs.size() ||
+                   !std::equal(result.final_nonpairs.begin(), result.final_nonpairs.end(),
+                               raw_result.final_nonpairs.begin(), [](const auto& a, const auto& b) {
+                                 return a.center == b.center && a.first == b.first &&
+                                        a.second == b.second;
+                               })) {
+            std::cerr << "Quick reply compaction changed fixed point sample=" << sample << '\n';
+            return 1;
+          }
           if (!result.converged || result.proof_rejected != 0 ||
               result.lp.point_initial_pairs != pairs ||
               result.lp.point_initial_edge_frontier != degree_sum ||
@@ -138,7 +154,8 @@ int main() {
           }
           prime_proposals += result.lp.point_prime_proposals;
           std::cout << "GPU Point sample=" << sample << " sparse=" << sparse_snapshot
-                    << " prime=" << prime << " prime_proposals=" << result.lp.point_prime_proposals
+                    << " prime=" << prime << " compact=" << compact
+                    << " prime_proposals=" << result.lp.point_prime_proposals
                     << " point_proposals=" << result.point_nonpair_committed << '\n';
           for (std::size_t edge = 0; edge < u.size(); ++edge) {
             if ((((edge_union >> edge) & 1U) && !result.final_active[edge]) ||

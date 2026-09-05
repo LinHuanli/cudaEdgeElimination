@@ -90,6 +90,7 @@ def main():
     parser.add_argument("--point-near-first", choices=("0", "1"), default="0")
     parser.add_argument("--point-adaptive-start", choices=("0", "1"), default="0")
     parser.add_argument("--point-prime-near", choices=("0", "1"), default="0")
+    parser.add_argument("--quick-reply-cache", choices=("0", "1"), default="0")
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--allow-busy", action="store_true", help="只做开发观测，不能用于正式验收")
@@ -133,6 +134,7 @@ def main():
                        "--point-near-first", args.point_near_first,
                        "--point-adaptive-start", args.point_adaptive_start,
                        "--point-prime-near", args.point_prime_near,
+                       "--quick-reply-cache", args.quick_reply_cache,
                        "--output-edges", str(directory / "out.edg"), "--fixed", str(directory / "out.fix"),
                        "--nonpairs", str(directory / "out.nonpairs"), "--manifest", str(directory / "out.json")]
             stop = threading.Event()
@@ -194,7 +196,8 @@ def main():
                                  "leaf_permutation_cache": args.leaf_permutation_cache,
                                  "point_near_first": args.point_near_first,
                                  "point_adaptive_start": args.point_adaptive_start,
-                                 "point_prime_near": args.point_prime_near}, "instances": {}}
+                                 "point_prime_near": args.point_prime_near,
+                                 "quick_reply_cache": args.quick_reply_cache}, "instances": {}}
     for name in args.instances:
         measured = [x for x in runs if x["instance"] == name and not x["warmup"]]
         clean = [x for x in measured if x["clean"]]

@@ -47,12 +47,15 @@ def main():
         variants += [(lp, "1", "1", "1", "1", "1", "1") for lp in ("off", "primal-dual-sec")]
         variants = [(*v, "0") for v in variants]
         variants += [(lp, "1", "1", "1", "1", "1", "1", "1") for lp in ("off", "primal-dual-sec")]
+        variants = [(*v, "0") for v in variants]
+        variants += [(lp, "1", "1", "1", "1", "1", "1", prime, "1")
+                     for lp in ("off", "primal-dual-sec") for prime in ("0", "1")]
         # 大成本路径的精确性与浮点 LP 量化域分开检查；不放宽 LP 的安全范围。
         large_cost = max(max(abs(x), abs(y)) for x, y in points) >= 100000000
         if large_cost:
             variants = [v for v in variants if v[0] == "off"]
-        for lp, cache, pair_cache, full_metric, permutation, near, adaptive, prime in variants:
-            target = directory / f"{lp}-cache{cache}-pair{pair_cache}-metric{full_metric}-perm{permutation}-near{near}-adaptive{adaptive}-prime{prime}"
+        for lp, cache, pair_cache, full_metric, permutation, near, adaptive, prime, replies in variants:
+            target = directory / f"{lp}-cache{cache}-pair{pair_cache}-metric{full_metric}-perm{permutation}-near{near}-adaptive{adaptive}-prime{prime}-replies{replies}"
             target.mkdir(exist_ok=True)
             command = [str(exe), "solve", "--profile", "hybrid-e2e", "--instance", str(tsp),
                        "--device", "0", "--lp-backend", lp, "--distance-cache", cache,
@@ -60,6 +63,7 @@ def main():
                        "--leaf-permutation-cache", permutation, "--point-near-first", near,
                        "--point-adaptive-start", adaptive,
                        "--point-prime-near", prime,
+                       "--quick-reply-cache", replies,
                        "--output-edges", str(target / "out.edg"), "--fixed", str(target / "out.fix"),
                        "--nonpairs", str(target / "out.nonpairs"), "--manifest", str(target / "out.json")]
             result = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -85,6 +89,10 @@ def main():
             assert report["point_near_first"] == (near == "1")
             assert report["point_adaptive_start"] == (adaptive == "1")
             assert report["point_prime_near"] == (prime == "1")
+            assert report["quick_reply_cache"] == (replies == "1")
+            assert report["quick_reply_compact_pairs"] <= report["quick_reply_raw_pairs"]
+            if replies == "0":
+                assert report["quick_reply_cache_bytes"] == report["quick_reply_build_ms"] == 0
             key = (lp, full_metric)
             if key in hashes:
                 assert hashes[key] == report["final_state_hash"], "缓存或点顺序改变了终态"
@@ -116,7 +124,7 @@ def main():
             legacy[legacy.index("--profile") + 1] = "legacy"
             for flag in ("--distance-cache", "--main-pair-cache", "--full-metric",
                          "--leaf-permutation-cache", "--point-near-first", "--point-adaptive-start",
-                         "--point-prime-near"):
+                         "--point-prime-near", "--quick-reply-cache"):
                 offset = legacy.index(flag)
                 del legacy[offset:offset+2]
             legacy += ["--tour", str(bad_tour), "--tour-role", "incumbent"]

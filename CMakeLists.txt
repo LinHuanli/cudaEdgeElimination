@@ -65,6 +65,7 @@ if(CUDAEE_ENABLE_CUDA)
       src/cuda/runtime_identity.cu
       src/cuda/sparse_pdhg.cu
       src/cuda/resident_lp_model.cu
+      src/cuda/quick_reply_cache.cu
       src/cuda/device_affinity.cu
       src/cuda/exact_tour_dp.cu
       src/cuda/ht_cd.cu

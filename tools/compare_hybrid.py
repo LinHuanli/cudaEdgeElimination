@@ -21,6 +21,7 @@ def compare(gpu_runs, cpu_runs, items):
                        x["report"].get("point_near_first", False),
                        x["report"].get("point_adaptive_start", False),
                        x["report"].get("point_prime_near", False),
+                       x["report"].get("quick_reply_cache", False),
                        x["report"].get("point_leaf_kernel", "permutation"),
                        x["report"].get("point_cta_blocks", 4))
                       for x in gpu_runs if "report" in x}

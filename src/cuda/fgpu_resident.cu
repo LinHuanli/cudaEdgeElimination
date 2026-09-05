@@ -7,6 +7,7 @@
 #include "../fgpu/sparse_pdhg.hpp"
 #include "cuda_edge_elimination/cuda_device_affinity.hpp"
 #include "main_edge_metric.cuh"
+#include "quick_reply_cache.cuh"
 #include "resident_pdhg_quantize.cuh"
 #include "resident_sec_replay.cuh"
 #include "resident_transaction.cuh"
@@ -2285,13 +2286,20 @@ __device__ bool
 RepliesClosedCta(const quick_hs::GraphView graph, const std::int32_t a, const std::int32_t b,
                  const std::int32_t c, const std::int32_t d, const std::int64_t* const reduced_cost,
                  const Signed128* const lower_bound, const std::int64_t incumbent_numerator,
-                 unsigned long long* const lp_closed_replies) {
+                 unsigned long long* const lp_closed_replies, const QuickReplyView cache,
+                 const std::int32_t work, const std::int32_t root,
+                 const std::uint64_t snapshot_sequence) {
   const std::uint64_t c_degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, c) -
                                                             quick_hs::NeighborBegin(graph, c));
   const std::uint64_t d_degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, d) -
                                                             quick_hs::NeighborBegin(graph, d));
-  const std::uint64_t c_pairs = c_degree < 2U ? 0U : c_degree * (c_degree - 1U) / 2U;
-  const std::uint64_t d_pairs = d_degree < 2U ? 0U : d_degree * (d_degree - 1U) / 2U;
+  const bool compact = cache.rows != nullptr;
+  const auto c_stream = compact ? cache.Find(work, root, c, snapshot_sequence) : QuickReplySpan{};
+  const auto d_stream = compact ? cache.Find(work, root, d, snapshot_sequence) : QuickReplySpan{};
+  if (compact && (!c_stream.valid || !d_stream.valid))
+    return false;
+  const std::uint64_t c_pairs = compact ? c_stream.size : c_degree * (c_degree - 1U) / 2U;
+  const std::uint64_t d_pairs = compact ? d_stream.size : d_degree * (d_degree - 1U) / 2U;
   if (d_pairs != 0U && c_pairs > ULLONG_MAX / d_pairs) {
     // 极端高度数下不能完整编号 reply 空间，保守地不授权。
     return false;
@@ -2316,8 +2324,10 @@ RepliesClosedCta(const quick_hs::GraphView graph, const std::int32_t a, const st
     std::int32_t d2 = -1;
     std::int32_t decoded = 0;
     if (lane == 0U && reply < reply_count) {
-      const std::uint64_t c_ordinal = reply / d_pairs;
-      const std::uint64_t d_ordinal = reply % d_pairs;
+      const std::uint64_t c_ordinal =
+          compact ? c_stream.ordinals[reply / d_pairs] : reply / d_pairs;
+      const std::uint64_t d_ordinal =
+          compact ? d_stream.ordinals[reply % d_pairs] : reply % d_pairs;
       decoded = DecodeNeighborPair(graph, c, c_ordinal, &c1, &c2) &&
                 DecodeNeighborPair(graph, d, d_ordinal, &d1, &d2);
     }
@@ -2366,7 +2376,8 @@ __global__ void QuickHsContinuationKernel(
     const std::int32_t candidate_limit, const std::int32_t pair_trial_limit,
     const bool include_two_hop, const std::int64_t* const reduced_cost,
     const Signed128* const lower_bound, const std::int64_t incumbent_numerator,
-    unsigned long long* const lp_closed_replies) {
+    unsigned long long* const lp_closed_replies, const QuickReplyView cache,
+    const std::uint64_t snapshot_sequence) {
   const std::int32_t work = static_cast<std::int32_t>(blockIdx.x);
   if (work >= work_count) {
     return;
@@ -2391,7 +2402,15 @@ __global__ void QuickHsContinuationKernel(
     found = 0;
     enabled = edge_active[edge] != 0U && protected_edge[edge] == 0U && graph.degree[a] > 2 &&
               graph.degree[b] > 2;
-    if (enabled != 0) {
+    if (enabled != 0 && cache.rows != nullptr) {
+      for (std::int32_t i = 0; i < cache.stride; ++i) {
+        const auto row = cache.rows[static_cast<std::int64_t>(work) * cache.stride + i];
+        if (row.center < 0)
+          break;
+        candidates[candidate_count] = row.center;
+        scores[candidate_count++] = row.score;
+      }
+    } else if (enabled != 0) {
       for (std::int32_t side = 0; side < 2; ++side) {
         const std::int32_t from = side == 0 ? a : b;
         for (std::int64_t slot = quick_hs::NeighborBegin(graph, from);
@@ -2511,7 +2530,8 @@ __global__ void QuickHsContinuationKernel(
     __syncthreads();
     const bool closed = candidate_eligible != 0 && RepliesClosedCta<ExtraEdgeDepth>(
                                                        graph, a, b, c, d, reduced_cost, lower_bound,
-                                                       incumbent_numerator, lp_closed_replies);
+                                                       incumbent_numerator, lp_closed_replies,
+                                                       cache, work, edge, snapshot_sequence);
     if (threadIdx.x == 0U && closed) {
       proposed[edge] = 1U;
       first_witness[edge] = c;
@@ -4182,7 +4202,8 @@ __global__ void ReplayQuickHsContinuationKernel(
     const std::int32_t* const first_witness, const std::int32_t* const second_witness,
     std::uint8_t* const verified, unsigned long long* const replayed,
     unsigned long long* const rejected, const std::int64_t* const reduced_cost,
-    const Signed128* const lower_bound, const std::int64_t incumbent_numerator) {
+    const Signed128* const lower_bound, const std::int64_t incumbent_numerator,
+    const QuickReplyView cache, const std::uint64_t snapshot_sequence) {
   const std::int32_t work = static_cast<std::int32_t>(blockIdx.x);
   if (work >= work_count) {
     return;
@@ -4204,7 +4225,8 @@ __global__ void ReplayQuickHsContinuationKernel(
   __syncthreads();
   const bool valid =
       enabled != 0 && RepliesClosedCta<ExtraEdgeDepth>(graph, a, b, c, d, reduced_cost, lower_bound,
-                                                       incumbent_numerator, nullptr);
+                                                       incumbent_numerator, nullptr, cache, work,
+                                                       edge, snapshot_sequence);
   if (threadIdx.x == 0U) {
     RecordReplayResult(proposed[edge] != 0U, valid, verified, edge, replayed, rejected);
   }
@@ -5190,6 +5212,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   DeviceBuffer<std::int32_t> device_point_priority;
   DeviceBuffer<std::uint32_t> device_point_priority_mask;
   DeviceBuffer<std::uint32_t> device_main_pair_cache;
+  QuickReplyCache quick_reply_cache(device);
   DeviceBuffer<unsigned long long> device_main_maximum_span(1U, device);
   std::size_t main_pair_cache_capacity{};
   DeviceBuffer<unsigned long long> device_committed_count(1U, device);
@@ -5819,6 +5842,20 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     const bool collect_lp_path_closures =
         (quick_hs_stage && lp_snapshot_ready) || run_point_service;
     const bool collect_point_path_end_closures = run_point_service;
+    QuickReplyView quick_reply_view{};
+    if (quick_hs_stage && options.quick_reply_cache) {
+      const auto metrics = quick_reply_cache.Build(
+          snapshot.graph, work_count, work_edge_ids, device_protected.get(),
+          static_cast<std::int32_t>(options.quick_hs_candidates), options.quick_hs_two_hop,
+          snapshot.sequence);
+      result.quick_reply_raw_pairs += metrics.raw_pairs;
+      result.quick_reply_compact_pairs += metrics.compact_pairs;
+      result.resident_bytes += metrics.bytes - result.quick_reply_cache_bytes;
+      result.quick_reply_cache_bytes = metrics.bytes;
+      result.quick_reply_build_ms += metrics.build_ms;
+      result.quick_reply_validation_ms += metrics.validation_ms;
+      quick_reply_view = quick_reply_cache.view();
+    }
     if (collect_lp_path_closures) {
       CheckCuda(cudaMemset(device_lp_path_closed_replies.get(), 0, sizeof(unsigned long long)),
                 "cudaMemset resident LP path closures");
@@ -5837,7 +5874,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
             static_cast<std::int32_t>(options.quick_hs_candidates),
             static_cast<std::int32_t>(options.quick_hs_pair_trials), options.quick_hs_two_hop,
             lp_path_reduced_cost, lp_path_lower_bound, lp_incumbent_numerator,
-            device_lp_path_closed_replies.get());
+            device_lp_path_closed_replies.get(), quick_reply_view, snapshot.sequence);
       } else {
         QuickHsContinuationKernel<1><<<work_count, kThreads>>>(
             work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
@@ -5846,7 +5883,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
             static_cast<std::int32_t>(options.quick_hs_candidates),
             static_cast<std::int32_t>(options.quick_hs_pair_trials), options.quick_hs_two_hop,
             lp_path_reduced_cost, lp_path_lower_bound, lp_incumbent_numerator,
-            device_lp_path_closed_replies.get());
+            device_lp_path_closed_replies.get(), quick_reply_view, snapshot.sequence);
       }
     } else if (main_edge_stage) {
       for (std::int32_t begin = 0; begin < work_count;) {
@@ -5877,7 +5914,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
           static_cast<std::int32_t>(options.quick_hs_candidates),
           static_cast<std::int32_t>(options.quick_hs_pair_trials), options.quick_hs_two_hop,
           lp_path_reduced_cost, lp_path_lower_bound, lp_incumbent_numerator,
-          device_lp_path_closed_replies.get());
+          device_lp_path_closed_replies.get(), quick_reply_view, snapshot.sequence);
     } else if (method == EliminationMethod::kGeometryMain) {
       NearestDistanceKernel<<<vertex_blocks, kThreads>>>(snapshot.graph, device_nearest.get());
       GeometryKernel<<<work_blocks, kThreads>>>(
@@ -6497,14 +6534,16 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
               device_edge_active.get(), device_protected.get(), snapshot.graph,
               device_proposed.get(), device_first_witness.get(), device_second_witness.get(),
               device_verified.get(), device_replay_counters.get(), device_replay_counters.get() + 1,
-              lp_replay_reduced_cost, lp_replay_bound, lp_incumbent_numerator);
+              lp_replay_reduced_cost, lp_replay_bound, lp_incumbent_numerator, quick_reply_view,
+              snapshot.sequence);
         } else {
           ReplayQuickHsContinuationKernel<1><<<work_count, kThreads>>>(
               work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
               device_edge_active.get(), device_protected.get(), snapshot.graph,
               device_proposed.get(), device_first_witness.get(), device_second_witness.get(),
               device_verified.get(), device_replay_counters.get(), device_replay_counters.get() + 1,
-              lp_replay_reduced_cost, lp_replay_bound, lp_incumbent_numerator);
+              lp_replay_reduced_cost, lp_replay_bound, lp_incumbent_numerator, quick_reply_view,
+              snapshot.sequence);
         }
       } else if (main_edge_stage) {
         for (std::int32_t begin = 0; begin < work_count;) {
@@ -6535,7 +6574,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
             device_edge_active.get(), device_protected.get(), snapshot.graph, device_proposed.get(),
             device_first_witness.get(), device_second_witness.get(), device_verified.get(),
             device_replay_counters.get(), device_replay_counters.get() + 1, lp_replay_reduced_cost,
-            lp_replay_bound, lp_incumbent_numerator);
+            lp_replay_bound, lp_incumbent_numerator, quick_reply_view, snapshot.sequence);
       } else if (method == EliminationMethod::kGeometryMain) {
         ReplayGeometryKernel<<<work_blocks, kThreads>>>(
             work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),

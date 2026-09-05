@@ -31,6 +31,7 @@ void PrintHelp() {
             << "    [--leaf-permutation-cache 0|1] [--point-near-first 0|1]（完整扫描的性能消融）\n"
             << "    [--point-adaptive-start 0|1]（按真实 frontier 推迟密图 Point，全量回扫）\n"
             << "    [--point-prime-near 0|1]（延期前预热一次近点前缀，仍须全量回扫）\n"
+            << "    [--quick-reply-cache 0|1]（完整回复压缩，含独立 GPU 覆盖检查）\n"
             << "    [--lp-backend off|primal-dual-sec|sec-dual]（LP 关闭不关闭 pair/fix）\n"
             << "    [--point-leaf-kernel permutation|prescreen-permutation|prescreen-subset-dp]\n"
             << "    [--point-cta-blocks 2|4]（寄存器/驻留策略，不限制任务数量）\n"
@@ -402,6 +403,7 @@ void SolveCommand(const Arguments& arguments) {
                            "profile",
                            "distance-cache",
                            "main-pair-cache",
+                           "quick-reply-cache",
                            "full-metric",
                            "leaf-permutation-cache",
                            "point-near-first",
@@ -414,6 +416,7 @@ void SolveCommand(const Arguments& arguments) {
   options.hybrid_e2e = profile == "hybrid-e2e";
   options.distance_cache = OptionalBoolean(arguments, "distance-cache", true);
   options.main_pair_cache = OptionalBoolean(arguments, "main-pair-cache", true);
+  options.quick_reply_cache = OptionalBoolean(arguments, "quick-reply-cache", false);
   options.full_metric = OptionalBoolean(arguments, "full-metric", true);
   options.leaf_permutation_cache = OptionalBoolean(arguments, "leaf-permutation-cache", false);
   options.point_near_first = OptionalBoolean(arguments, "point-near-first", false);
@@ -425,7 +428,7 @@ void SolveCommand(const Arguments& arguments) {
       (arguments.contains("distance-cache") || arguments.contains("main-pair-cache") ||
        arguments.contains("full-metric") || arguments.contains("leaf-permutation-cache") ||
        arguments.contains("point-near-first") || arguments.contains("point-adaptive-start") ||
-       arguments.contains("point-prime-near"))) {
+       arguments.contains("point-prime-near") || arguments.contains("quick-reply-cache"))) {
     throw std::invalid_argument("hybrid cache/metric 消融参数仅适用于 hybrid-e2e");
   }
   if (options.hybrid_e2e && options.full_metric && !options.main_pair_cache)

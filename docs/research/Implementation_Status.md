@@ -1,6 +1,20 @@
 # 实现状态（2026-09-06）
 
-最新开发记录见 [Point 近点预热与强度缺口](75_FGPU_Point_Priming_and_Strength_Gap.md)。
+最新开发记录见 [Quick 精确回复压缩](76_FGPU_Exact_Quick_Reply_Compaction.md)，
+后续顺序见[细化实施计划](../design/FGPU_Implementation_Priorities_After_Priming.md)。
+新增默认关闭的完整 reply CSR，Quick/extra-edge proposer 和 replay 共用经过独立
+GPU 完整覆盖检查的同快照流，不改变方法域、不截断回复。pr299 同 L4、同二进制
+单次 pilot 为 **181.994→103.764 s（1.754×）**，edge/fix/nonpair 文件逐字节相同，
+剩余边仍 1,246；CPU 37/37、CUDA 69/69，专项和 288 次 GPU 状态检查的
+memcheck/racecheck 均零错误。四例试跑的 vm1084 在剩余约 8 GB 的 L4
+安全报显存不足；转到剩余约 33 GB 的繁忙 L40S，成功分配约 10.7 GB 进程工作区，
+继续完整运行，不算 clean 速度证据。
+
+上一版 pcb1173 已完整结束：687,378→6,493 边、1,902.547 s；2014 为 6,084，
+仍多 409 条。原生 LP cuts/收敛、6-path/10-reveal 与设备队列仍未完成，不能用
+pr299 的执行加速冒充四例强度胜出。
+
+此前开发记录见 [Point 近点预热与强度缺口](75_FGPU_Point_Priming_and_Strength_Gap.md)。
 新增默认关闭的近点预热、完整收尾回扫及计数；修复中间快照首轮 inactive CSR 槽位。
 CPU 37/37、CUDA 68/68（234 次无标签完整求解、12 次密图调度回归）通过；新增
 36 组全最优 tour oracle 下的 144 次 GPU 状态检查，实际覆盖 293 个预热提案。

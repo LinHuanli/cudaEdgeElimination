@@ -199,6 +199,7 @@ struct FgpuSolveOptions {
   bool enable_lp{true};
   bool distance_cache{true};
   bool main_pair_cache{true};
+  bool quick_reply_cache{false};
   bool full_metric{true};
   bool leaf_permutation_cache{false};
   bool point_near_first{false};
@@ -279,6 +280,7 @@ struct FgpuResidentConfig {
   bool hybrid_e2e{false};
   bool distance_cache{true};
   bool main_pair_cache{false};
+  bool quick_reply_cache{false};
   bool full_metric{false};
   bool leaf_permutation_cache{false};
   bool point_near_first{false};
@@ -366,6 +368,11 @@ struct FgpuResidentRunReport {
   int selected_device{-1};
   std::uint64_t resident_bytes{};
   std::uint64_t main_pair_cache_bytes{};
+  std::uint64_t quick_reply_cache_bytes{};
+  std::uint64_t quick_reply_raw_pairs{};
+  std::uint64_t quick_reply_compact_pairs{};
+  double quick_reply_build_ms{};
+  double quick_reply_validation_ms{};
   double upload_ms{};
   double gpu_kernel_ms{};
   double geometry_ms{};

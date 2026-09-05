@@ -18,6 +18,7 @@ struct ResidentGpuOptions {
   const std::uint8_t* permutation_orders{};
   bool gpu_complete_graph{false};
   bool main_pair_cache{false};
+  bool quick_reply_cache{false};
   bool full_metric{false};
   bool point_near_first{false};
   bool point_adaptive_start{false};
@@ -145,6 +146,11 @@ struct ResidentGpuResult {
   std::size_t proof_rejected{};
   std::uint64_t resident_bytes{};
   std::uint64_t main_pair_cache_bytes{};
+  std::uint64_t quick_reply_cache_bytes{};
+  std::uint64_t quick_reply_raw_pairs{};
+  std::uint64_t quick_reply_compact_pairs{};
+  double quick_reply_build_ms{};
+  double quick_reply_validation_ms{};
 };
 
 // 测试入口：同一批三路径状态分别由 host 精确枚举和 GPU warp-DP

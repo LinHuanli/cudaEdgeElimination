@@ -389,6 +389,13 @@ void WriteSolveManifest(const std::filesystem::path& path, const FgpuInput& inpu
          << "  \"main_pair_cache\": "
          << (options.hybrid_e2e && options.main_pair_cache ? "true" : "false") << ",\n"
          << "  \"main_pair_cache_bytes\": " << resident.main_pair_cache_bytes << ",\n"
+         << "  \"quick_reply_cache\": "
+         << (options.hybrid_e2e && options.quick_reply_cache ? "true" : "false") << ",\n"
+         << "  \"quick_reply_cache_bytes\": " << resident.quick_reply_cache_bytes << ",\n"
+         << "  \"quick_reply_raw_pairs\": " << resident.quick_reply_raw_pairs << ",\n"
+         << "  \"quick_reply_compact_pairs\": " << resident.quick_reply_compact_pairs << ",\n"
+         << "  \"quick_reply_build_ms\": " << resident.quick_reply_build_ms << ",\n"
+         << "  \"quick_reply_validation_ms\": " << resident.quick_reply_validation_ms << ",\n"
          << "  \"leaf_permutation_cache\": "
          << (options.hybrid_e2e && options.leaf_permutation_cache ? "true" : "false") << ",\n"
          << "  \"point_near_first\": "
@@ -578,6 +585,7 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
 
   detail::ResidentGpuOptions device_options;
   device_options.main_pair_cache = config.main_pair_cache;
+  device_options.quick_reply_cache = config.quick_reply_cache;
   device_options.full_metric = config.full_metric;
   device_options.point_near_first = config.point_near_first;
   device_options.point_adaptive_start = config.point_adaptive_start;
@@ -636,6 +644,11 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   report.geometry_committed = device.geometry_committed;
   report.main_edge_committed = device.main_edge_committed;
   report.main_pair_cache_bytes = device.main_pair_cache_bytes;
+  report.quick_reply_cache_bytes = device.quick_reply_cache_bytes;
+  report.quick_reply_raw_pairs = device.quick_reply_raw_pairs;
+  report.quick_reply_compact_pairs = device.quick_reply_compact_pairs;
+  report.quick_reply_build_ms = device.quick_reply_build_ms;
+  report.quick_reply_validation_ms = device.quick_reply_validation_ms;
   report.lp_committed = device.lp_committed;
   report.nonpair_count = device.final_nonpairs.size();
   report.lp_nonpair_committed = device.lp_nonpair_committed;
@@ -884,6 +897,7 @@ FgpuSolveReport RunFgpuElimination(const FgpuInput& input, const FgpuOutputPaths
   config.hybrid_e2e = options.hybrid_e2e;
   config.distance_cache = options.distance_cache;
   config.main_pair_cache = options.hybrid_e2e && options.main_pair_cache;
+  config.quick_reply_cache = options.hybrid_e2e && options.quick_reply_cache;
   config.full_metric = options.hybrid_e2e && options.full_metric;
   config.leaf_permutation_cache = options.hybrid_e2e && options.leaf_permutation_cache;
   config.point_near_first = options.hybrid_e2e && options.point_near_first;

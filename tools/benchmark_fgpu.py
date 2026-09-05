@@ -141,7 +141,7 @@ def main() -> int:
         if args.profile == "hybrid-e2e":
             allowed |= {"--distance-cache", "--main-pair-cache", "--full-metric",
                         "--leaf-permutation-cache", "--point-near-first", "--point-adaptive-start",
-                        "--point-prime-near"}
+                        "--point-prime-near", "--quick-reply-cache"}
         if len(parsed) % 2 or any(parsed[i] not in allowed for i in range(0, len(parsed), 2)):
             raise ValueError("variant-args 只能切换已声明的算法后端")
         extra[name] = parsed

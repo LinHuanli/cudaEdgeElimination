@@ -1,7 +1,8 @@
 # 研究文档索引
 
 当前工作以[单 GPU 融合、超过 2014 的冻结执行计划](design/FGPU_Hybrid_Beat_HS2014_Execution.md)
-为验收口径；最新结果见[近点预热与强度缺口](research/75_FGPU_Point_Priming_and_Strength_Gap.md)。
+为验收口径；后续工作见[细化实施计划](design/FGPU_Implementation_Priorities_After_Priming.md)，
+最新结果见[Quick 精确回复压缩](research/76_FGPU_Exact_Quick_Reply_Compaction.md)。
 下方历史研究记录继续保留，不能把不同输入协议或版本的时间混作当前完整图结果。
 
 原始方案保留在 [Local_Elimination_GPU_cuOpt_Design.md](design/Local_Elimination_GPU_cuOpt_Design.md)。以下文档把它拆成可执行、可验收的工作包：
@@ -90,5 +91,7 @@
 82. [GPU bootstrap 与全度数 metric](research/73_FGPU_Hybrid_Bootstrap_and_FullMetric.md)：GPU 完整图、精确距离、无标签上界、LP-off pair 服务与条件缓存。
 83. [Point 复用与真实 frontier 调度](research/74_FGPU_Point_Reuse_and_Frontier_Scheduling.md)：排列复用、近点优先、延期与最终全扫，pr1002 同终态端到端提速及剩余强度差距。
 84. [Point 近点预热与强度缺口](research/75_FGPU_Point_Priming_and_Strength_Gap.md)：预热开关、小图全最优检查、中间快照 CSR 修复、pr299 消融和 vm1084 长尾。
+85. [后续实施优先级](design/FGPU_Implementation_Priorities_After_Priming.md)：完整回复压缩、动态 LP cuts、深层 HT 和队列的依赖、交付与门禁。
+86. [Quick 精确回复压缩](research/76_FGPU_Exact_Quick_Reply_Compaction.md)：无回复截断的 ordinal CSR、独立 GPU 完整覆盖检查、开关对照与 pcb1173 强度缺口。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。
