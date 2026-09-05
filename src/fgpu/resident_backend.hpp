@@ -13,6 +13,11 @@
 namespace cudaee::detail {
 
 struct ResidentGpuOptions {
+  // 由同设备的 GpuBootstrap 持有；消除结束前不得释放。
+  const std::int64_t* triangular_distance{};
+  bool gpu_complete_graph{false};
+  bool main_pair_cache{false};
+  bool full_metric{false};
   int device{-1};
   // 0 表示不设人为轮数上限，直到该阶段自然达到固定点。
   std::uint32_t max_hs_epochs{0U};
@@ -134,6 +139,7 @@ struct ResidentGpuResult {
   std::size_t proof_replayed{};
   std::size_t proof_rejected{};
   std::uint64_t resident_bytes{};
+  std::uint64_t main_pair_cache_bytes{};
 };
 
 // 测试入口：同一批三路径状态分别由 host 精确枚举和 GPU warp-DP

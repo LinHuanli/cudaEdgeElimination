@@ -1,4 +1,12 @@
-# 实现状态（2026-09-05）
+# 实现状态（2026-09-06）
+
+最新检查点见 [无标签完整图与全度数 metric](73_FGPU_Hybrid_Bootstrap_and_FullMetric.md)。
+新增 GPU 完整图/距离/上界、半整数距离、LP-off pair/fixing、条件 pair 缓存和全度数
+metric；CPU 37/37、CUDA 67/67。旧低度 metric 的完整 `pr1002` pilot 为
+501501→5619 边、2778.532 s，仍比 2014 多 1098 条；新全度数版本正在完整预跑。
+`berlin52` 加强后 195→164 边，但该次 wall 从 10.18 增至 17.56 s。四实例目标、
+通用动态 cuts 和 6-path/10-reveal continuation 尚未完成。以下均为较早检查点，
+不得混用版本计时。
 
 最新开发结果见 [快照事务、稀疏 PDHG 与完整端点 OR](71_FGPU_Transaction_PDHG_and_PathEnd.md)。
 本次已接入原生稀疏 PDHG、SEC 独立成员验证、同快照事务和四端点 OR；完整

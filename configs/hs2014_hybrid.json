@@ -1,0 +1,26 @@
+{
+  "protocol": "hs2014-hybrid-four-complete-no-label-v1",
+  "paper": "https://arxiv.org/pdf/1402.7301",
+  "instances": [
+    {"name": "pr1002", "n": 1002, "optimum": 259045, "paper_edges": 4521, "paper_seconds": 9021,
+     "tsp_url": "https://comopt.ifi.uni-heidelberg.de/software/TSPLIB95/tsp/pr1002.tsp.gz",
+     "tour_url": "https://comopt.ifi.uni-heidelberg.de/software/TSPLIB95/tsp/pr1002.opt.tour.gz",
+     "tsp_sha256": "2211b491e3b8c6ad087d58ead2a8480f9b1bb006fc4b9a245fc594cedd2ee8a7",
+     "tour_sha256": "ec947fc8c8eb4b786a357bdab62c48328b4beed3862d5a16861a99d8b72f2d57"},
+    {"name": "vm1084", "n": 1084, "optimum": 239297, "paper_edges": 4610, "paper_seconds": 4865,
+     "tsp_url": "https://comopt.ifi.uni-heidelberg.de/software/TSPLIB95/tsp/vm1084.tsp.gz",
+     "tour_url": "http://akira.ruc.dk/~keld/research/LKH/LKH-1.2/TOURS/vm1084.opt.tour",
+     "tsp_sha256": "37bdb51ff01b47f7f76189ff366f9ee11ae56799860ca9cf53dbb2175376a34d",
+     "tour_sha256": "e87787f007673f8c2c631871635d7cbd101f88c5dc653eda3d456d0c0e704e29"},
+    {"name": "pcb1173", "n": 1173, "optimum": 56892, "paper_edges": 6084, "paper_seconds": 11451,
+     "tsp_url": "https://comopt.ifi.uni-heidelberg.de/software/TSPLIB95/tsp/pcb1173.tsp.gz",
+     "tour_url": "http://akira.ruc.dk/~keld/research/LKH/LKH-1.2/TOURS/pcb1173.opt.tour",
+     "tsp_sha256": "14f0665de450385aa6a59a6f002e8e99103d4550550d38525fa6deb5169d5920",
+     "tour_sha256": "379ad53a3a605416f7033e94f8fde698c3ace6c3740a26e70ac684fb6b57cace"},
+    {"name": "pcb3038", "n": 3038, "optimum": 137694, "paper_edges": 14869, "paper_seconds": 21322,
+     "tsp_url": "https://comopt.ifi.uni-heidelberg.de/software/TSPLIB95/tsp/pcb3038.tsp.gz",
+     "tour_url": "http://akira.ruc.dk/~keld/research/LKH/LKH-1.2/TOURS/pcb3038.opt.tour",
+     "tsp_sha256": "25081ac540357ec34935a4b366f32e58b0d605565b888f876211769ec972b87a",
+     "tour_sha256": "74af9149b5bb904b441c127c5719e51dd51aec1fdda8b823037a61be0cf260a9"}
+  ]
+}

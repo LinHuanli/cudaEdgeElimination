@@ -4,6 +4,16 @@
 
 namespace cudaee {
 
+struct FgpuBootstrapMetrics {
+  std::uint64_t distance_bytes{};
+  std::uint32_t starts{};
+  std::uint64_t improvements{};
+  std::int64_t incumbent_cost{-1};
+  double distance_ms{};
+  double incumbent_ms{};
+  double total_ms{};
+};
+
 // LP 服务的互斥阶段计时；pdhg_ms 是 solver_ms 的子集，不可再次求和。
 // proposal 计数与实际提交计数分开，避免把重复 reply 当成新增 non-pair。
 struct FgpuLpMetrics {

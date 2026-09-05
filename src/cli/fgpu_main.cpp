@@ -25,7 +25,9 @@ void PrintHelp() {
             << "    --output-edges FILE --fixed FILE --nonpairs FILE --manifest FILE\n"
             << "    [--certificate FILE] [--tour-role incumbent|known-optimum]\n"
             << "    [--expected-cost N]\n"
-            << "    [--lp-backend primal-dual-sec|sec-dual]（LP 求解器消融）\n"
+            << "    [--profile legacy|hybrid-e2e]（hybrid 仅接收坐标，GPU 自建上界）\n"
+            << "    [--distance-cache 0|1]（hybrid 距离缓存消融）\n"
+            << "    [--lp-backend off|primal-dual-sec|sec-dual]（LP 关闭不关闭 pair/fix）\n"
             << "    [--point-leaf-kernel permutation|prescreen-permutation|prescreen-subset-dp]\n"
             << "    [--point-cta-blocks 2|4]（寄存器/驻留策略，不限制任务数量）\n"
             << "  fgpu-elim run --instance FILE [--input-edges FILE] [--tour FILE]\n"
@@ -377,18 +379,43 @@ void ResidentLocalCommand(const Arguments& arguments) {
 }
 
 void SolveCommand(const Arguments& arguments) {
-  ValidateKeys(arguments,
-               {"instance", "input-edges", "tour", "tour-role", "expected-cost", "device", "gpus",
-                "mode", "output-edges", "fixed", "nonpairs", "certificate", "manifest",
-                "lp-backend", "point-leaf-kernel", "point-cta-blocks"});
+  ValidateKeys(
+      arguments,
+      {"instance",         "input-edges", "tour",           "tour-role",       "expected-cost",
+       "device",           "gpus",        "mode",           "output-edges",    "fixed",
+       "nonpairs",         "certificate", "manifest",       "lp-backend",      "point-leaf-kernel",
+       "point-cta-blocks", "profile",     "distance-cache", "main-pair-cache", "full-metric"});
   cudaee::FgpuSolveOptions options;
+  const auto profile = Optional(arguments, "profile", "legacy");
+  if (profile != "legacy" && profile != "hybrid-e2e")
+    throw std::invalid_argument("未知 solve profile");
+  options.hybrid_e2e = profile == "hybrid-e2e";
+  options.distance_cache = OptionalBoolean(arguments, "distance-cache", true);
+  options.main_pair_cache = OptionalBoolean(arguments, "main-pair-cache", true);
+  options.full_metric = OptionalBoolean(arguments, "full-metric", true);
+  if (!options.hybrid_e2e &&
+      (arguments.contains("distance-cache") || arguments.contains("main-pair-cache") ||
+       arguments.contains("full-metric"))) {
+    throw std::invalid_argument("hybrid cache/metric 消融参数仅适用于 hybrid-e2e");
+  }
+  if (options.hybrid_e2e && options.full_metric && !options.main_pair_cache)
+    throw std::invalid_argument(
+        "全度数 metric 需要条件 pair cache；缓存消融请同时 --full-metric 0");
+  if (options.hybrid_e2e &&
+      (arguments.contains("tour") || arguments.contains("input-edges") ||
+       arguments.contains("expected-cost") || arguments.contains("tour-role"))) {
+    throw std::invalid_argument(
+        "hybrid-e2e 禁止输入最优标签、tour 和预处理边集；标签仅用于事后检查");
+  }
   options.device = ParseSolveDevice(arguments);
   options.mode = ParseSolveMode(Optional(arguments, "mode", "gpu-safe"));
   options.serialize_certificate = arguments.contains("certificate");
   const std::string lp_backend = Optional(arguments, "lp-backend", "primal-dual-sec");
-  if (lp_backend != "primal-dual-sec" && lp_backend != "sec-dual") {
-    throw std::invalid_argument("--lp-backend 必须为 primal-dual-sec 或 sec-dual");
+  if (lp_backend != "off" && lp_backend != "primal-dual-sec" && lp_backend != "sec-dual") {
+    throw std::invalid_argument(
+        "--lp-backend 必须为 off、primal-dual-sec 或 sec-dual（尚未实现的 cut 模式不接受）");
   }
+  options.enable_lp = lp_backend != "off";
   options.primal_dual_lp = lp_backend == "primal-dual-sec";
   const std::string leaf = Optional(arguments, "point-leaf-kernel", "permutation");
   if (leaf == "permutation") {

@@ -82,7 +82,7 @@ template <typename T> void HashValue(std::uint64_t* hash, const T& value) {
 bool IsIntegralCoordinate(const double value, std::int64_t* converted) {
   if (!std::isfinite(value) ||
       value < static_cast<double>(std::numeric_limits<std::int64_t>::min()) ||
-      value > static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
+      value >= std::ldexp(1.0, 63)) {
     return false;
   }
   double integer_part = 0.0;
@@ -168,8 +168,24 @@ GraphSnapshot LoadTspCoordinates(const std::filesystem::path& tsp_path) {
     throw std::runtime_error("TSPLIB 坐标不完整");
   }
 
-  graph.integer_distance_safe = graph.integer_coordinates;
-  if (graph.integer_coordinates) {
+  bool exact_half_coordinates = false;
+  if (!graph.integer_coordinates) {
+    exact_half_coordinates =
+        std::all_of(graph.points.begin(), graph.points.end(), [](const Point& point) {
+          std::int64_t numerator;
+          return IsIntegralCoordinate(2.0 * point.x, &numerator) &&
+                 IsIntegralCoordinate(2.0 * point.y, &numerator);
+        });
+    if (exact_half_coordinates) {
+      graph.integer_coordinate_denominator = 2U;
+      for (Point& point : graph.points) {
+        point.integer_x = static_cast<std::int64_t>(2.0 * point.x);
+        point.integer_y = static_cast<std::int64_t>(2.0 * point.y);
+      }
+    }
+  }
+  graph.integer_distance_safe = graph.integer_coordinates || exact_half_coordinates;
+  if (graph.integer_distance_safe) {
     auto [min_x, max_x] = std::minmax_element(
         graph.points.begin(), graph.points.end(),
         [](const Point& lhs, const Point& rhs) { return lhs.integer_x < rhs.integer_x; });
@@ -178,7 +194,10 @@ GraphSnapshot LoadTspCoordinates(const std::filesystem::path& tsp_path) {
         [](const Point& lhs, const Point& rhs) { return lhs.integer_y < rhs.integer_y; });
     const __int128 dx = static_cast<__int128>(max_x->integer_x) - min_x->integer_x;
     const __int128 dy = static_cast<__int128>(max_y->integer_y) - min_y->integer_y;
-    graph.integer_distance_safe = dx * dx + dy * dy <= std::numeric_limits<std::uint64_t>::max();
+    // 先界定各差值再平方，防止恶意极大坐标使 host 的 signed __int128 也溢出。
+    const __int128 maximum_delta = std::numeric_limits<std::uint32_t>::max();
+    graph.integer_distance_safe = dx <= maximum_delta && dy <= maximum_delta &&
+                                  dx * dx + dy * dy <= std::numeric_limits<std::uint64_t>::max();
   }
 
   return graph;
@@ -235,6 +254,10 @@ GraphSnapshot GraphSnapshot::Load(const std::filesystem::path& tsp_path,
   });
   graph.RebuildCsr();
   return graph;
+}
+
+GraphSnapshot GraphSnapshot::LoadCoordinates(const std::filesystem::path& tsp_path) {
+  return LoadTspCoordinates(tsp_path);
 }
 
 GraphSnapshot GraphSnapshot::LoadComplete(const std::filesystem::path& tsp_path) {

@@ -25,14 +25,22 @@ def coordinates(path: pathlib.Path) -> list[tuple[int, int]]:
     return result
 
 
-def distance(first: tuple[int, int], second: tuple[int, int]) -> int:
-    squared = (first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2
+def distance(first: tuple[int, int], second: tuple[int, int], metric: str = "EUC_2D") -> int:
+    # 整数/半整数的独立 oracle；先精确放大坐标差，最后才做 TSPLIB 舍入。
+    dx, dy = 2 * (first[0] - second[0]), 2 * (first[1] - second[1])
+    if dx != int(dx) or dy != int(dy):
+        raise ValueError("测试 oracle 仅支持整数或半整数坐标")
+    squared = int(dx) ** 2 + int(dy) ** 2
     root = math.isqrt(squared)
-    return root + int(squared - root * root > root)
+    if metric == "CEIL_2D":
+        return root // 2 + int(squared != (root // 2 * 2) ** 2)
+    if metric != "EUC_2D":
+        raise ValueError("测试 oracle 不支持该距离类型")
+    return (root + 1) // 2
 
 
 def optimal_tour_facts(
-    points: list[tuple[int, int]],
+    points: list[tuple[int, int]], metric: str = "EUC_2D",
 ) -> tuple[int, set[tuple[int, int]], set[tuple[int, int]], set[tuple[int, int, int]]]:
     optimum: int | None = None
     union: set[tuple[int, int]] = set()
@@ -42,7 +50,7 @@ def optimal_tour_facts(
         if suffix[0] > suffix[-1]:
             continue
         tour = (0, *suffix)
-        cost = sum(distance(points[tour[i]], points[tour[(i + 1) % len(tour)]])
+        cost = sum(distance(points[tour[i]], points[tour[(i + 1) % len(tour)]], metric)
                    for i in range(len(tour)))
         edges = {tuple(sorted((tour[i], tour[(i + 1) % len(tour)])))
                  for i in range(len(tour))}

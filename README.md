@@ -5,7 +5,9 @@
 执行独立 GPU replay，CPU 不参与逐边删除、non-pair 或 fixing 决策。浮点 LP 只生成
 guidance，最终授权统一使用量化 dual 和设备端精确定点比较。
 
-最新开发记录：[快照事务、稀疏 PDHG 与端点 OR](docs/research/71_FGPU_Transaction_PDHG_and_PathEnd.md)。
+最新开发记录：[无标签完整图、GPU bootstrap 与全度数 metric](docs/research/73_FGPU_Hybrid_Bootstrap_and_FullMetric.md)。
+新入口 `solve --profile hybrid-e2e --instance FILE` 不接收最优标签或预处理边集；
+`--lp-backend off` 仍保留完整 pair/fixing 服务，距离/上界由 GPU 计算。
 当前还不是设计中的完整 local-cut/comb LP 与通用深层 HT；历史计时不能当作最新版本的性能。
 完整运行的交错对照及身份记录见[基准协议](docs/research/72_FGPU_Reproducible_Paired_Benchmarks.md)。
 

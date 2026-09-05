@@ -2,6 +2,7 @@
 #include "cuda_edge_elimination/fgpu.hpp"
 
 #include "../cpu/elimination_commit.hpp"
+#include "gpu_bootstrap.hpp"
 #include "lp_box_verifier.hpp"
 #include "quick_hs_verifier.hpp"
 #include "resident_backend.hpp"
@@ -381,6 +382,30 @@ void WriteSolveManifest(const std::filesystem::path& path, const FgpuInput& inpu
          << "  \"instance\": " << JsonString(input.instance.string()) << ",\n"
          << "  \"input_edges\": " << JsonString(input.input_edges.string()) << ",\n"
          << "  \"mode\": " << JsonString(ToString(options.mode)) << ",\n"
+         << "  \"profile\": " << JsonString(options.hybrid_e2e ? "hybrid-e2e" : "legacy") << ",\n"
+         << "  \"distance_cache\": "
+         << (options.hybrid_e2e && options.distance_cache ? "true" : "false") << ",\n"
+         << "  \"distance_cache_bytes\": " << report.bootstrap.distance_bytes << ",\n"
+         << "  \"main_pair_cache\": "
+         << (options.hybrid_e2e && options.main_pair_cache ? "true" : "false") << ",\n"
+         << "  \"main_pair_cache_bytes\": " << resident.main_pair_cache_bytes << ",\n"
+         << "  \"full_degree_metric\": "
+         << (options.hybrid_e2e && options.full_metric ? "true" : "false") << ",\n"
+         << "  \"bootstrap_ms\": " << report.bootstrap.total_ms << ",\n"
+         << "  \"distance_build_replay_ms\": " << report.bootstrap.distance_ms << ",\n"
+         << "  \"incumbent_origin\": "
+         << JsonString(options.hybrid_e2e
+                           ? (options.enable_lp ? "gpu-nn-2opt-oropt" : "not-required-lp-off")
+                           : "provided-tour")
+         << ",\n"
+         << "  \"incumbent_cost\": " << report.bootstrap.incumbent_cost << ",\n"
+         << "  \"incumbent_starts\": " << report.bootstrap.starts << ",\n"
+         << "  \"incumbent_improvements\": " << report.bootstrap.improvements << ",\n"
+         << "  \"incumbent_ms\": " << report.bootstrap.incumbent_ms << ",\n"
+         << "  \"input_optimum_labels\": "
+         << (input.tour_is_known_optimum && !input.tour.empty() ? "true" : "false") << ",\n"
+         << "  \"implemented_max_paths\": 3,\n"
+         << "  \"implemented_extra_edge_depth\": 2,\n"
          << "  \"strong_metric\": true,\n"
          << "  \"point_nonpair\": true,\n"
          << "  \"point_path_end_branches\": 4,\n"
@@ -437,7 +462,10 @@ void WriteSolveManifest(const std::filesystem::path& path, const FgpuInput& inpu
          << "  \"geometry_ms\": " << resident.geometry_ms << ",\n"
          << "  \"lp_ms\": " << resident.pdlp_ms << ",\n"
          << "  \"lp_backend\": "
-         << JsonString(resident.lp.pdhg_iterations != 0U ? "primal-dual-sec" : "sec-dual") << ",\n"
+         << JsonString(!options.enable_lp
+                           ? "off"
+                           : (resident.lp.pdhg_iterations != 0U ? "primal-dual-sec" : "sec-dual"))
+         << ",\n"
          << "  \"lp_solver_ms\": " << resident.lp.solver_ms << ",\n"
          << "  \"lp_cut_separation_ms\": " << resident.lp.cut_separation_ms << ",\n"
          << "  \"lp_point_ms\": " << resident.lp.point_ms << ",\n"
@@ -484,7 +512,6 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
       config.quick_hs_candidates < 2U || config.quick_hs_candidates > 32U ||
       config.extra_edge_depth < 1U || config.extra_edge_depth > 2U ||
       (config.serialize_gpu_certificate && !config.enable_gpu_replay) ||
-      ((config.enable_point_nonpair || config.enable_direct_fix) && !config.enable_pdlp) ||
       (config.enable_cpu_audit &&
        (config.enable_main_edge || config.enable_extra_edge || config.enable_point_nonpair ||
         config.enable_direct_fix || config.quick_hs_candidates != 10U ||
@@ -493,12 +520,27 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
        !config.enable_pdlp && !config.enable_main_edge && !config.enable_extra_edge)) {
     throw std::invalid_argument("resident device、预算或阶段开关非法");
   }
-  if (config.enable_pdlp && input.tour.empty()) {
+  if (config.enable_pdlp && input.tour.empty() && !config.hybrid_e2e) {
     throw std::invalid_argument("resident PDLP 需要 tour 提供合法 incumbent 上界");
   }
-  GraphSnapshot initial = input.input_edges.empty()
-                              ? GraphSnapshot::LoadComplete(input.instance)
-                              : GraphSnapshot::Load(input.instance, input.input_edges);
+  if (config.hybrid_e2e &&
+      (!input.input_edges.empty() || !input.tour.empty() || input.expected_tour_cost >= 0 ||
+       config.protect_tour || config.enable_cpu_audit || !config.enable_gpu_replay)) {
+    throw std::invalid_argument(
+        "hybrid-e2e 只接收原始坐标，不接收 tour/最优成本/预处理边集/CPU audit");
+  }
+  GraphSnapshot initial =
+      config.hybrid_e2e
+          ? GraphSnapshot::LoadCoordinates(input.instance)
+          : (input.input_edges.empty() ? GraphSnapshot::LoadComplete(input.instance)
+                                       : GraphSnapshot::Load(input.instance, input.input_edges));
+  std::unique_ptr<detail::GpuBootstrap> bootstrap;
+  if (config.hybrid_e2e) {
+    bootstrap = std::make_unique<detail::GpuBootstrap>(initial, config.device);
+    bootstrap->BuildCompleteGraph(&initial);
+    if (config.enable_pdlp)
+      bootstrap->GenerateIncumbent();
+  }
   std::vector<std::int32_t> tour;
   ProtectedTourCheck initial_tour_check;
   if (!input.tour.empty()) {
@@ -513,7 +555,14 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
       BuildProtectedEdgeMask(initial, config.protect_tour ? tour : std::vector<std::int32_t>{});
 
   detail::ResidentGpuOptions device_options;
+  device_options.main_pair_cache = config.main_pair_cache;
+  device_options.full_metric = config.full_metric;
   device_options.device = config.device;
+  if (bootstrap != nullptr) {
+    device_options.device = bootstrap->device();
+    device_options.triangular_distance = config.distance_cache ? bootstrap->distances() : nullptr;
+    device_options.gpu_complete_graph = true;
+  }
   device_options.max_hs_epochs = config.max_hs_epochs;
   device_options.max_jv_rounds = config.max_jv_rounds;
   device_options.enable_quick_hs = config.enable_quick_hs;
@@ -541,10 +590,16 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   device_options.pdlp_iterations = config.pdlp_iterations;
   device_options.max_pdlp_epochs = config.max_pdlp_epochs;
   device_options.incumbent_cost = tour.empty() ? -1 : initial_tour_check.cost;
+  if (bootstrap != nullptr)
+    device_options.incumbent_cost = bootstrap->metrics().incumbent_cost;
   const detail::ResidentGpuResult device =
       detail::RunResidentEliminationCuda(initial, protected_edges, device_options);
 
   FgpuResidentRunReport report;
+  if (bootstrap != nullptr)
+    report.bootstrap = bootstrap->metrics();
+  else
+    report.bootstrap.incumbent_cost = device_options.incumbent_cost;
   report.initial_hash = initial.ContentHash();
   report.initial_edges = initial.ActiveEdgeCount();
   report.final_edges = device.final_edges;
@@ -553,6 +608,7 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   report.extra_edge_committed = device.extra_edge_committed;
   report.geometry_committed = device.geometry_committed;
   report.main_edge_committed = device.main_edge_committed;
+  report.main_pair_cache_bytes = device.main_pair_cache_bytes;
   report.lp_committed = device.lp_committed;
   report.nonpair_count = device.final_nonpairs.size();
   report.lp_nonpair_committed = device.lp_nonpair_committed;
@@ -738,7 +794,9 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
         (input.expected_tour_cost >= 0 && final_tour_check.cost != input.expected_tour_cost)) {
       throw std::runtime_error("resident 最终 tour 门禁失败");
     }
-    CheckTourNonpairs(tour, device.final_nonpairs);
+    // 普通启发式 incumbent 只是上界；其中边/邻边对可以被安全排除。
+    if (input.tour_is_known_optimum)
+      CheckTourNonpairs(tour, device.final_nonpairs);
     final_tour_ptr = &final_tour_check;
   }
   report.pair_count = CountNeighborPairs(audited);
@@ -781,23 +839,31 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
 
 FgpuSolveReport RunFgpuElimination(const FgpuInput& input, const FgpuOutputPaths& outputs,
                                    const FgpuSolveOptions& options) {
-  if (input.tour.empty()) {
+  if (input.tour.empty() && !options.hybrid_e2e && options.enable_lp) {
     throw std::invalid_argument("fgpu-elim solve 需要 --tour 提供合法 incumbent");
   }
   if (options.serialize_certificate && outputs.certificate.empty()) {
     throw std::invalid_argument("启用 GPU replay log 时必须提供 --certificate");
+  }
+  if (options.serialize_certificate && !options.enable_lp) {
+    throw std::invalid_argument(
+        "旧 GPU replay log 格式不支持独立 pair/fixing epoch；LP off 请不指定 certificate");
   }
   if (options.mode == FgpuSolveMode::kGpuFastRaw && options.serialize_certificate) {
     throw std::invalid_argument("gpu-fast-raw 没有 replay 授权，不能生成 replay log");
   }
 
   FgpuResidentConfig config;
+  config.hybrid_e2e = options.hybrid_e2e;
+  config.distance_cache = options.distance_cache;
+  config.main_pair_cache = options.hybrid_e2e && options.main_pair_cache;
+  config.full_metric = options.hybrid_e2e && options.full_metric;
   config.device = options.device;
   config.max_hs_epochs = 0U;
   config.max_jv_rounds = 0U;
   config.max_pdlp_epochs = 0U;
   config.enable_geometry = true;
-  config.enable_pdlp = true;
+  config.enable_pdlp = options.enable_lp;
   config.enable_primal_dual_lp = options.primal_dual_lp && !options.serialize_certificate;
   if (ToString(options.point_leaf_kernel) == "invalid") {
     throw std::invalid_argument("未知 Point leaf kernel");
@@ -835,6 +901,7 @@ FgpuSolveReport RunFgpuElimination(const FgpuInput& input, const FgpuOutputPaths
   }
 
   FgpuSolveReport report;
+  report.bootstrap = resident.bootstrap;
   report.termination = FgpuTermination::kFixedPoint;
   report.gpu_replayed = config.enable_gpu_replay;
   report.unaudited = !config.enable_gpu_replay;

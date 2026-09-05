@@ -5,6 +5,7 @@
 #include "../fgpu/resident_lp_model.hpp"
 #include "../fgpu/sparse_pdhg.hpp"
 #include "cuda_edge_elimination/cuda_device_affinity.hpp"
+#include "main_edge_metric.cuh"
 #include "resident_pdhg_quantize.cuh"
 #include "resident_sec_replay.cuh"
 #include "resident_transaction.cuh"
@@ -160,6 +161,25 @@ __global__ void InitializeEdgeIdsKernel(const std::int32_t edge_count,
   const std::int32_t edge = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
   if (edge < edge_count) {
     edge_ids[edge] = edge;
+  }
+}
+
+// 完整图首次快照仅供 geometry/replay/事务检查使用，无需 CPU 排序 CSR。
+// 行内按顶点编号确定性生成；几何阶段后再转成按 (cost,node) 排序的稀疏行。
+__global__ void InitializeCompleteAdjacencyKernel(const int dimension, std::int64_t* rows,
+                                                  int* neighbors, int* edge_ids) {
+  const std::int64_t node = blockIdx.x;
+  if (threadIdx.x == 0) {
+    rows[node] = node * (dimension - 1LL);
+    if (node == dimension - 1)
+      rows[dimension] = static_cast<std::int64_t>(dimension) * (dimension - 1);
+  }
+  for (int slot = threadIdx.x; slot < dimension - 1; slot += blockDim.x) {
+    const std::int64_t other = slot >= node ? slot + 1 : slot;
+    const auto u = node < other ? node : other, v = node < other ? other : node;
+    const auto index = node * (dimension - 1LL) + slot;
+    neighbors[index] = static_cast<int>(other);
+    edge_ids[index] = static_cast<int>(u * (2LL * dimension - u - 1) / 2 + v - u - 1);
   }
 }
 
@@ -519,10 +539,12 @@ __device__ bool IntervalCosine(const DeviceInterval value) {
 
 __device__ DeviceInterval CoordinateDistanceInterval(const std::int32_t lhs, const std::int32_t rhs,
                                                      const std::int64_t* const x,
-                                                     const std::int64_t* const y) {
+                                                     const std::int64_t* const y,
+                                                     const std::uint32_t denominator) {
   const DeviceInterval dx = IntervalSubtract(IntervalInteger(x[lhs]), IntervalInteger(x[rhs]));
   const DeviceInterval dy = IntervalSubtract(IntervalInteger(y[lhs]), IntervalInteger(y[rhs]));
-  return IntervalSqrt(IntervalAdd(IntervalSquare(dx), IntervalSquare(dy)));
+  return IntervalDivide(IntervalSqrt(IntervalAdd(IntervalSquare(dx), IntervalSquare(dy))),
+                        IntervalInteger(denominator));
 }
 
 __device__ DeviceInterval IntervalCosineSum(const DeviceInterval first,
@@ -546,9 +568,9 @@ __device__ bool IntervalPotentialBounds(const quick_hs::GraphView& graph, const 
   const DeviceInterval lpq = IntervalInteger(quick_hs::Distance(graph, p, q));
   const DeviceInterval lpr = IntervalInteger(quick_hs::Distance(graph, p, r));
   const DeviceInterval lqr = IntervalInteger(quick_hs::Distance(graph, q, r));
-  const DeviceInterval dpq = CoordinateDistanceInterval(p, q, x, y);
-  const DeviceInterval dpr = CoordinateDistanceInterval(p, r, x, y);
-  const DeviceInterval dqr = CoordinateDistanceInterval(q, r, x, y);
+  const DeviceInterval dpq = CoordinateDistanceInterval(p, q, x, y, graph.coordinate_denominator);
+  const DeviceInterval dpr = CoordinateDistanceInterval(p, r, x, y, graph.coordinate_denominator);
+  const DeviceInterval dqr = CoordinateDistanceInterval(q, r, x, y, graph.coordinate_denominator);
   if (!IntervalPositive(delta) || !IntervalPositive(dpq) || !IntervalPositive(dpr) ||
       !IntervalPositive(dqr)) {
     return false;
@@ -3901,7 +3923,7 @@ __global__ void ReplayLpNonpairKernel(
         valid = FixedAnchorProvesNonpair(graph, center, begin + first, begin + second,
                                          fixed_witness[pair], edge_u, edge_v, graph.edge_active,
                                          fixed_bits);
-      } else {
+      } else if (lower_bound != nullptr) {
         const std::int64_t first_reduced =
             ReplayReducedCost(first_edge, edge_u, edge_v, edge_weight, denominator, quantized,
                               quantized_cut, incidence_count, incidence_ids);
@@ -3944,19 +3966,17 @@ __global__ void ReplayLpFixedKernel(
   if (!candidate) {
     return;
   }
-  std::int64_t reduced =
-      edge_weight[edge] * denominator - quantized[edge_u[edge]] - quantized[edge_v[edge]];
-  const std::int32_t* const cuts =
-      incidence_ids + static_cast<std::int64_t>(edge) * kMaxLocalSecIncidence;
-  for (std::uint8_t index = 0U; index < incidence_count[edge]; ++index) {
-    reduced -= quantized_cut[cuts[index]];
-  }
+  const std::int64_t reduced =
+      reason == kFixedReasonLp && lower_bound != nullptr
+          ? ReplayReducedCost(edge, edge_u, edge_v, edge_weight, denominator, quantized,
+                              quantized_cut, incidence_count, incidence_ids)
+          : 0;
   const bool active_candidate = edge_active[edge] != 0U && protected_edge[edge] == 0U;
   const bool valid = active_candidate &&
                      (reason == kFixedReasonNonpair
                           ? (NonpairsForceEdgeAtEndpoint(graph, edge, edge_u[edge]) ||
                              NonpairsForceEdgeAtEndpoint(graph, edge, edge_v[edge]))
-                          : reason == kFixedReasonLp &&
+                          : reason == kFixedReasonLp && lower_bound != nullptr &&
                                 Signed128GreaterThanInt64(
                                     Signed128AddInt64(*lower_bound, reduced < 0 ? -reduced : 0),
                                     incumbent_numerator));
@@ -4165,13 +4185,47 @@ ReplayGeometryKernel(const std::int32_t work_count, const std::int32_t* const ac
   RecordReplayResult(candidate, valid, verified, edge, replayed, rejected);
 }
 
+__global__ void MaximumNeighborSpanKernel(const quick_hs::GraphView graph,
+                                          unsigned long long* const maximum) {
+  const int vertex = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (vertex < graph.dimension) {
+    // CSR 可以保留 inactive slot；必须按 slot 跨度分配，不能按当前活动度数分配。
+    atomicMax(maximum, static_cast<unsigned long long>(quick_hs::NeighborEnd(graph, vertex) -
+                                                       quick_hs::NeighborBegin(graph, vertex)));
+  }
+}
+
 __device__ bool MainPotentialHasAllowedPairCta(const quick_hs::GraphView graph,
                                                const std::int32_t p, const std::int32_t q,
                                                const std::int32_t middle,
-                                               const bool enable_strong_metric) {
+                                               const bool enable_strong_metric,
+                                               std::uint32_t* const pair_cache,
+                                               const bool full_metric) {
   const std::uint64_t degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, middle) -
                                                           quick_hs::NeighborBegin(graph, middle));
   const std::uint64_t pair_count = degree < 2U ? 0U : degree * (degree - 1U) / 2U;
+  if (full_metric) {
+    const std::uint64_t word_count = (pair_count + 31U) / 32U;
+    const unsigned lane = threadIdx.x & 31U;
+    const unsigned warp = threadIdx.x / 32U;
+    bool any_allowed = false;
+    // 每个 warp 独占一个 bitset word，避免非原子 word 写与其它 pair 的位发生竞争。
+    for (std::uint64_t word = warp; word < word_count; word += blockDim.x / 32U) {
+      std::uint32_t bits = 0U;
+      for (unsigned bit = 0; bit < 32U && word * 32U + bit < pair_count; ++bit) {
+        std::int32_t first = -1, second = -1;
+        const bool decoded = DecodeNeighborPair(graph, middle, word * 32U + bit, &first, &second);
+        if (decoded && main_metric::AllowedPairWarp(graph, p, q, first, middle, second)) {
+          bits |= 1U << bit;
+        }
+      }
+      if (lane == 0U)
+        pair_cache[word] = bits;
+      any_allowed |= bits != 0U;
+    }
+    return __syncthreads_or(any_allowed) != 0;
+  }
+  bool any_allowed = false;
   for (std::uint64_t window = 0; window < pair_count; window += blockDim.x) {
     const std::uint64_t ordinal = window + threadIdx.x;
     bool allowed = false;
@@ -4183,17 +4237,29 @@ __device__ bool MainPotentialHasAllowedPairCta(const quick_hs::GraphView graph,
           (enable_strong_metric ? main_edge::AllowedPair(graph, p, q, middle, first, second)
                                 : main_edge::BasicAllowedPair(graph, p, q, middle, first, second));
     }
+    if (pair_cache != nullptr) {
+      // 每个 warp 唯一写入一个 word；尾部不足 32 个 pair 的位显式置零。
+      const auto mask = __ballot_sync(0xffffffffU, allowed);
+      if ((threadIdx.x & 31U) == 0U && ordinal < pair_count) {
+        pair_cache[ordinal / 32U] = mask;
+      }
+    }
     if (__syncthreads_or(allowed ? 1 : 0) != 0) {
-      return true;
+      any_allowed = true;
+      if (pair_cache == nullptr) {
+        return true;
+      }
     }
   }
-  return false;
+  return any_allowed;
 }
 
 __device__ bool MainPotentialPairAdmitsTourCta(const quick_hs::GraphView graph,
                                                const std::int32_t p, const std::int32_t q,
                                                const std::int32_t r, const std::int32_t s,
-                                               const bool enable_strong_metric) {
+                                               const bool enable_strong_metric,
+                                               const std::uint32_t* const r_cache,
+                                               const std::uint32_t* const s_cache) {
   const std::uint64_t r_degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, r) -
                                                             quick_hs::NeighborBegin(graph, r));
   const std::uint64_t s_degree = static_cast<std::uint64_t>(quick_hs::NeighborEnd(graph, s) -
@@ -4214,12 +4280,20 @@ __device__ bool MainPotentialPairAdmitsTourCta(const quick_hs::GraphView graph,
       std::int32_t s2 = -1;
       const bool decoded = DecodeNeighborPair(graph, r, reply / s_pairs, &r1, &r2) &&
                            DecodeNeighborPair(graph, s, reply % s_pairs, &s1, &s2);
+      const auto r_pair = reply / s_pairs;
+      const auto s_pair = reply % s_pairs;
       const bool r_allowed =
-          decoded && (enable_strong_metric ? main_edge::AllowedPair(graph, p, q, r, r1, r2)
-                                           : main_edge::BasicAllowedPair(graph, p, q, r, r1, r2));
+          decoded &&
+          (r_cache != nullptr
+               ? ((r_cache[r_pair / 32U] >> (r_pair % 32U)) & 1U) != 0U
+               : (enable_strong_metric ? main_edge::AllowedPair(graph, p, q, r, r1, r2)
+                                       : main_edge::BasicAllowedPair(graph, p, q, r, r1, r2)));
       const bool s_allowed =
-          decoded && (enable_strong_metric ? main_edge::AllowedPair(graph, p, q, s, s1, s2)
-                                           : main_edge::BasicAllowedPair(graph, p, q, s, s1, s2));
+          decoded &&
+          (s_cache != nullptr
+               ? ((s_cache[s_pair / 32U] >> (s_pair % 32U)) & 1U) != 0U
+               : (enable_strong_metric ? main_edge::AllowedPair(graph, p, q, s, s1, s2)
+                                       : main_edge::BasicAllowedPair(graph, p, q, s, s1, s2)));
       admits = decoded && r_allowed && s_allowed &&
                !main_edge::MainEdgeEliminates(graph, p, q, r1, r, r2, s1, s, s2);
     }
@@ -4241,7 +4315,8 @@ __global__ void MainEdgeContinuationKernel(
     const std::int32_t position_denominator, const bool enable_strong_metric,
     const std::uint8_t* const replay_proposed, std::uint8_t* const output,
     std::int32_t* const first_witness, std::int32_t* const second_witness,
-    unsigned long long* const replayed, unsigned long long* const rejected) {
+    unsigned long long* const replayed, unsigned long long* const rejected,
+    std::uint32_t* const pair_cache, const std::size_t pair_cache_words, const bool full_metric) {
   const std::int32_t work = static_cast<std::int32_t>(blockIdx.x);
   if (work >= work_count) {
     return;
@@ -4257,6 +4332,11 @@ __global__ void MainEdgeContinuationKernel(
   const std::int32_t edge = active_edge_ids[work];
   const std::int32_t p = edge_u[edge];
   const std::int32_t q = edge_v[edge];
+  // 生命周期仅限本次 kernel 的 (root, center, snapshot)，绝不写全局 nonpair。
+  auto* const root_cache =
+      pair_cache == nullptr
+          ? nullptr
+          : pair_cache + static_cast<std::size_t>(work) * potential_count * pair_cache_words;
   if (threadIdx.x == 0U) {
     selected = 0;
     proven = 0;
@@ -4264,16 +4344,32 @@ __global__ void MainEdgeContinuationKernel(
     proof_second = -1;
     const bool requested = !Replay || replay_proposed[edge] != 0U;
     enabled = requested && edge_active[edge] != 0U && protected_edge[edge] == 0U &&
-              graph.degree[p] > 2 && graph.degree[q] > 2 &&
-              SelectGeometryCandidatesAtPosition(p, q, kd_nodes, kd_root, x, y, position_numerator,
-                                                 position_denominator, potential_count, potentials,
-                                                 scores, &selected);
+              graph.degree[p] > 2 && graph.degree[q] > 2;
+    if constexpr (Replay) {
+      // replay 不重新执行几何排序和 OR 搜索：只验证成功的一个中心或一对中心。
+      // 任意非端点都可以作合法见证；不需要证明它仍位于 proposer 的候选排名内。
+      if (enabled) {
+        const int first = first_witness[edge], second = second_witness[edge];
+        enabled = first >= 0 && first < graph.dimension && first != p && first != q &&
+                  (second == -1 || (second >= 0 && second < graph.dimension && second != first &&
+                                    second != p && second != q));
+        potentials[0] = first;
+        potentials[1] = second;
+        selected = second == -1 ? 1 : 2;
+      }
+    } else {
+      enabled = enabled &&
+                SelectGeometryCandidatesAtPosition(p, q, kd_nodes, kd_root, x, y,
+                                                   position_numerator, position_denominator,
+                                                   potential_count, potentials, scores, &selected);
+    }
   }
   __syncthreads();
   if (enabled != 0) {
     for (std::int32_t index = 0; index < selected; ++index) {
-      const bool allowed =
-          MainPotentialHasAllowedPairCta(graph, p, q, potentials[index], enable_strong_metric);
+      const bool allowed = MainPotentialHasAllowedPairCta(
+          graph, p, q, potentials[index], enable_strong_metric,
+          root_cache == nullptr ? nullptr : root_cache + index * pair_cache_words, full_metric);
       if (threadIdx.x == 0U && !allowed) {
         proven = 1;
         proof_first = potentials[index];
@@ -4287,7 +4383,9 @@ __global__ void MainEdgeContinuationKernel(
       for (std::int32_t first = 0; first < selected && proven == 0; ++first) {
         for (std::int32_t second = first + 1; second < selected; ++second) {
           const bool admits = MainPotentialPairAdmitsTourCta(
-              graph, p, q, potentials[first], potentials[second], enable_strong_metric);
+              graph, p, q, potentials[first], potentials[second], enable_strong_metric,
+              root_cache == nullptr ? nullptr : root_cache + first * pair_cache_words,
+              root_cache == nullptr ? nullptr : root_cache + second * pair_cache_words);
           if (threadIdx.x == 0U && !admits) {
             proven = 1;
             proof_first = potentials[first];
@@ -4846,7 +4944,9 @@ QuickHsPathDifferentialResult RunQuickHsPathDifferentialCuda(const int requested
 ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
                                              const std::vector<std::uint8_t>& protected_edges,
                                              const ResidentGpuOptions& options) {
-  if (graph.dimension <= 0 || graph.edges.empty() || !graph.integer_coordinates ||
+  if (graph.dimension <= 0 || graph.edges.empty() ||
+      (!graph.integer_coordinates && graph.integer_coordinate_denominator != 2U) ||
+      (graph.integer_coordinate_denominator != 1U && graph.integer_coordinate_denominator != 2U) ||
       !graph.integer_distance_safe || protected_edges.size() != graph.edges.size() ||
       options.pdlp_iterations == 0U || options.potential_candidates < 2U ||
       options.potential_candidates > 32U || options.fractional_bits > 30U ||
@@ -4858,8 +4958,10 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
       options.quick_hs_pair_trials > static_cast<std::uint32_t>(INT32_MAX) ||
       options.extra_edge_depth < 1U || options.extra_edge_depth > 2U ||
       (options.point_cta_blocks != 2U && options.point_cta_blocks != 4U) ||
-      (options.enable_point_nonpair && !options.enable_pdlp) ||
       (options.enable_pdlp && options.incumbent_cost < 0) ||
+      (options.full_metric && (!options.main_pair_cache || !options.enable_strong_metric)) ||
+      (options.collect_trace && !options.enable_pdlp &&
+       (options.enable_point_nonpair || options.enable_direct_fix)) ||
       (!options.enable_quick_hs && !options.enable_jv && !options.enable_geometry &&
        !options.enable_pdlp && !options.enable_main_edge && !options.enable_extra_edge)) {
     throw std::invalid_argument("resident GPU 输入图、tour mask、阶段开关或预算非法");
@@ -4899,8 +5001,14 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   const bool has_protected_degree_floor =
       std::all_of(host_protected_degree.begin(), host_protected_degree.end(),
                   [](const std::int32_t degree) { return degree >= 2; });
-  const SparseAdjacency host_adjacency = BuildSparseAdjacency(graph);
   const bool complete_graph = IsCanonicalCompleteGraph(graph);
+  if (options.gpu_complete_graph && (!complete_graph || !options.enable_geometry)) {
+    throw std::invalid_argument("GPU 初始完整 CSR 需要规范完整图及首个 geometry 阶段");
+  }
+  const SparseAdjacency host_adjacency =
+      options.gpu_complete_graph ? SparseAdjacency{} : BuildSparseAdjacency(graph);
+  const std::size_t initial_slots =
+      options.gpu_complete_graph ? edge_count * 2U : host_adjacency.neighbors.size();
   const std::vector<GeometryKdNode> host_geometry_kd = BuildGeometryKdTree(graph);
   std::vector<std::int32_t> host_geometry_rank(dimension, -1);
   // KD 树按前序连续存储，同一子树在数组中连续。以该顺序构造重叠
@@ -4964,9 +5072,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   DeviceBuffer<std::uint8_t> device_protected(protected_edges.size(), device);
   DeviceBuffer<std::int64_t> device_x(dimension, device);
   DeviceBuffer<std::int64_t> device_y(dimension, device);
-  DeviceBuffer<std::int64_t> device_row_offsets(host_adjacency.row_offsets.size(), device);
-  DeviceBuffer<std::int32_t> device_neighbors(host_adjacency.neighbors.size(), device);
-  DeviceBuffer<std::int32_t> device_neighbor_edge_ids(host_adjacency.edge_ids.size(), device);
+  DeviceBuffer<std::int64_t> device_row_offsets(dimension + 1U, device);
+  DeviceBuffer<std::int32_t> device_neighbors(initial_slots, device);
+  DeviceBuffer<std::int32_t> device_neighbor_edge_ids(initial_slots, device);
   DeviceBuffer<std::int64_t> device_compact_row_offsets;
   DeviceBuffer<std::int64_t> device_compact_row_offsets_next;
   DeviceBuffer<std::int64_t> device_csr_counts;
@@ -5008,6 +5116,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   DeviceBuffer<std::uint8_t> device_committed(edge_count, device);
   DeviceBuffer<std::int32_t> device_first_witness(edge_count, device);
   DeviceBuffer<std::int32_t> device_second_witness(edge_count, device);
+  DeviceBuffer<std::uint32_t> device_main_pair_cache;
+  DeviceBuffer<unsigned long long> device_main_maximum_span(1U, device);
+  std::size_t main_pair_cache_capacity{};
   DeviceBuffer<unsigned long long> device_committed_count(1U, device);
   DeviceBuffer<unsigned long long> device_replay_counters(2U, device);
   DeviceBuffer<unsigned long long> device_lp_path_closed_replies(1U, device);
@@ -5161,6 +5272,12 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   device_neighbors.CopyFromHost(host_adjacency.neighbors.data(), host_adjacency.neighbors.size());
   device_neighbor_edge_ids.CopyFromHost(host_adjacency.edge_ids.data(),
                                         host_adjacency.edge_ids.size());
+  if (options.gpu_complete_graph) {
+    InitializeCompleteAdjacencyKernel<<<graph.dimension, kThreads>>>(
+        graph.dimension, device_row_offsets.get(), device_neighbors.get(),
+        device_neighbor_edge_ids.get());
+    CheckCuda(cudaGetLastError(), "InitializeCompleteAdjacencyKernel launch");
+  }
   device_geometry_kd.CopyFromHost(host_geometry_kd.data(), host_geometry_kd.size());
   CheckCuda(cudaMemset(device_fixed.get(), 0, edge_count * sizeof(std::uint8_t)),
             "cudaMemset resident fixed");
@@ -5207,7 +5324,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
                            .edge_count = static_cast<std::int64_t>(edge_count),
                            .distance_type = static_cast<std::uint8_t>(graph.distance_type),
                            .complete_graph = complete_graph,
-                           .point_leaf_kernel = options.point_leaf_kernel};
+                           .point_leaf_kernel = options.point_leaf_kernel,
+                           .triangular_distance = options.triangular_distance,
+                           .coordinate_denominator = graph.integer_coordinate_denominator};
   CheckCuda(cudaMemset(device_invalid.get(), 0, sizeof(std::int32_t)),
             "cudaMemset resident metric validation");
   ValidateMetricKernel<<<all_edge_blocks, kThreads>>>(
@@ -5231,7 +5350,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   std::unique_ptr<ResidentSecModelCuda> primal_dual_model;
   std::unique_ptr<SparsePdhgCuda> primal_dual_solver;
   std::uint64_t primal_dual_workspace_bytes = 0U;
-  if (options.enable_primal_dual_lp && !options.collect_trace) {
+  if (options.enable_pdlp && options.enable_primal_dual_lp && !options.collect_trace) {
     primal_dual_model = std::make_unique<ResidentSecModelCuda>(device);
     primal_dual_solver = std::make_unique<SparsePdhgCuda>(device);
   }
@@ -5522,6 +5641,47 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     if (work_count == 0) {
       return 0U;
     }
+    std::size_t main_pair_words = 0U;
+    std::int32_t main_batch_size = work_count;
+    if (main_edge_stage && options.main_pair_cache) {
+      CheckCuda(cudaMemset(device_main_maximum_span.get(), 0, sizeof(unsigned long long)),
+                "clear Main conditional cache span");
+      MaximumNeighborSpanKernel<<<vertex_blocks, kThreads>>>(snapshot.graph,
+                                                             device_main_maximum_span.get());
+      CheckCuda(cudaGetLastError(), "MaximumNeighborSpanKernel launch");
+      unsigned long long maximum_span{};
+      CheckCuda(cudaMemcpy(&maximum_span, device_main_maximum_span.get(), sizeof(maximum_span),
+                           cudaMemcpyDeviceToHost),
+                "download Main cache allocation size");
+      if (maximum_span > static_cast<unsigned long long>(graph.dimension - 1)) {
+        throw std::logic_error("Main conditional cache 的 CSR 跨度非法");
+      }
+      const auto maximum_pairs = maximum_span < 2U ? 0U : maximum_span * (maximum_span - 1U) / 2U;
+      main_pair_words = static_cast<std::size_t>((maximum_pairs + 31U) / 32U);
+      const auto potential_count = static_cast<std::size_t>(options.main_edge_potentials);
+      if (main_pair_words > SIZE_MAX / potential_count / sizeof(std::uint32_t)) {
+        throw std::overflow_error("Main conditional cache 的容量溢出");
+      }
+      const std::size_t root_words = std::max<std::size_t>(main_pair_words * potential_count, 1U);
+      std::size_t free_bytes{}, total_bytes{};
+      CheckCuda(cudaMemGetInfo(&free_bytes, &total_bytes), "query Main cache workspace");
+      // 仅按可用工作区分批，不截断任何 root/pair/reply；同一个 epoch 完成所有批次才提交。
+      const std::size_t available_words =
+          std::max(main_pair_cache_capacity, free_bytes / (4U * sizeof(std::uint32_t)));
+      const std::size_t roots_fit = available_words / root_words;
+      if (roots_fit == 0U) {
+        throw std::runtime_error("Main conditional cache 单个 root 工作区不足，未提交本 epoch");
+      }
+      main_batch_size = static_cast<std::int32_t>(std::min<std::size_t>(work_count, roots_fit));
+      const std::size_t required_words = root_words * static_cast<std::size_t>(main_batch_size);
+      if (required_words > main_pair_cache_capacity) {
+        device_main_pair_cache = DeviceBuffer<std::uint32_t>(required_words, device);
+        result.resident_bytes +=
+            (required_words - main_pair_cache_capacity) * sizeof(std::uint32_t);
+        main_pair_cache_capacity = required_words;
+        result.main_pair_cache_bytes = device_main_pair_cache.bytes();
+      }
+    }
     if (active_edge_count <= 0) {
       throw std::logic_error("resident epoch 收到空活动边集");
     }
@@ -5554,7 +5714,10 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
         quick_hs_stage && lp_snapshot_ready ? device_reduced_cost.get() : nullptr;
     const Signed128* const lp_path_lower_bound =
         quick_hs_stage && lp_snapshot_ready ? device_lower_bound.get() : nullptr;
-    const std::int64_t lp_incumbent_numerator = options.incumbent_cost * denominator;
+    const std::int64_t lp_incumbent_numerator =
+        options.enable_pdlp ? options.incumbent_cost * denominator : 0;
+    const auto* pair_reduced = options.enable_pdlp ? device_reduced_cost.get() : nullptr;
+    const auto* pair_bound = options.enable_pdlp ? device_lower_bound.get() : nullptr;
     const bool collect_lp_path_closures =
         (quick_hs_stage && lp_snapshot_ready) ||
         (method == EliminationMethod::kLpBox && options.enable_point_nonpair && pair_service_stage);
@@ -5590,14 +5753,20 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
             device_lp_path_closed_replies.get());
       }
     } else if (main_edge_stage) {
-      MainEdgeContinuationKernel<false><<<work_count, kThreads>>>(
-          work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
-          device_edge_active.get(), device_protected.get(), snapshot.graph, device_x.get(),
-          device_y.get(), device_geometry_kd.get(), 0,
-          static_cast<std::int32_t>(options.main_edge_potentials), main_position,
-          static_cast<std::int32_t>(options.main_edge_positions + 1U), options.enable_strong_metric,
-          nullptr, device_proposed.get(), device_first_witness.get(), device_second_witness.get(),
-          nullptr, nullptr);
+      for (std::int32_t begin = 0; begin < work_count; begin += main_batch_size) {
+        const auto batch_count = std::min(main_batch_size, work_count - begin);
+        MainEdgeContinuationKernel<false><<<batch_count, kThreads>>>(
+            batch_count, work_edge_ids + begin, device_edge_u.get(), device_edge_v.get(),
+            device_edge_active.get(), device_protected.get(), snapshot.graph, device_x.get(),
+            device_y.get(), device_geometry_kd.get(), 0,
+            static_cast<std::int32_t>(options.main_edge_potentials), main_position,
+            static_cast<std::int32_t>(options.main_edge_positions + 1U),
+            options.enable_strong_metric, nullptr, device_proposed.get(),
+            device_first_witness.get(), device_second_witness.get(), nullptr, nullptr,
+            options.main_pair_cache ? device_main_pair_cache.get() : nullptr, main_pair_words,
+            options.full_metric);
+        CheckCuda(cudaGetLastError(), "Main cached proposal batch launch");
+      }
     } else if (method == EliminationMethod::kJv) {
       JvKernel<<<work_blocks, kThreads>>>(work_count, work_edge_ids, device_edge_u.get(),
                                           device_edge_v.get(), device_edge_active.get(),
@@ -5632,227 +5801,278 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
           device_proposed.get());
     } else if (method == EliminationMethod::kLpBox) {
       auto lp_phase_begin = SteadyClock::now();
-      CheckCuda(cudaMemset(device_summary.get(), 0, 2U * sizeof(unsigned long long)),
-                "cudaMemset resident PDLP summary");
-      ActiveCostSummaryKernel<<<work_blocks, kThreads>>>(
-          work_count, work_edge_ids, device_edge_weight.get(), device_edge_active.get(),
-          device_summary.get(), device_summary.get() + 1);
-      CheckCuda(cudaDeviceSynchronize(), "resident PDLP summary synchronize");
-      unsigned long long host_summary[2]{};
-      device_summary.CopyToHost(host_summary, 2U);
-      if (host_summary[0] == 0U) {
-        throw std::logic_error("resident PDLP 活动边为空");
-      }
-      const double average_cost =
-          static_cast<double>(host_summary[1]) / static_cast<double>(host_summary[0]);
-      const double average_degree =
-          2.0 * static_cast<double>(host_summary[0]) / static_cast<double>(graph.dimension);
-      const double initial_step = std::max(1.0, average_cost / (average_degree + 2.0));
-      const int cut_blocks = (maximum_cut_count + kThreads - 1) / kThreads;
-      CheckCuda(cudaMemset(device_dual.get(), 0, dimension * sizeof(double)),
-                "cudaMemset resident degree-box dual");
-      CheckCuda(cudaMemset(device_average.get(), 0, dimension * sizeof(double)),
-                "cudaMemset resident degree-box average");
-      CheckCuda(cudaMemset(device_quantized_cut.get(), 0,
-                           static_cast<std::size_t>(maximum_cut_count) * sizeof(std::int64_t)),
-                "cudaMemset resident degree-box cut numerator");
-
-      // 先求纯 degree-box 基线。它本身是完整合法的 Lagrangian dual，
-      // 同时为 strong solve 提供 warm start。
-      for (std::uint32_t iteration = 0U; iteration < options.pdlp_iterations; ++iteration) {
-        CheckCuda(cudaMemset(device_selected_degree.get(), 0, dimension * sizeof(std::int32_t)),
-                  "cudaMemset resident degree-box selected degree");
-        SelectDegreeBoxKernel<<<work_blocks, kThreads>>>(
-            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
-            device_edge_weight.get(), device_edge_active.get(), device_dual.get(),
-            device_selected_degree.get());
-        const double step = initial_step / sqrt(1.0 + static_cast<double>(iteration) / 8.0);
-        UpdateResidentDualKernel<<<vertex_blocks, kThreads>>>(
-            graph.dimension, device_selected_degree.get(), step, dual_limit, device_dual.get(),
-            device_average.get());
-      }
-      CheckCuda(cudaMemcpy(device_degree_dual.get(), device_dual.get(), dimension * sizeof(double),
-                           cudaMemcpyDeviceToDevice),
-                "cudaMemcpy resident degree dual snapshot");
-      CheckCuda(cudaMemset(device_invalid.get(), 0, sizeof(std::int32_t)),
-                "cudaMemset resident degree-box invalid");
-      std::int64_t* const degree_quantized = device_degree_quantized_dual.get();
-      std::int64_t* const degree_reduced = device_degree_reduced_cost.get();
-      Signed128* const degree_bound = device_degree_lower_bound.get();
-      QuantizeResidentDualKernel<<<vertex_blocks, kThreads>>>(
-          graph.dimension, 1.0 / static_cast<double>(options.pdlp_iterations),
-          static_cast<double>(denominator), 1.0e15, device_average.get(), degree_quantized,
-          device_invalid.get());
-      ReducedCostKernel<<<work_blocks, kThreads>>>(
-          work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
-          device_edge_weight.get(), device_edge_active.get(), denominator, degree_quantized,
-          device_quantized_cut.get(), device_local_sec_incidence_count.get(),
-          device_local_sec_incidence_ids.get(), degree_reduced);
-      compute_exact_box_bound(work_count, work_edge_ids, degree_quantized, 0,
-                              device_quantized_cut.get(), degree_reduced, degree_bound);
-      // 先把 degree 快照发布为当前 best；后续 strong 候选只能由设备端
-      // Signed128 严格比较替换它，因此任意有限迭代都不会导致下界倒退。
-      CheckCuda(cudaMemcpy(device_quantized_dual.get(), degree_quantized,
-                           dimension * sizeof(std::int64_t), cudaMemcpyDeviceToDevice),
-                "cudaMemcpy resident initial best dual");
-      CheckCuda(cudaMemset(device_quantized_cut.get(), 0,
-                           static_cast<std::size_t>(maximum_cut_count) * sizeof(std::int64_t)),
-                "cudaMemset resident initial best cut dual");
-      CheckCuda(cudaMemcpy(device_reduced_cost.get(), degree_reduced,
-                           edge_count * sizeof(std::int64_t), cudaMemcpyDeviceToDevice),
-                "cudaMemcpy resident initial best reduced cost");
-      CheckCuda(cudaMemcpy(device_lower_bound.get(), degree_bound, sizeof(Signed128),
-                           cudaMemcpyDeviceToDevice),
-                "cudaMemcpy resident initial best lower bound");
-      CheckCuda(cudaMemset(device_selected_lp_snapshot_kind.get(), 0, sizeof(std::int32_t)),
-                "cudaMemset resident selected LP snapshot kind");
-
-      CheckCuda(cudaDeviceSynchronize(), "resident degree solve timing");
-      result.lp.solver_ms += ElapsedMilliseconds(lp_phase_begin);
-      lp_phase_begin = SteadyClock::now();
-      // P1 多阈值 connectivity separator：阈值只决定候选子集，不参与
-      // 最终授权；每个连通分量都重新物化为合法 δ(S)>=2 行。三层 support
-      // 覆盖严格负 reduced cost、零邻域和略宽正邻域，形成嵌套候选 cuts。
-      CheckCuda(cudaMemset(device_cut_valid.get(), 0,
-                           static_cast<std::size_t>(maximum_cut_count) * sizeof(std::uint8_t)),
-                "cudaMemset valid SEC cuts");
-      if (local_sec.cut_count != 0) {
-        CheckCuda(cudaMemset(device_cut_valid.get(), 1,
-                             static_cast<std::size_t>(local_sec.cut_count) * sizeof(std::uint8_t)),
-                  "cudaMemset static SEC cuts valid");
-      }
-      CheckCuda(cudaMemset(device_connectivity_cut_count.get(), 0, sizeof(unsigned long long)),
-                "cudaMemset connectivity cut count");
-      // 先恢复静态 local-window incidence，再按层追加 component cuts。
-      BuildLocalSecIncidenceKernel<<<all_edge_blocks, kThreads>>>(
-          static_cast<std::int32_t>(edge_count), device_all_edge_ids.get(), device_edge_u.get(),
-          device_edge_v.get(), device_geometry_rank.get(), local_sec,
-          device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get());
-      const double scaled_support_step = average_cost * static_cast<double>(denominator) / 16.0;
-      if (!std::isfinite(scaled_support_step) ||
-          scaled_support_step > static_cast<double>(INT64_MAX)) {
-        throw std::overflow_error("resident connectivity support 阈值溢出");
-      }
-      const std::int64_t support_step =
-          std::max<std::int64_t>(1, static_cast<std::int64_t>(std::llround(scaled_support_step)));
-      const std::int64_t support_threshold[kConnectivitySupportLevels] = {-support_step, 0,
-                                                                          support_step};
-      for (std::int32_t level = 0; level < kConnectivitySupportLevels; ++level) {
-        InitializeSupportLabelsKernel<<<vertex_blocks, kThreads>>>(graph.dimension,
-                                                                   device_support_label.get());
-        std::int32_t component_changed = 1;
-        std::int32_t component_round = 0;
-        while (component_changed != 0) {
-          if (++component_round > graph.dimension + 1) {
-            throw std::logic_error("GPU support component 标签传播未收敛");
-          }
-          CheckCuda(cudaMemset(device_component_changed.get(), 0, sizeof(std::int32_t)),
-                    "cudaMemset support component changed");
-          RelaxSupportLabelsKernel<<<work_blocks, kThreads>>>(
-              work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
-              device_edge_active.get(), degree_reduced, support_threshold[level],
-              device_support_label.get(), device_component_changed.get());
-          CompressSupportLabelsKernel<<<vertex_blocks, kThreads>>>(
-              graph.dimension, device_support_label.get(), device_component_changed.get());
-          device_component_changed.CopyToHost(&component_changed, 1U);
+      if (options.enable_pdlp) {
+        CheckCuda(cudaMemset(device_summary.get(), 0, 2U * sizeof(unsigned long long)),
+                  "cudaMemset resident PDLP summary");
+        ActiveCostSummaryKernel<<<work_blocks, kThreads>>>(
+            work_count, work_edge_ids, device_edge_weight.get(), device_edge_active.get(),
+            device_summary.get(), device_summary.get() + 1);
+        CheckCuda(cudaDeviceSynchronize(), "resident PDLP summary synchronize");
+        unsigned long long host_summary[2]{};
+        device_summary.CopyToHost(host_summary, 2U);
+        if (host_summary[0] == 0U) {
+          throw std::logic_error("resident PDLP 活动边为空");
         }
-        CheckCuda(cudaMemset(device_component_size.get(), 0, dimension * sizeof(std::int32_t)),
-                  "cudaMemset support component sizes");
-        CountSupportComponentsKernel<<<vertex_blocks, kThreads>>>(
-            graph.dimension, device_support_label.get(), device_component_size.get());
-        CheckCuda(cudaMemcpy(device_sec_membership.get() + level * dimension,
-                             device_support_label.get(), dimension * sizeof(std::int32_t),
-                             cudaMemcpyDeviceToDevice),
-                  "封存 SEC 子集成员");
-        const std::int32_t dynamic_cut_offset = local_sec.cut_count + level * graph.dimension;
-        ActivateConnectivityCutsKernel<<<vertex_blocks, kThreads>>>(
-            graph.dimension, dynamic_cut_offset, device_support_label.get(),
-            device_component_size.get(), device_cut_valid.get(),
-            device_connectivity_cut_count.get());
-        AppendConnectivityCutIncidenceKernel<<<work_blocks, kThreads>>>(
-            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
-            device_edge_active.get(), dynamic_cut_offset, device_support_label.get(),
-            device_cut_valid.get(), device_local_sec_incidence_count.get(),
-            device_local_sec_incidence_ids.get(), device_invalid.get());
-      }
-      unsigned long long connectivity_cuts = 0U;
-      device_connectivity_cut_count.CopyToHost(&connectivity_cuts, 1U);
-      result.lp_connectivity_cuts += static_cast<std::size_t>(connectivity_cuts);
-      result.lp.cut_separation_ms += ElapsedMilliseconds(lp_phase_begin);
-      lp_phase_begin = SteadyClock::now();
-
-      const int selection_blocks = std::max({vertex_blocks, work_blocks, cut_blocks});
-      for (std::int32_t level = 0; level < kConnectivitySupportLevels; ++level) {
-        // 每个阈值独立从 degree dual 热启动，只激活同层 component cuts 与
-        // 全部静态 local windows。这样短迭代不会因无关 cut 梯度互相稀释。
-        CheckCuda(cudaMemcpy(device_dual.get(), device_degree_dual.get(),
-                             dimension * sizeof(double), cudaMemcpyDeviceToDevice),
-                  "cudaMemcpy resident strong warm start");
+        const double average_cost =
+            static_cast<double>(host_summary[1]) / static_cast<double>(host_summary[0]);
+        const double average_degree =
+            2.0 * static_cast<double>(host_summary[0]) / static_cast<double>(graph.dimension);
+        const double initial_step = std::max(1.0, average_cost / (average_degree + 2.0));
+        const int cut_blocks = (maximum_cut_count + kThreads - 1) / kThreads;
+        CheckCuda(cudaMemset(device_dual.get(), 0, dimension * sizeof(double)),
+                  "cudaMemset resident degree-box dual");
         CheckCuda(cudaMemset(device_average.get(), 0, dimension * sizeof(double)),
-                  "cudaMemset resident strong average");
-        CheckCuda(cudaMemset(device_cut_dual.get(), 0,
-                             static_cast<std::size_t>(maximum_cut_count) * sizeof(double)),
-                  "cudaMemset resident local SEC dual");
-        CheckCuda(cudaMemset(device_cut_average.get(), 0,
-                             static_cast<std::size_t>(maximum_cut_count) * sizeof(double)),
-                  "cudaMemset resident local SEC average");
-        CheckCuda(cudaMemset(device_cut_active.get(), 0,
-                             static_cast<std::size_t>(maximum_cut_count) * sizeof(std::uint8_t)),
-                  "cudaMemset resident active strong cuts");
-        if (local_sec.cut_count != 0) {
-          CheckCuda(
-              cudaMemset(device_cut_active.get(), 1,
-                         static_cast<std::size_t>(local_sec.cut_count) * sizeof(std::uint8_t)),
-              "cudaMemset resident static strong cuts");
-        }
-        const std::int32_t dynamic_cut_offset = local_sec.cut_count + level * graph.dimension;
-        CheckCuda(cudaMemcpy(device_cut_active.get() + dynamic_cut_offset,
-                             device_cut_valid.get() + dynamic_cut_offset,
-                             dimension * sizeof(std::uint8_t), cudaMemcpyDeviceToDevice),
-                  "cudaMemcpy resident dynamic strong cuts");
+                  "cudaMemset resident degree-box average");
+        CheckCuda(cudaMemset(device_quantized_cut.get(), 0,
+                             static_cast<std::size_t>(maximum_cut_count) * sizeof(std::int64_t)),
+                  "cudaMemset resident degree-box cut numerator");
+
+        // 先求纯 degree-box 基线。它本身是完整合法的 Lagrangian dual，
+        // 同时为 strong solve 提供 warm start。
         for (std::uint32_t iteration = 0U; iteration < options.pdlp_iterations; ++iteration) {
           CheckCuda(cudaMemset(device_selected_degree.get(), 0, dimension * sizeof(std::int32_t)),
-                    "cudaMemset resident strong selected degree");
-          CheckCuda(cudaMemset(device_selected_cut.get(), 0,
-                               static_cast<std::size_t>(maximum_cut_count) * sizeof(std::int32_t)),
-                    "cudaMemset resident PDLP selected local SEC");
-          SelectStrongBoxKernel<<<work_blocks, kThreads>>>(
+                    "cudaMemset resident degree-box selected degree");
+          SelectDegreeBoxKernel<<<work_blocks, kThreads>>>(
               work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
               device_edge_weight.get(), device_edge_active.get(), device_dual.get(),
-              device_cut_dual.get(), device_local_sec_incidence_count.get(),
-              device_local_sec_incidence_ids.get(), device_selected_degree.get(),
-              device_selected_cut.get());
+              device_selected_degree.get());
           const double step = initial_step / sqrt(1.0 + static_cast<double>(iteration) / 8.0);
           UpdateResidentDualKernel<<<vertex_blocks, kThreads>>>(
               graph.dimension, device_selected_degree.get(), step, dual_limit, device_dual.get(),
               device_average.get());
-          UpdateLocalSecDualKernel<<<cut_blocks, kThreads>>>(
-              maximum_cut_count, device_selected_cut.get(), device_cut_active.get(), step,
-              dual_limit, device_cut_dual.get(), device_cut_average.get());
         }
+        CheckCuda(cudaMemcpy(device_degree_dual.get(), device_dual.get(),
+                             dimension * sizeof(double), cudaMemcpyDeviceToDevice),
+                  "cudaMemcpy resident degree dual snapshot");
+        CheckCuda(cudaMemset(device_invalid.get(), 0, sizeof(std::int32_t)),
+                  "cudaMemset resident degree-box invalid");
+        std::int64_t* const degree_quantized = device_degree_quantized_dual.get();
+        std::int64_t* const degree_reduced = device_degree_reduced_cost.get();
+        Signed128* const degree_bound = device_degree_lower_bound.get();
         QuantizeResidentDualKernel<<<vertex_blocks, kThreads>>>(
             graph.dimension, 1.0 / static_cast<double>(options.pdlp_iterations),
-            static_cast<double>(denominator), 1.0e15, device_average.get(),
-            device_candidate_quantized_dual.get(), device_invalid.get());
-        QuantizeLocalSecDualKernel<<<cut_blocks, kThreads>>>(
-            maximum_cut_count, 1.0 / static_cast<double>(options.pdlp_iterations),
-            static_cast<double>(denominator), 1.0e15, device_cut_average.get(),
-            device_cut_active.get(), device_candidate_quantized_cut.get(), device_invalid.get());
+            static_cast<double>(denominator), 1.0e15, device_average.get(), degree_quantized,
+            device_invalid.get());
         ReducedCostKernel<<<work_blocks, kThreads>>>(
             work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
-            device_edge_weight.get(), device_edge_active.get(), denominator,
-            device_candidate_quantized_dual.get(), device_candidate_quantized_cut.get(),
-            device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get(),
-            device_candidate_reduced_cost.get());
-        compute_exact_box_bound(work_count, work_edge_ids, device_candidate_quantized_dual.get(),
-                                maximum_cut_count, device_candidate_quantized_cut.get(),
-                                device_candidate_reduced_cost.get(),
-                                device_candidate_lower_bound.get());
-        if (!options.collect_trace) {
-          // decision 与 copy 分成同一 stream 上的两个 kernel，避免跨 block
-          // 一边替换下界一边读取选择标志。kind=0 保留给 degree 基线。
+            device_edge_weight.get(), device_edge_active.get(), denominator, degree_quantized,
+            device_quantized_cut.get(), device_local_sec_incidence_count.get(),
+            device_local_sec_incidence_ids.get(), degree_reduced);
+        compute_exact_box_bound(work_count, work_edge_ids, degree_quantized, 0,
+                                device_quantized_cut.get(), degree_reduced, degree_bound);
+        // 先把 degree 快照发布为当前 best；后续 strong 候选只能由设备端
+        // Signed128 严格比较替换它，因此任意有限迭代都不会导致下界倒退。
+        CheckCuda(cudaMemcpy(device_quantized_dual.get(), degree_quantized,
+                             dimension * sizeof(std::int64_t), cudaMemcpyDeviceToDevice),
+                  "cudaMemcpy resident initial best dual");
+        CheckCuda(cudaMemset(device_quantized_cut.get(), 0,
+                             static_cast<std::size_t>(maximum_cut_count) * sizeof(std::int64_t)),
+                  "cudaMemset resident initial best cut dual");
+        CheckCuda(cudaMemcpy(device_reduced_cost.get(), degree_reduced,
+                             edge_count * sizeof(std::int64_t), cudaMemcpyDeviceToDevice),
+                  "cudaMemcpy resident initial best reduced cost");
+        CheckCuda(cudaMemcpy(device_lower_bound.get(), degree_bound, sizeof(Signed128),
+                             cudaMemcpyDeviceToDevice),
+                  "cudaMemcpy resident initial best lower bound");
+        CheckCuda(cudaMemset(device_selected_lp_snapshot_kind.get(), 0, sizeof(std::int32_t)),
+                  "cudaMemset resident selected LP snapshot kind");
+
+        CheckCuda(cudaDeviceSynchronize(), "resident degree solve timing");
+        result.lp.solver_ms += ElapsedMilliseconds(lp_phase_begin);
+        lp_phase_begin = SteadyClock::now();
+        // P1 多阈值 connectivity separator：阈值只决定候选子集，不参与
+        // 最终授权；每个连通分量都重新物化为合法 δ(S)>=2 行。三层 support
+        // 覆盖严格负 reduced cost、零邻域和略宽正邻域，形成嵌套候选 cuts。
+        CheckCuda(cudaMemset(device_cut_valid.get(), 0,
+                             static_cast<std::size_t>(maximum_cut_count) * sizeof(std::uint8_t)),
+                  "cudaMemset valid SEC cuts");
+        if (local_sec.cut_count != 0) {
+          CheckCuda(
+              cudaMemset(device_cut_valid.get(), 1,
+                         static_cast<std::size_t>(local_sec.cut_count) * sizeof(std::uint8_t)),
+              "cudaMemset static SEC cuts valid");
+        }
+        CheckCuda(cudaMemset(device_connectivity_cut_count.get(), 0, sizeof(unsigned long long)),
+                  "cudaMemset connectivity cut count");
+        // 先恢复静态 local-window incidence，再按层追加 component cuts。
+        BuildLocalSecIncidenceKernel<<<all_edge_blocks, kThreads>>>(
+            static_cast<std::int32_t>(edge_count), device_all_edge_ids.get(), device_edge_u.get(),
+            device_edge_v.get(), device_geometry_rank.get(), local_sec,
+            device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get());
+        const double scaled_support_step = average_cost * static_cast<double>(denominator) / 16.0;
+        if (!std::isfinite(scaled_support_step) ||
+            scaled_support_step > static_cast<double>(INT64_MAX)) {
+          throw std::overflow_error("resident connectivity support 阈值溢出");
+        }
+        const std::int64_t support_step =
+            std::max<std::int64_t>(1, static_cast<std::int64_t>(std::llround(scaled_support_step)));
+        const std::int64_t support_threshold[kConnectivitySupportLevels] = {-support_step, 0,
+                                                                            support_step};
+        for (std::int32_t level = 0; level < kConnectivitySupportLevels; ++level) {
+          InitializeSupportLabelsKernel<<<vertex_blocks, kThreads>>>(graph.dimension,
+                                                                     device_support_label.get());
+          std::int32_t component_changed = 1;
+          std::int32_t component_round = 0;
+          while (component_changed != 0) {
+            if (++component_round > graph.dimension + 1) {
+              throw std::logic_error("GPU support component 标签传播未收敛");
+            }
+            CheckCuda(cudaMemset(device_component_changed.get(), 0, sizeof(std::int32_t)),
+                      "cudaMemset support component changed");
+            RelaxSupportLabelsKernel<<<work_blocks, kThreads>>>(
+                work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+                device_edge_active.get(), degree_reduced, support_threshold[level],
+                device_support_label.get(), device_component_changed.get());
+            CompressSupportLabelsKernel<<<vertex_blocks, kThreads>>>(
+                graph.dimension, device_support_label.get(), device_component_changed.get());
+            device_component_changed.CopyToHost(&component_changed, 1U);
+          }
+          CheckCuda(cudaMemset(device_component_size.get(), 0, dimension * sizeof(std::int32_t)),
+                    "cudaMemset support component sizes");
+          CountSupportComponentsKernel<<<vertex_blocks, kThreads>>>(
+              graph.dimension, device_support_label.get(), device_component_size.get());
+          CheckCuda(cudaMemcpy(device_sec_membership.get() + level * dimension,
+                               device_support_label.get(), dimension * sizeof(std::int32_t),
+                               cudaMemcpyDeviceToDevice),
+                    "封存 SEC 子集成员");
+          const std::int32_t dynamic_cut_offset = local_sec.cut_count + level * graph.dimension;
+          ActivateConnectivityCutsKernel<<<vertex_blocks, kThreads>>>(
+              graph.dimension, dynamic_cut_offset, device_support_label.get(),
+              device_component_size.get(), device_cut_valid.get(),
+              device_connectivity_cut_count.get());
+          AppendConnectivityCutIncidenceKernel<<<work_blocks, kThreads>>>(
+              work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+              device_edge_active.get(), dynamic_cut_offset, device_support_label.get(),
+              device_cut_valid.get(), device_local_sec_incidence_count.get(),
+              device_local_sec_incidence_ids.get(), device_invalid.get());
+        }
+        unsigned long long connectivity_cuts = 0U;
+        device_connectivity_cut_count.CopyToHost(&connectivity_cuts, 1U);
+        result.lp_connectivity_cuts += static_cast<std::size_t>(connectivity_cuts);
+        result.lp.cut_separation_ms += ElapsedMilliseconds(lp_phase_begin);
+        lp_phase_begin = SteadyClock::now();
+
+        const int selection_blocks = std::max({vertex_blocks, work_blocks, cut_blocks});
+        for (std::int32_t level = 0; level < kConnectivitySupportLevels; ++level) {
+          // 每个阈值独立从 degree dual 热启动，只激活同层 component cuts 与
+          // 全部静态 local windows。这样短迭代不会因无关 cut 梯度互相稀释。
+          CheckCuda(cudaMemcpy(device_dual.get(), device_degree_dual.get(),
+                               dimension * sizeof(double), cudaMemcpyDeviceToDevice),
+                    "cudaMemcpy resident strong warm start");
+          CheckCuda(cudaMemset(device_average.get(), 0, dimension * sizeof(double)),
+                    "cudaMemset resident strong average");
+          CheckCuda(cudaMemset(device_cut_dual.get(), 0,
+                               static_cast<std::size_t>(maximum_cut_count) * sizeof(double)),
+                    "cudaMemset resident local SEC dual");
+          CheckCuda(cudaMemset(device_cut_average.get(), 0,
+                               static_cast<std::size_t>(maximum_cut_count) * sizeof(double)),
+                    "cudaMemset resident local SEC average");
+          CheckCuda(cudaMemset(device_cut_active.get(), 0,
+                               static_cast<std::size_t>(maximum_cut_count) * sizeof(std::uint8_t)),
+                    "cudaMemset resident active strong cuts");
+          if (local_sec.cut_count != 0) {
+            CheckCuda(
+                cudaMemset(device_cut_active.get(), 1,
+                           static_cast<std::size_t>(local_sec.cut_count) * sizeof(std::uint8_t)),
+                "cudaMemset resident static strong cuts");
+          }
+          const std::int32_t dynamic_cut_offset = local_sec.cut_count + level * graph.dimension;
+          CheckCuda(cudaMemcpy(device_cut_active.get() + dynamic_cut_offset,
+                               device_cut_valid.get() + dynamic_cut_offset,
+                               dimension * sizeof(std::uint8_t), cudaMemcpyDeviceToDevice),
+                    "cudaMemcpy resident dynamic strong cuts");
+          for (std::uint32_t iteration = 0U; iteration < options.pdlp_iterations; ++iteration) {
+            CheckCuda(cudaMemset(device_selected_degree.get(), 0, dimension * sizeof(std::int32_t)),
+                      "cudaMemset resident strong selected degree");
+            CheckCuda(
+                cudaMemset(device_selected_cut.get(), 0,
+                           static_cast<std::size_t>(maximum_cut_count) * sizeof(std::int32_t)),
+                "cudaMemset resident PDLP selected local SEC");
+            SelectStrongBoxKernel<<<work_blocks, kThreads>>>(
+                work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+                device_edge_weight.get(), device_edge_active.get(), device_dual.get(),
+                device_cut_dual.get(), device_local_sec_incidence_count.get(),
+                device_local_sec_incidence_ids.get(), device_selected_degree.get(),
+                device_selected_cut.get());
+            const double step = initial_step / sqrt(1.0 + static_cast<double>(iteration) / 8.0);
+            UpdateResidentDualKernel<<<vertex_blocks, kThreads>>>(
+                graph.dimension, device_selected_degree.get(), step, dual_limit, device_dual.get(),
+                device_average.get());
+            UpdateLocalSecDualKernel<<<cut_blocks, kThreads>>>(
+                maximum_cut_count, device_selected_cut.get(), device_cut_active.get(), step,
+                dual_limit, device_cut_dual.get(), device_cut_average.get());
+          }
+          QuantizeResidentDualKernel<<<vertex_blocks, kThreads>>>(
+              graph.dimension, 1.0 / static_cast<double>(options.pdlp_iterations),
+              static_cast<double>(denominator), 1.0e15, device_average.get(),
+              device_candidate_quantized_dual.get(), device_invalid.get());
+          QuantizeLocalSecDualKernel<<<cut_blocks, kThreads>>>(
+              maximum_cut_count, 1.0 / static_cast<double>(options.pdlp_iterations),
+              static_cast<double>(denominator), 1.0e15, device_cut_average.get(),
+              device_cut_active.get(), device_candidate_quantized_cut.get(), device_invalid.get());
+          ReducedCostKernel<<<work_blocks, kThreads>>>(
+              work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+              device_edge_weight.get(), device_edge_active.get(), denominator,
+              device_candidate_quantized_dual.get(), device_candidate_quantized_cut.get(),
+              device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get(),
+              device_candidate_reduced_cost.get());
+          compute_exact_box_bound(work_count, work_edge_ids, device_candidate_quantized_dual.get(),
+                                  maximum_cut_count, device_candidate_quantized_cut.get(),
+                                  device_candidate_reduced_cost.get(),
+                                  device_candidate_lower_bound.get());
+          if (!options.collect_trace) {
+            // decision 与 copy 分成同一 stream 上的两个 kernel，避免跨 block
+            // 一边替换下界一边读取选择标志。kind=0 保留给 degree 基线。
+            DecideBetterLpSnapshotKernel<<<1, 1>>>(
+                device_candidate_lower_bound.get(), device_lower_bound.get(), level + 1, false,
+                device_selected_lp_snapshot_kind.get(), device_apply_lp_snapshot.get());
+            ApplyBetterLpSnapshotKernel<<<selection_blocks, kThreads>>>(
+                graph.dimension, work_count, work_edge_ids, maximum_cut_count,
+                device_candidate_quantized_dual.get(), device_candidate_quantized_cut.get(),
+                device_candidate_reduced_cost.get(), device_quantized_dual.get(),
+                device_quantized_cut.get(), device_reduced_cost.get(),
+                device_apply_lp_snapshot.get());
+          }
+        }
+
+        if (primal_dual_solver != nullptr) {
+          CheckCuda(cudaDeviceSynchronize(), "resident SEC ensemble timing");
+          result.lp.solver_ms += ElapsedMilliseconds(lp_phase_begin);
+          const auto model_begin = SteadyClock::now();
+          const SparsePdhgDeviceModel model = primal_dual_model->Build(
+              snapshot.graph, device_edge_weight.get(), work_count, work_edge_ids,
+              maximum_cut_count, local_sec.cut_count, device_cut_valid.get(),
+              device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get(),
+              kMaxLocalSecIncidence, snapshot.sequence + 1U);
+          CheckCuda(cudaDeviceSynchronize(), "resident sparse LP model synchronize");
+          result.lp.pdhg_model_ms += ElapsedMilliseconds(model_begin);
+          lp_phase_begin = SteadyClock::now();
+          const SparsePdhgDiagnostics diagnostics = primal_dual_solver->Iterate(
+              model, std::max(1.0, average_cost), options.pdlp_iterations);
+          result.lp.pdhg_iterations += diagnostics.iterations;
+          result.lp.pdhg_ms += diagnostics.solve_ms;
+          result.lp.pdhg_primal_violation = diagnostics.primal_violation;
+          result.lp.pdhg_relative_gap = diagnostics.relative_gap;
+          const int dual_blocks = static_cast<int>(
+              (static_cast<std::int64_t>(graph.dimension) + maximum_cut_count + kThreads - 1) /
+              kThreads);
+          QuantizeSparsePdhgDualKernel<<<dual_blocks, kThreads>>>(
+              graph.dimension, maximum_cut_count, primal_dual_solver->dual(),
+              std::max(1.0, average_cost), denominator, device_cut_valid.get(),
+              device_candidate_quantized_dual.get(), device_candidate_quantized_cut.get(),
+              device_invalid.get());
+          ReducedCostKernel<<<work_blocks, kThreads>>>(
+              work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
+              device_edge_weight.get(), device_edge_active.get(), denominator,
+              device_candidate_quantized_dual.get(), device_candidate_quantized_cut.get(),
+              device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get(),
+              device_candidate_reduced_cost.get());
+          compute_exact_box_bound(work_count, work_edge_ids, device_candidate_quantized_dual.get(),
+                                  maximum_cut_count, device_candidate_quantized_cut.get(),
+                                  device_candidate_reduced_cost.get(),
+                                  device_candidate_lower_bound.get());
           DecideBetterLpSnapshotKernel<<<1, 1>>>(
-              device_candidate_lower_bound.get(), device_lower_bound.get(), level + 1, false,
+              device_candidate_lower_bound.get(), device_lower_bound.get(), 4, false,
               device_selected_lp_snapshot_kind.get(), device_apply_lp_snapshot.get());
           ApplyBetterLpSnapshotKernel<<<selection_blocks, kThreads>>>(
               graph.dimension, work_count, work_edge_ids, maximum_cut_count,
@@ -5860,72 +6080,29 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
               device_candidate_reduced_cost.get(), device_quantized_dual.get(),
               device_quantized_cut.get(), device_reduced_cost.get(),
               device_apply_lp_snapshot.get());
+          const std::uint64_t workspace =
+              primal_dual_model->workspace_bytes() + primal_dual_solver->workspace_bytes();
+          if (workspace > primal_dual_workspace_bytes) {
+            result.resident_bytes += workspace - primal_dual_workspace_bytes;
+            primal_dual_workspace_bytes = workspace;
+          }
         }
-      }
-
-      if (primal_dual_solver != nullptr) {
-        CheckCuda(cudaDeviceSynchronize(), "resident SEC ensemble timing");
-        result.lp.solver_ms += ElapsedMilliseconds(lp_phase_begin);
-        const auto model_begin = SteadyClock::now();
-        const SparsePdhgDeviceModel model = primal_dual_model->Build(
-            snapshot.graph, device_edge_weight.get(), work_count, work_edge_ids, maximum_cut_count,
-            local_sec.cut_count, device_cut_valid.get(), device_local_sec_incidence_count.get(),
-            device_local_sec_incidence_ids.get(), kMaxLocalSecIncidence, snapshot.sequence + 1U);
-        CheckCuda(cudaDeviceSynchronize(), "resident sparse LP model synchronize");
-        result.lp.pdhg_model_ms += ElapsedMilliseconds(model_begin);
-        lp_phase_begin = SteadyClock::now();
-        const SparsePdhgDiagnostics diagnostics = primal_dual_solver->Iterate(
-            model, std::max(1.0, average_cost), options.pdlp_iterations);
-        result.lp.pdhg_iterations += diagnostics.iterations;
-        result.lp.pdhg_ms += diagnostics.solve_ms;
-        result.lp.pdhg_primal_violation = diagnostics.primal_violation;
-        result.lp.pdhg_relative_gap = diagnostics.relative_gap;
-        const int dual_blocks = static_cast<int>(
-            (static_cast<std::int64_t>(graph.dimension) + maximum_cut_count + kThreads - 1) /
-            kThreads);
-        QuantizeSparsePdhgDualKernel<<<dual_blocks, kThreads>>>(
-            graph.dimension, maximum_cut_count, primal_dual_solver->dual(),
-            std::max(1.0, average_cost), denominator, device_cut_valid.get(),
-            device_candidate_quantized_dual.get(), device_candidate_quantized_cut.get(),
-            device_invalid.get());
-        ReducedCostKernel<<<work_blocks, kThreads>>>(
-            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
-            device_edge_weight.get(), device_edge_active.get(), denominator,
-            device_candidate_quantized_dual.get(), device_candidate_quantized_cut.get(),
-            device_local_sec_incidence_count.get(), device_local_sec_incidence_ids.get(),
-            device_candidate_reduced_cost.get());
-        compute_exact_box_bound(work_count, work_edge_ids, device_candidate_quantized_dual.get(),
-                                maximum_cut_count, device_candidate_quantized_cut.get(),
-                                device_candidate_reduced_cost.get(),
-                                device_candidate_lower_bound.get());
-        DecideBetterLpSnapshotKernel<<<1, 1>>>(
-            device_candidate_lower_bound.get(), device_lower_bound.get(), 4, false,
-            device_selected_lp_snapshot_kind.get(), device_apply_lp_snapshot.get());
-        ApplyBetterLpSnapshotKernel<<<selection_blocks, kThreads>>>(
-            graph.dimension, work_count, work_edge_ids, maximum_cut_count,
-            device_candidate_quantized_dual.get(), device_candidate_quantized_cut.get(),
-            device_candidate_reduced_cost.get(), device_quantized_dual.get(),
-            device_quantized_cut.get(), device_reduced_cost.get(), device_apply_lp_snapshot.get());
-        const std::uint64_t workspace =
-            primal_dual_model->workspace_bytes() + primal_dual_solver->workspace_bytes();
-        if (workspace > primal_dual_workspace_bytes) {
-          result.resident_bytes += workspace - primal_dual_workspace_bytes;
-          primal_dual_workspace_bytes = workspace;
-        }
-      }
-      LpForcedOneKernel<<<work_blocks, kThreads>>>(
-          work_count, device_edge_u.get(), work_edge_ids, device_edge_v.get(),
-          device_edge_active.get(), device_protected.get(), device_degree.get(),
-          device_reduced_cost.get(), device_lower_bound.get(), options.incumbent_cost * denominator,
-          device_proposed.get());
-      CheckCuda(cudaDeviceSynchronize(), "resident LP solve timing");
-      result.lp.solver_ms += ElapsedMilliseconds(lp_phase_begin);
-      lp_phase_begin = SteadyClock::now();
-      if (options.enable_fixing) {
-        LpForcedZeroKernel<<<work_blocks, kThreads>>>(
-            work_count, work_edge_ids, device_edge_active.get(), device_protected.get(),
+        LpForcedOneKernel<<<work_blocks, kThreads>>>(
+            work_count, device_edge_u.get(), work_edge_ids, device_edge_v.get(),
+            device_edge_active.get(), device_protected.get(), device_degree.get(),
             device_reduced_cost.get(), device_lower_bound.get(),
-            options.incumbent_cost * denominator, device_fixed_proposed.get());
+            options.incumbent_cost * denominator, device_proposed.get());
+        CheckCuda(cudaDeviceSynchronize(), "resident LP solve timing");
+        result.lp.solver_ms += ElapsedMilliseconds(lp_phase_begin);
+        lp_phase_begin = SteadyClock::now();
+      } // LP 关闭时仍执行后面的完整 pair/fixing 服务，不构造伪 LP 下界。
+      if (options.enable_fixing) {
+        if (options.enable_pdlp) {
+          LpForcedZeroKernel<<<work_blocks, kThreads>>>(
+              work_count, work_edge_ids, device_edge_active.get(), device_protected.get(),
+              device_reduced_cost.get(), device_lower_bound.get(),
+              options.incumbent_cost * denominator, device_fixed_proposed.get());
+        }
         if (snapshot.graph.pair_offsets != nullptr && snapshot.graph.nonpair_mask != nullptr) {
           NonpairImpliedFixKernel<<<work_blocks, kThreads>>>(
               work_count, work_edge_ids, snapshot.graph, device_protected.get(),
@@ -5934,9 +6111,8 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
           CheckCuda(cudaGetLastError(), "NonpairImpliedFixKernel launch");
           if (options.enable_direct_fix && pair_service_stage) {
             DirectFixKernel<<<work_count, kThreads>>>(
-                work_count, work_edge_ids, snapshot.graph, device_protected.get(),
-                device_reduced_cost.get(), device_lower_bound.get(),
-                options.incumbent_cost * denominator, device_fixed_proposed.get(),
+                work_count, work_edge_ids, snapshot.graph, device_protected.get(), pair_reduced,
+                pair_bound, lp_incumbent_numerator, device_fixed_proposed.get(),
                 device_fixed_reason.get(), device_lp_path_closed_replies.get(),
                 device_direct_fix_proposal_count.get());
             CheckCuda(cudaGetLastError(), "DirectFixKernel launch");
@@ -5962,12 +6138,14 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
         CheckCuda(
             cudaMemset(device_nonpair_proposal_counts.get(), 0, 3U * sizeof(unsigned long long)),
             "cudaMemset resident nonpair proposal counts");
-        LpNonpairKernel<<<graph.dimension, kThreads>>>(
-            snapshot.graph, device_reduced_cost.get(), device_lower_bound.get(),
-            options.incumbent_cost * denominator, device_pair_offsets.get(),
-            device_nonpair_mask.get(), device_nonpair_proposed.get(),
-            device_nonpair_proposal_counts.get());
-        CheckCuda(cudaGetLastError(), "LpNonpairKernel launch");
+        if (options.enable_pdlp) {
+          LpNonpairKernel<<<graph.dimension, kThreads>>>(
+              snapshot.graph, device_reduced_cost.get(), device_lower_bound.get(),
+              options.incumbent_cost * denominator, device_pair_offsets.get(),
+              device_nonpair_mask.get(), device_nonpair_proposed.get(),
+              device_nonpair_proposal_counts.get());
+          CheckCuda(cudaGetLastError(), "LpNonpairKernel launch");
+        }
         CheckCuda(cub::DeviceSelect::Flagged(
                       device_active_select_temp.get(), active_select_temp_bytes,
                       device_all_edge_ids.get(), device_fixed.get(), device_fixed_edge_ids.get(),
@@ -5989,9 +6167,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
             PointNonpairKernel<MinBlocks><<<static_cast<unsigned int>(point_blocks), kThreads>>>(
                 current_pair_count, snapshot.graph, device_pair_offsets.get(),
                 device_nonpair_mask.get(), device_nonpair_proposed.get(),
-                device_nonpair_point_witness.get(), device_reduced_cost.get(),
-                device_lower_bound.get(), options.incumbent_cost * denominator,
-                device_lp_path_closed_replies.get(), device_point_path_end_closed_replies.get(),
+                device_nonpair_point_witness.get(), pair_reduced, pair_bound,
+                lp_incumbent_numerator, device_lp_path_closed_replies.get(),
+                device_point_path_end_closed_replies.get(),
                 device_nonpair_proposal_counts.get() + 2);
           };
           if (options.point_cta_blocks == 4U) {
@@ -6006,13 +6184,15 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
       }
       CheckCuda(cudaDeviceSynchronize(), "resident PDLP proof synchronize");
       std::int32_t invalid = 0;
-      device_invalid.CopyToHost(&invalid, 1U);
-      if (invalid != 0) {
-        throw std::runtime_error("resident PDLP dual 超出量化安全范围");
+      if (options.enable_pdlp) {
+        device_invalid.CopyToHost(&invalid, 1U);
+        if (invalid != 0) {
+          throw std::runtime_error("resident PDLP dual 超出量化安全范围");
+        }
+        // selected dual、reduced costs 与 gpu-safe replay 副本至此已经完整
+        // 验证；后续 local epoch 可把它作为不可变 path-system 下界消费。
+        lp_snapshot_ready = true;
       }
-      // selected dual、reduced costs 与 gpu-safe replay 副本至此已经完整
-      // 验证；后续 local epoch 可把它作为不可变 path-system 下界消费。
-      lp_snapshot_ready = true;
       if (pair_count != 0U) {
         unsigned long long proposal_counts[3]{};
         device_nonpair_proposal_counts.CopyToHost(proposal_counts, 3U);
@@ -6039,7 +6219,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     // proposal、replay、commit 分别计时，避免异步 kernel 的耗时被后续
     // commit 同步重复吸收，导致阶段画像和总耗时无法比较。
     const double device_ms = ElapsedMilliseconds(kernel_begin);
-    if (method == EliminationMethod::kLpBox) {
+    if (method == EliminationMethod::kLpBox && options.enable_pdlp) {
       Signed128 host_lower_bound{};
       device_lower_bound.CopyToHost(&host_lower_bound, 1U);
       // 这里只生成人类可读 telemetry；证明比较始终使用 device Signed128。
@@ -6058,8 +6238,8 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
       }
     }
 
-    const Signed128* replay_lower_bound = device_lower_bound.get();
-    if (method == EliminationMethod::kLpBox && options.gpu_replay) {
+    const Signed128* replay_lower_bound = options.enable_pdlp ? device_lower_bound.get() : nullptr;
+    if (method == EliminationMethod::kLpBox && options.gpu_replay && options.enable_pdlp) {
       const SteadyClock::time_point replay_begin = SteadyClock::now();
       CheckCuda(cudaMemset(device_sec_replay_sizes.get(), 0, device_sec_replay_sizes.bytes()),
                 "清零 SEC replay 子集计数");
@@ -6131,9 +6311,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
           ReplayDirectFixKernel<<<work_count, kThreads>>>(
               work_count, work_edge_ids, snapshot.graph, device_protected.get(),
               device_fixed_proposed.get(), device_fixed_reason.get(),
-              device_replay_reduced_cost.get(), replay_lower_bound,
-              options.incumbent_cost * denominator, device_fixed_verified.get(),
-              device_replay_counters.get(), device_replay_counters.get() + 1);
+              options.enable_pdlp ? device_replay_reduced_cost.get() : nullptr, replay_lower_bound,
+              lp_incumbent_numerator, device_fixed_verified.get(), device_replay_counters.get(),
+              device_replay_counters.get() + 1);
           CheckCuda(cudaGetLastError(), "resident direct fixed replay launch");
         }
         CheckCuda(cudaDeviceSynchronize(), "resident LP fixed replay synchronize");
@@ -6170,9 +6350,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
           ReplayPointNonpairKernel<<<static_cast<unsigned int>(point_blocks), kThreads>>>(
               current_pair_count, snapshot.graph, device_pair_offsets.get(),
               device_nonpair_proposed.get(), device_nonpair_point_witness.get(),
-              device_replay_reduced_cost.get(), replay_lower_bound,
-              options.incumbent_cost * denominator, device_nonpair_verified.get(),
-              device_replay_counters.get(), device_replay_counters.get() + 1);
+              options.enable_pdlp ? device_replay_reduced_cost.get() : nullptr, replay_lower_bound,
+              lp_incumbent_numerator, device_nonpair_verified.get(), device_replay_counters.get(),
+              device_replay_counters.get() + 1);
           CheckCuda(cudaGetLastError(), "ReplayPointNonpairKernel launch");
         }
         CheckCuda(cudaDeviceSynchronize(), "resident LP nonpair replay synchronize");
@@ -6217,14 +6397,21 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
               lp_replay_reduced_cost, lp_replay_bound, lp_incumbent_numerator);
         }
       } else if (main_edge_stage) {
-        MainEdgeContinuationKernel<true><<<work_count, kThreads>>>(
-            work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
-            device_edge_active.get(), device_protected.get(), snapshot.graph, device_x.get(),
-            device_y.get(), device_geometry_kd.get(), 0,
-            static_cast<std::int32_t>(options.main_edge_potentials), main_position,
-            static_cast<std::int32_t>(options.main_edge_positions + 1U),
-            options.enable_strong_metric, device_proposed.get(), device_verified.get(), nullptr,
-            nullptr, device_replay_counters.get(), device_replay_counters.get() + 1);
+        for (std::int32_t begin = 0; begin < work_count; begin += main_batch_size) {
+          const auto batch_count = std::min(main_batch_size, work_count - begin);
+          MainEdgeContinuationKernel<true><<<batch_count, kThreads>>>(
+              batch_count, work_edge_ids + begin, device_edge_u.get(), device_edge_v.get(),
+              device_edge_active.get(), device_protected.get(), snapshot.graph, device_x.get(),
+              device_y.get(), device_geometry_kd.get(), 0,
+              static_cast<std::int32_t>(options.main_edge_potentials), main_position,
+              static_cast<std::int32_t>(options.main_edge_positions + 1U),
+              options.enable_strong_metric, device_proposed.get(), device_verified.get(),
+              device_first_witness.get(), device_second_witness.get(), device_replay_counters.get(),
+              device_replay_counters.get() + 1,
+              options.main_pair_cache ? device_main_pair_cache.get() : nullptr, main_pair_words,
+              options.full_metric);
+          CheckCuda(cudaGetLastError(), "Main cached replay batch launch");
+        }
       } else if (method == EliminationMethod::kJv) {
         ReplayJvKernel<<<work_blocks, kThreads>>>(
             work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
@@ -6251,7 +6438,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
             device_edge_active.get(), device_protected.get(), device_fixed_degree.get(),
             device_proposed.get(), device_verified.get(), device_replay_counters.get(),
             device_replay_counters.get() + 1);
-      } else if (method == EliminationMethod::kLpBox) {
+      } else if (method == EliminationMethod::kLpBox && options.enable_pdlp) {
         ReplayLpKernel<<<work_blocks, kThreads>>>(
             work_count, work_edge_ids, device_edge_u.get(), device_edge_v.get(),
             device_edge_weight.get(), device_edge_active.get(), device_protected.get(),
@@ -6553,6 +6740,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   if (options.enable_geometry) {
     const std::size_t committed = run_epoch(EliminationMethod::kGeometryMain);
     result.geometry_committed += committed;
+    // 即使 geometry 没有删除边，小图也需将初始编号顺序转换为成本顺序。
+    if (options.gpu_complete_graph)
+      adjacency_dirty = true;
   }
 
   bool orchestration_converged = false;
@@ -6571,7 +6761,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   bool point_service_ready = (!options.enable_point_nonpair && !options.enable_direct_fix) ||
                              current_pair_count <= edge_frontier;
   std::uint32_t orchestration = 0U;
-  while (options.enable_main_edge || options.enable_extra_edge ||
+  const bool pair_services =
+      options.enable_point_nonpair || options.enable_direct_fix || options.enable_fixing;
+  while (options.enable_main_edge || options.enable_extra_edge || pair_services ||
          (!options.enable_pdlp && orchestration == 0U) ||
          (options.enable_pdlp &&
           (options.max_pdlp_epochs == 0U || orchestration < options.max_pdlp_epochs))) {
@@ -6579,8 +6771,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     const std::size_t edges_before = current_edges;
     const std::size_t nonpairs_before = result.nonpair_committed;
     const std::size_t fixed_before = result.fixed_count;
-    if (options.enable_pdlp) {
-      ++result.pdlp_epochs;
+    if (options.enable_pdlp || pair_services) {
+      if (options.enable_pdlp)
+        ++result.pdlp_epochs;
       const std::size_t committed =
           run_epoch(EliminationMethod::kLpBox, false, 0, false, nullptr, -1, point_service_ready);
       result.lp_committed += committed;
@@ -6673,7 +6866,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
       point_service_ready = true;
       continue;
     }
-    if (!options.enable_pdlp ||
+    if ((!options.enable_pdlp && !pair_services) ||
         (current_edges == edges_before && result.nonpair_committed == nonpairs_before &&
          result.fixed_count == fixed_before)) {
       orchestration_converged = true;

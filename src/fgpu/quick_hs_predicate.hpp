@@ -51,6 +51,9 @@ struct GraphView {
   std::uint8_t distance_type{};
   bool complete_graph{};
   PointLeafKernel point_leaf_kernel{PointLeafKernel::kPermutation};
+  // 全实例不可变三角距离缓存，含已删除边；不能从稀疏 CSR 推断距离。
+  const std::int64_t* triangular_distance{};
+  std::uint32_t coordinate_denominator{1U};
 };
 
 struct Witness {
@@ -176,6 +179,15 @@ CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::uint64_t IntegerSqrtFloor(std::ui
 
 CUDAEE_QUICK_HS_HD CUDAEE_QUICK_HS_INLINE std::int64_t
 Distance(const GraphView& graph, const std::int32_t a, const std::int32_t b) {
+  if (a == b) {
+    return 0;
+  }
+  if (graph.triangular_distance != nullptr) {
+    const std::int64_t first = a < b ? a : b;
+    const std::int64_t second = a < b ? b : a;
+    return graph
+        .triangular_distance[first * (2LL * graph.dimension - first - 1) / 2 + second - first - 1];
+  }
   if (graph.distance != nullptr) {
     return graph.distance[static_cast<std::int64_t>(a) * graph.dimension + b];
   }
@@ -185,6 +197,14 @@ Distance(const GraphView& graph, const std::int32_t a, const std::int32_t b) {
   const std::uint64_t absolute_y = static_cast<std::uint64_t>(dy < 0 ? -dy : dy);
   const std::uint64_t squared = absolute_x * absolute_x + absolute_y * absolute_y;
   const std::uint64_t root = IntegerSqrtFloor(squared);
+  if (graph.coordinate_denominator == 2U) {
+    // EUC: sqrt(S)/2 >= k+1/2 等价于 floor(sqrt(S)) >= 2k+1。
+    // CEIL: 只有 S=(2k)^2 才不进位；绝不先舍入坐标或除法。
+    if (graph.distance_type == 0U)
+      return static_cast<std::int64_t>((root + 1U) / 2U);
+    const std::uint64_t even = (root / 2U) * 2U;
+    return static_cast<std::int64_t>(root / 2U + (squared != even * even));
+  }
   std::uint64_t rounded = root;
   if (graph.distance_type == 0U) {
     // EUC_2D: S-r^2 > r 与 sqrt(S) >= r+0.5 等价。
@@ -340,8 +360,7 @@ Opt23(const GraphView& graph, const std::int32_t a, const std::int32_t b, const 
     const SmallPath triangle{.size = 3, .node = {a, c, b}};
     return ClosedPathsMayCoverWholeGraph(graph, triangle);
   }
-  if (cab + cc1c + ccc2 >
-      Distance(graph, a, c) + Distance(graph, c, b) + Distance(graph, c1, c2)) {
+  if (cab + cc1c + ccc2 > Distance(graph, a, c) + Distance(graph, c, b) + Distance(graph, c1, c2)) {
     return false;
   }
   // 对齐 KH 默认 strong_3_opt=0 的两个固定边门禁。

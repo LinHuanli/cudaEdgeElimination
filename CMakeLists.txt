@@ -61,6 +61,7 @@ if(CUDAEE_ENABLE_CUDA)
   endif()
   enable_language(CUDA)
   list(APPEND CUDAEE_SOURCES
+      src/cuda/gpu_bootstrap.cu
       src/cuda/runtime_identity.cu
       src/cuda/sparse_pdhg.cu
       src/cuda/resident_lp_model.cu
@@ -77,6 +78,7 @@ if(CUDAEE_ENABLE_CUDA)
       src/cuda/path_compatibility.cu)
 else()
   list(APPEND CUDAEE_SOURCES
+      src/cuda/gpu_bootstrap_stub.cpp
       src/cuda/sparse_pdhg_stub.cpp
       src/cuda/device_affinity_stub.cpp
       src/cuda/exact_tour_dp_stub.cpp

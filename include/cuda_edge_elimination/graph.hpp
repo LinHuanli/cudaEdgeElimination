@@ -16,6 +16,8 @@ public:
                             const std::filesystem::path& edge_path);
   // 从 TSPLIB 坐标直接构造规范排序的完全图，供端到端删边实验使用。
   static GraphSnapshot LoadComplete(const std::filesystem::path& tsp_path);
+  // 仅解析原始坐标；GPU bootstrap 负责完整图与距离构造。
+  static GraphSnapshot LoadCoordinates(const std::filesystem::path& tsp_path);
 
   void RebuildCsr();
   void WriteActiveEdges(const std::filesystem::path& path) const;
@@ -30,6 +32,8 @@ public:
   DistanceType distance_type{DistanceType::kEuc2D};
   bool integer_coordinates{false};
   bool integer_distance_safe{false};
+  // 原始坐标不改写；半整数实例用 integer_x/y 存 2*x/2*y 的精确分子。
+  std::uint32_t integer_coordinate_denominator{1U};
   std::vector<Point> points;
   std::vector<Edge> edges;
   std::vector<std::int32_t> row_offsets;

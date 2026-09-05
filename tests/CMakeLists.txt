@@ -1,6 +1,14 @@
 find_package(Python3 COMPONENTS Interpreter QUIET)
 
 if(Python3_Interpreter_FOUND)
+  add_test(NAME unit.hybrid_protocol
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_hybrid_protocol.py")
+  set_tests_properties(unit.hybrid_protocol PROPERTIES
+    LABELS "correctness;reproducibility" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+  add_test(NAME unit.hs2014_data
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_hs2014_data.py")
+  set_tests_properties(unit.hs2014_data PROPERTIES
+    LABELS "correctness;reproducibility" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
   add_test(NAME unit.fgpu_benchmark
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_benchmark_fgpu.py")
   set_tests_properties(unit.fgpu_benchmark PROPERTIES
@@ -44,6 +52,16 @@ target_compile_options(cudaee_transaction_unit PRIVATE -Wall -Wextra -Wconversio
 add_test(NAME unit.resident_transaction COMMAND cudaee_transaction_unit)
 set_tests_properties(unit.resident_transaction PROPERTIES LABELS "correctness;transaction")
 if(CUDAEE_ENABLE_CUDA)
+  add_executable(cudaee_main_metric_unit unit/test_main_metric.cu)
+  target_include_directories(cudaee_main_metric_unit PRIVATE "${PROJECT_SOURCE_DIR}/include")
+  set_target_properties(cudaee_main_metric_unit PROPERTIES
+    CUDA_ARCHITECTURES "${CUDAEE_CUDA_ARCHITECTURES}" CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON)
+  add_test(NAME unit.main_metric COMMAND cudaee_main_metric_unit)
+  set_tests_properties(unit.main_metric PROPERTIES LABELS "correctness;gpu;metric" SKIP_RETURN_CODE 77)
+  add_executable(cudaee_gpu_bootstrap_unit unit/test_gpu_bootstrap.cpp)
+  target_link_libraries(cudaee_gpu_bootstrap_unit PRIVATE cudaee_core)
+  add_test(NAME unit.gpu_bootstrap COMMAND cudaee_gpu_bootstrap_unit)
+  set_tests_properties(unit.gpu_bootstrap PROPERTIES LABELS "correctness;gpu;bootstrap" SKIP_RETURN_CODE 77)
   set_tests_properties(unit.core PROPERTIES LABELS "correctness;gpu")
   add_executable(cudaee_transaction_cuda_unit unit/test_resident_transaction_cuda.cu)
   target_link_libraries(cudaee_transaction_cuda_unit PRIVATE cudaee_core)
@@ -62,6 +80,11 @@ if(CUDAEE_ENABLE_CUDA)
   add_test(NAME unit.sec_replay COMMAND cudaee_sec_replay_unit)
   set_tests_properties(unit.sec_replay PROPERTIES LABELS "correctness;gpu;lp;replay" SKIP_RETURN_CODE 77)
   if(Python3_Interpreter_FOUND)
+    add_test(NAME exhaustive.fgpu_hybrid
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/exhaustive/check_fgpu_hybrid.py"
+        "$<TARGET_FILE:fgpu-elim>" "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-hybrid")
+    set_tests_properties(exhaustive.fgpu_hybrid PROPERTIES
+      LABELS "correctness;gpu;fgpu;exhaustive" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     add_test(NAME exhaustive.fgpu_variants
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/exhaustive/check_fgpu_variants.py"
         "$<TARGET_FILE:fgpu-elim>" "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-variants")

@@ -195,6 +195,11 @@ struct FgpuOutputPaths {
 // 正式单 GPU 主链不暴露阶段开关或搜索预算；所有服务运行到
 // 联合不动点。device=-1 时选择当前可见且剩余显存最多的一张卡。
 struct FgpuSolveOptions {
+  bool hybrid_e2e{false};
+  bool enable_lp{true};
+  bool distance_cache{true};
+  bool main_pair_cache{true};
+  bool full_metric{true};
   int device{-1};
   FgpuSolveMode mode{FgpuSolveMode::kGpuSafe};
   bool serialize_certificate{false};
@@ -206,6 +211,7 @@ struct FgpuSolveOptions {
 };
 
 struct FgpuSolveReport {
+  FgpuBootstrapMetrics bootstrap;
   FgpuLpMetrics lp;
   FgpuTermination termination{FgpuTermination::kFixedPoint};
   bool gpu_replayed{false};
@@ -266,6 +272,10 @@ struct FgpuRunReport {
 // 显式的单 GPU 常驻搜索。默认是无证书、无 CPU 逐边审计的全量 raw 路径；
 // 如需正式认证可显式打开审计。raw 输出必须标记为 unaudited，不得冒充认证结果。
 struct FgpuResidentConfig {
+  bool hybrid_e2e{false};
+  bool distance_cache{true};
+  bool main_pair_cache{false};
+  bool full_metric{false};
   int device{0};
   // 三个 max 字段取 0 时表示不设人为上限，运行到自然固定点。
   std::uint32_t max_hs_epochs{0U};
@@ -306,6 +316,7 @@ struct FgpuResidentConfig {
 };
 
 struct FgpuResidentRunReport {
+  FgpuBootstrapMetrics bootstrap;
   FgpuLpMetrics lp;
   std::uint64_t initial_hash{};
   std::uint64_t final_hash{};
@@ -346,6 +357,7 @@ struct FgpuResidentRunReport {
   bool cpu_audited{false};
   int selected_device{-1};
   std::uint64_t resident_bytes{};
+  std::uint64_t main_pair_cache_bytes{};
   double upload_ms{};
   double gpu_kernel_ms{};
   double geometry_ms{};
