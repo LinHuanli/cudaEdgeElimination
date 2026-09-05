@@ -45,18 +45,21 @@ def main():
                      for permutation, near in (("0", "1"), ("1", "0"), ("1", "1"))]
         variants = [(*v, "0") for v in variants]
         variants += [(lp, "1", "1", "1", "1", "1", "1") for lp in ("off", "primal-dual-sec")]
+        variants = [(*v, "0") for v in variants]
+        variants += [(lp, "1", "1", "1", "1", "1", "1", "1") for lp in ("off", "primal-dual-sec")]
         # 大成本路径的精确性与浮点 LP 量化域分开检查；不放宽 LP 的安全范围。
         large_cost = max(max(abs(x), abs(y)) for x, y in points) >= 100000000
         if large_cost:
             variants = [v for v in variants if v[0] == "off"]
-        for lp, cache, pair_cache, full_metric, permutation, near, adaptive in variants:
-            target = directory / f"{lp}-cache{cache}-pair{pair_cache}-metric{full_metric}-perm{permutation}-near{near}-adaptive{adaptive}"
+        for lp, cache, pair_cache, full_metric, permutation, near, adaptive, prime in variants:
+            target = directory / f"{lp}-cache{cache}-pair{pair_cache}-metric{full_metric}-perm{permutation}-near{near}-adaptive{adaptive}-prime{prime}"
             target.mkdir(exist_ok=True)
             command = [str(exe), "solve", "--profile", "hybrid-e2e", "--instance", str(tsp),
                        "--device", "0", "--lp-backend", lp, "--distance-cache", cache,
                        "--main-pair-cache", pair_cache, "--full-metric", full_metric,
                        "--leaf-permutation-cache", permutation, "--point-near-first", near,
                        "--point-adaptive-start", adaptive,
+                       "--point-prime-near", prime,
                        "--output-edges", str(target / "out.edg"), "--fixed", str(target / "out.fix"),
                        "--nonpairs", str(target / "out.nonpairs"), "--manifest", str(target / "out.json")]
             result = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -81,10 +84,23 @@ def main():
             assert report["leaf_permutation_cache"] == (permutation == "1")
             assert report["point_near_first"] == (near == "1")
             assert report["point_adaptive_start"] == (adaptive == "1")
+            assert report["point_prime_near"] == (prime == "1")
             key = (lp, full_metric)
             if key in hashes:
                 assert hashes[key] == report["final_state_hash"], "缓存或点顺序改变了终态"
             hashes[key] = report["final_state_hash"]
+        if case == 0:
+            # 预热只在 near-first + adaptive-start 下有定义；非法组合在创建输出前拒绝。
+            for disabled in ("--point-near-first", "--point-adaptive-start"):
+                invalid = command.copy()
+                invalid[invalid.index(disabled) + 1] = "0"
+                rejected_directory = directory / disabled.removeprefix("--")
+                for flag, filename in (("--output-edges", "out.edg"), ("--fixed", "out.fix"),
+                                       ("--nonpairs", "out.nonpairs"), ("--manifest", "out.json")):
+                    invalid[invalid.index(flag) + 1] = str(rejected_directory / filename)
+                rejected = subprocess.run(invalid, capture_output=True, text=True)
+                assert rejected.returncode != 0 and "近点预热需要" in rejected.stderr
+                assert not rejected_directory.exists()
         # 普通非最优 incumbent 可被合法删除，不能因 final nonpair 冲突报错。
         bad_tour = directory / "nonoptimal.tour"
         candidate = next((p for p in itertools.permutations(range(n)) if
@@ -99,7 +115,8 @@ def main():
                 legacy[legacy.index(flag) + 1] = str(legacy_directory / filename)
             legacy[legacy.index("--profile") + 1] = "legacy"
             for flag in ("--distance-cache", "--main-pair-cache", "--full-metric",
-                         "--leaf-permutation-cache", "--point-near-first", "--point-adaptive-start"):
+                         "--leaf-permutation-cache", "--point-near-first", "--point-adaptive-start",
+                         "--point-prime-near"):
                 offset = legacy.index(flag)
                 del legacy[offset:offset+2]
             legacy += ["--tour", str(bad_tour), "--tour-role", "incumbent"]

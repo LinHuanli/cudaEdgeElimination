@@ -1,5 +1,9 @@
 # 研究文档索引
 
+当前工作以[单 GPU 融合、超过 2014 的冻结执行计划](design/FGPU_Hybrid_Beat_HS2014_Execution.md)
+为验收口径；最新结果见[近点预热与强度缺口](research/75_FGPU_Point_Priming_and_Strength_Gap.md)。
+下方历史研究记录继续保留，不能把不同输入协议或版本的时间混作当前完整图结果。
+
 原始方案保留在 [Local_Elimination_GPU_cuOpt_Design.md](design/Local_Elimination_GPU_cuOpt_Design.md)。以下文档把它拆成可执行、可验收的工作包：
 
 1. [设计复核与决策](design/Design_Review_and_Decisions.md)：方案中的事实修正、范围与不变量。
@@ -82,5 +86,9 @@
 78. [FGPU 强度升级 P0–P8 实现与论文对齐](research/70_FGPU_Strength_Upgrade_P0_P8_Implementation.md)：纯 GPU-safe 固定点、Signed128 LP、Main/`-e2`、non-pair/fixing、正确性修复、pcb3038 论文 LP 图三次基准、完全图正式运行及尚未完成项。
 79. [FGPU 快照事务、稀疏 PDHG 与完整端点 OR](research/71_FGPU_Transaction_PDHG_and_PathEnd.md)：同快照联合提交、独立 SEC replay、原生 PDHG、四端点与 Opt34／occupancy 消融、全最优回归及真实性能回退。
 80. [FGPU 可复现交错基准](research/72_FGPU_Reproducible_Paired_Benchmarks.md)：冻结构建与输入身份、同卡 AB/BA、进程墙钟、终态一致性及 clean 边界。
+81. [单 GPU 融合方案超过 2014](design/FGPU_Hybrid_Beat_HS2014_Execution.md)：四实例强度、历史及同机双速度门槛，完整无标签入口与实现依赖。
+82. [GPU bootstrap 与全度数 metric](research/73_FGPU_Hybrid_Bootstrap_and_FullMetric.md)：GPU 完整图、精确距离、无标签上界、LP-off pair 服务与条件缓存。
+83. [Point 复用与真实 frontier 调度](research/74_FGPU_Point_Reuse_and_Frontier_Scheduling.md)：排列复用、近点优先、延期与最终全扫，pr1002 同终态端到端提速及剩余强度差距。
+84. [Point 近点预热与强度缺口](research/75_FGPU_Point_Priming_and_Strength_Gap.md)：预热开关、小图全最优检查、中间快照 CSR 修复、pr299 消融和 vm1084 长尾。
 
 文档优先级为：数学安全不变量 > 本拆分计划 > 原始设计中的性能设想。发现冲突时必须保留边并记录原因。

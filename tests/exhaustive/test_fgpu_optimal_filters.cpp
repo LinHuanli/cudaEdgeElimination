@@ -1,4 +1,6 @@
+#include "../../src/fgpu/gpu_bootstrap.hpp"
 #include "../../src/fgpu/main_edge_predicate.hpp"
+#include "../../src/fgpu/resident_backend.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -11,6 +13,15 @@
 int main() {
   namespace hs = cudaee::detail::quick_hs;
   namespace main_edge = cudaee::detail::main_edge;
+  std::string gpu_reason;
+  const bool has_gpu = cudaee::detail::ResidentEliminationCudaAvailable(&gpu_reason);
+#ifdef CUDAEE_TEST_REQUIRE_GPU
+  if (!has_gpu) {
+    std::cout << "GPU property checks unavailable: " << gpu_reason << '\n';
+    return 77;
+  }
+#endif
+  std::uint64_t prime_proposals = 0;
   std::mt19937 rng(0xF6A2026U);
   for (int sample = 0; sample < 36; ++sample) {
     const int n = 3 + sample % 6;
@@ -69,6 +80,87 @@ int main() {
         mandatory &= edges;
       }
     } while (std::next_permutation(tour.begin() + 1, tour.end()));
+    if (has_gpu) {
+      // 完全图与包含全部最优 tour 的中间快照，均关闭 geometry。
+      // 小候选域用于触发延期；这是正确性夹具，不用于性能或无标签入口验收。
+      cudaee::GraphSnapshot input;
+      input.dimension = n;
+      input.distance_type =
+          sample / 6 % 2 ? cudaee::DistanceType::kCeil2D : cudaee::DistanceType::kEuc2D;
+      input.integer_coordinates = input.integer_distance_safe = true;
+      for (int node = 0; node < n; ++node)
+        input.points.push_back(
+            {static_cast<double>(x[node]), static_cast<double>(y[node]), x[node], y[node]});
+      for (std::size_t edge = 0; edge < u.size(); ++edge)
+        input.edges.push_back({u[edge], v[edge], distances[u[edge] * n + v[edge]], true});
+      input.RebuildCsr();
+      cudaee::detail::GpuBootstrap bootstrap(input, 0);
+      bootstrap.BuildPermutationCatalog();
+      for (const bool sparse_snapshot : {false, true}) {
+        for (std::size_t edge = 0; edge < u.size(); ++edge)
+          input.edges[edge].active = !sparse_snapshot || ((edge_union >> edge) & 1U) ||
+                                     (edge + static_cast<std::size_t>(sample)) % 3 != 0;
+        input.RebuildCsr();
+        std::uint64_t pairs = 0, degree_sum = 0;
+        for (int node = 0; node < n; ++node) {
+          unsigned degree = 0;
+          for (const auto& edge : input.edges)
+            degree += edge.active && (edge.u == node || edge.v == node);
+          pairs += degree * (degree - 1U) / 2U;
+          degree_sum += degree;
+        }
+        // 无向边计数 = degree sum / 2，quick_hs_candidates = 2。
+        const bool deferred = pairs > degree_sum;
+        for (const bool prime : {false, true}) {
+          cudaee::detail::ResidentGpuOptions options;
+          options.device = 0;
+          options.collect_trace = false;
+          options.gpu_replay = true;
+          options.enable_point_nonpair = true;
+          options.enable_fixing = true;
+          options.point_near_first = true;
+          options.point_adaptive_start = true;
+          options.point_prime_near = prime;
+          // 2/4 CTA 驻留策略与目录有/无均覆盖；不改变叶子的完整枚举域。
+          options.point_cta_blocks = sample % 2 ? 4U : 2U;
+          options.permutation_orders = sample % 3 ? bootstrap.permutations() : nullptr;
+          options.quick_hs_candidates = 2;
+          options.quick_hs_pair_trials = 0;
+          const auto result = cudaee::detail::RunResidentEliminationCuda(
+              input, std::vector<std::uint8_t>(u.size(), 0U), options);
+          if (!result.converged || result.proof_rejected != 0 ||
+              result.lp.point_initial_pairs != pairs ||
+              result.lp.point_initial_edge_frontier != degree_sum ||
+              result.lp.point_service_sweeps == 0 ||
+              result.lp.point_prime_sweeps != static_cast<unsigned>(prime && deferred)) {
+            std::cerr << "Point prime replay/convergence/sweep failure sample=" << sample << '\n';
+            return 1;
+          }
+          prime_proposals += result.lp.point_prime_proposals;
+          std::cout << "GPU Point sample=" << sample << " sparse=" << sparse_snapshot
+                    << " prime=" << prime << " prime_proposals=" << result.lp.point_prime_proposals
+                    << " point_proposals=" << result.point_nonpair_committed << '\n';
+          for (std::size_t edge = 0; edge < u.size(); ++edge) {
+            if ((((edge_union >> edge) & 1U) && !result.final_active[edge]) ||
+                (result.final_fixed[edge] && !((mandatory >> edge) & 1U))) {
+              std::cerr << "Point prime changed an optimum edge/fix sample=" << sample << '\n';
+              return 1;
+            }
+          }
+          for (const auto& pair : result.final_nonpairs)
+            for (const auto& optimal : optima)
+              for (int position = 0; position < n; ++position) {
+                const int first = optimal[(position + n - 1) % n];
+                const int second = optimal[(position + 1) % n];
+                if (pair.center == optimal[position] && pair.first == std::min(first, second) &&
+                    pair.second == std::max(first, second)) {
+                  std::cerr << "Point prime removed an optimum pair sample=" << sample << '\n';
+                  return 1;
+                }
+              }
+        }
+      }
+    }
     for (int mode = 0; mode < 3; ++mode) {
       // 完全图、最优边并集、含若干额外边的中间快照，都包含所有最优解。
       std::vector<std::uint8_t> active(n * n), edge_active(u.size()), fixed(u.size());
@@ -131,4 +223,11 @@ int main() {
               << " all optimum path filters verified\n"
               << std::flush;
   }
+  if (has_gpu && prime_proposals == 0) {
+    std::cerr << "Point prime tests never exercised positive proposals/replay\n";
+    return 1;
+  }
+  if (has_gpu)
+    std::cout << "Point prime positive proposals with independent all-opt oracle: "
+              << prime_proposals << '\n';
 }

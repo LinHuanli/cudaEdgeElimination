@@ -123,9 +123,19 @@ Point 为 2,399.4 s（75.54%），Main 为 180.798 s，Quick 为 245.084 s，
 extra-edge 为 125.338 s，replay 为 223.317 s。原始数据：
 `artifacts/hybrid-pr1002-full-metric-pilot/`。该版本不含本报告的 Point 性能开关。
 
+新配置完整 `pr1002` 已完成于本机同一张 RTX 4000 Ada：**1,161.415 s**，
+仍为 **5,002 edges / 24 fixed / 10,297 nonpairs**。与上个全度数版本的最终
+state hash 同为 `697baad650b13d0f`，GPU replay 拒绝及最优标签冲突均为零。
+单次 pilot 的 wall 比为 **2.735×**；同时切换了原生 LP、排列目录、近点优先和
+自适应调度，因此这不是一个开关的单因素收益。Point 从 2,399.4 s 降至 146.708 s，
+但 Quick/Main/replay 分别增至 356.877/226.252/300.238 s。
+GPU 自建 incumbent 为 266,046；原生 LP 最终下界约 253,857，原始可行性偏差
+0.0034712、相对 gap 0.000140767，均未达计划的 `1e-5`。
+历史论文时间比为 **7.767×**，但仍多 481 条边，不能称为等强度加速。
+记录：`artifacts/hybrid-pr1002-native-frontier-v2/`，节点有其他作业，`clean=false`。
+
 作者单核全量对照仍在运行，未结束前不填写最终边数或速度比。
-新配置完整 `pr1002` 已启动于本机 RTX 4000 Ada：
-`artifacts/hybrid-pr1002-native-frontier-v2/`。`cuda19` 空闲 L4 的 GPU smoke 已通过
+`cuda19` 空闲 L4 的 GPU smoke 已通过
 全最优解检查，并启动同配置 `vm1084`：`artifacts/hybrid-vm1084-l4-point-v2/`。
 L4 与本机计时分开，不混作同一硬件的正式四例加速比。
 四例门槛尚未通过。动态通用 cut pool、primal mincut/奇边界 2-matching、统一

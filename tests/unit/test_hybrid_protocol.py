@@ -79,6 +79,7 @@ class ProtocolTest(unittest.TestCase):
     def test_point_configuration_must_be_shared(self):
         for field, value in (("leaf_permutation_cache", True), ("point_near_first", True),
                              ("point_adaptive_start", True),
+                             ("point_prime_near", True),
                              ("point_leaf_kernel", "subset-dp"), ("point_cta_blocks", 8)):
             bad = copy.deepcopy(self.gpu)
             bad[1]["report"][field] = value

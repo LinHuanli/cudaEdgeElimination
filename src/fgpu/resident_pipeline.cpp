@@ -395,6 +395,8 @@ void WriteSolveManifest(const std::filesystem::path& path, const FgpuInput& inpu
          << (options.hybrid_e2e && options.point_near_first ? "true" : "false") << ",\n"
          << "  \"point_adaptive_start\": "
          << (options.hybrid_e2e && options.point_adaptive_start ? "true" : "false") << ",\n"
+         << "  \"point_prime_near\": "
+         << (options.hybrid_e2e && options.point_prime_near ? "true" : "false") << ",\n"
          << "  \"permutation_cache_bytes\": " << report.bootstrap.permutation_bytes << ",\n"
          << "  \"permutation_build_replay_ms\": " << report.bootstrap.permutation_ms << ",\n"
          << "  \"full_degree_metric\": "
@@ -484,6 +486,9 @@ void WriteSolveManifest(const std::filesystem::path& path, const FgpuInput& inpu
          << (resident.lp.point_deferred_initially ? "true" : "false") << ",\n"
          << "  \"point_service_sweeps\": " << resident.lp.point_service_sweeps << ",\n"
          << "  \"point_deferred_sweeps\": " << resident.lp.point_deferred_sweeps << ",\n"
+         << "  \"point_prime_sweeps\": " << resident.lp.point_prime_sweeps << ",\n"
+         << "  \"point_prime_proposals\": " << resident.lp.point_prime_proposals << ",\n"
+         << "  \"point_prime_ms\": " << resident.lp.point_prime_ms << ",\n"
          << "  \"lp_fixing_ms\": " << resident.lp.fixing_ms << ",\n"
          << "  \"lp_pair_filter_ms\": " << resident.lp.pair_filter_ms << ",\n"
          << "  \"pdhg_model_ms\": " << resident.lp.pdhg_model_ms << ",\n"
@@ -576,6 +581,7 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   device_options.full_metric = config.full_metric;
   device_options.point_near_first = config.point_near_first;
   device_options.point_adaptive_start = config.point_adaptive_start;
+  device_options.point_prime_near = config.point_prime_near;
   device_options.progress_log = config.hybrid_e2e;
   device_options.device = config.device;
   if (bootstrap != nullptr) {
@@ -882,6 +888,7 @@ FgpuSolveReport RunFgpuElimination(const FgpuInput& input, const FgpuOutputPaths
   config.leaf_permutation_cache = options.hybrid_e2e && options.leaf_permutation_cache;
   config.point_near_first = options.hybrid_e2e && options.point_near_first;
   config.point_adaptive_start = options.hybrid_e2e && options.point_adaptive_start;
+  config.point_prime_near = options.hybrid_e2e && options.point_prime_near;
   config.device = options.device;
   config.max_hs_epochs = 0U;
   config.max_jv_rounds = 0U;

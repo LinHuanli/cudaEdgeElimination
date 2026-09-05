@@ -5,10 +5,12 @@
 执行独立 GPU replay，CPU 不参与逐边删除、non-pair 或 fixing 决策。浮点 LP 只生成
 guidance，最终授权统一使用量化 dual 和设备端精确定点比较。
 
-最新开发记录：[Point 复用与真实 frontier 调度](docs/research/74_FGPU_Point_Reuse_and_Frontier_Scheduling.md)。
+最新开发记录：[Point 近点预热与强度缺口](docs/research/75_FGPU_Point_Priming_and_Strength_Gap.md)。
+近点预热已作为默认关闭的实验开关接入，`pr299` 单次 174.62→170.09 s，尚无稳定收益结论。
+上一轮[Point 复用与真实 frontier 调度](docs/research/74_FGPU_Point_Reuse_and_Frontier_Scheduling.md)：
 无标签完整 `pr299` 的同二进制调度 pilot 为 200.95→175.08 s，仍剩 1,246 条边；
-这是开发单次对照，不是四例正式验收。上个全度数版本 `pr1002` 剩 5,002 条、
-3,176.23 s，仍比 2014 多 481 条。基础入口见 [GPU bootstrap 与全度数 metric](docs/research/73_FGPU_Hybrid_Bootstrap_and_FullMetric.md)。
+这是开发单次对照，不是四例正式验收。完整 `pr1002` 从 3,176.23 降至 1,161.41 s，
+终态一致，仍剩 5,002 条、比 2014 多 481 条。基础入口见 [GPU bootstrap 与全度数 metric](docs/research/73_FGPU_Hybrid_Bootstrap_and_FullMetric.md)。
 新入口 `solve --profile hybrid-e2e --instance FILE` 不接收最优标签或预处理边集；
 `--lp-backend off` 仍保留完整 pair/fixing 服务，距离/上界由 GPU 计算。
 当前还不是设计中的完整 local-cut/comb LP 与通用深层 HT；历史计时不能当作最新版本的性能。

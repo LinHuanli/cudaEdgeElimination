@@ -3820,7 +3820,7 @@ __global__ __launch_bounds__(128, MinBlocks) void PointNonpairKernel(
     const std::int64_t incumbent_numerator, unsigned long long* const lp_closed_replies,
     unsigned long long* const point_path_end_closed_replies,
     unsigned long long* const proposal_count, const std::int32_t* const near_points,
-    const std::uint32_t* const near_mask) {
+    const std::uint32_t* const near_mask, const bool priority_only) {
   __shared__ std::int32_t center;
   __shared__ std::int32_t first;
   __shared__ std::int32_t second;
@@ -3864,8 +3864,10 @@ __global__ __launch_bounds__(128, MinBlocks) void PointNonpairKernel(
       // AND reply 数是 C(deg(point), 2)。按真实活动度数分桶后仍完整访问
       // 所有 point，但先尝试代价最低、最容易首成功的 witness；桶内保持
       // node-id 规范顺序，结果确定且不把启发式顺序当成完整性假设。
-      for (std::int32_t degree_bucket = 0; degree_bucket < 4 && selected_point < 0;
-           ++degree_bucket) {
+      // priority_only 仅用于首次预热：未关闭的根不作任何状态修改，编排层
+      // 在结束前强制重跑完整 service。它不是正式 Point 域的点数上限。
+      for (std::int32_t degree_bucket = 0;
+           !priority_only && degree_bucket < 4 && selected_point < 0; ++degree_bucket) {
         for (std::int32_t point = 0; point < graph.dimension; ++point) {
           const std::int32_t point_degree = graph.degree[point];
           const std::int32_t point_bucket =
@@ -5028,6 +5030,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
       (options.point_cta_blocks != 2U && options.point_cta_blocks != 4U) ||
       (options.enable_pdlp && options.incumbent_cost < 0) ||
       (options.full_metric && (!options.main_pair_cache || !options.enable_strong_metric)) ||
+      (options.point_prime_near && (!options.point_adaptive_start || !options.point_near_first)) ||
       (options.collect_trace && !options.enable_pdlp &&
        (options.enable_point_nonpair || options.enable_direct_fix)) ||
       (!options.enable_quick_hs && !options.enable_jv && !options.enable_geometry &&
@@ -5427,7 +5430,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   }
   std::size_t current_edges = result.initial_edges;
   std::int32_t active_edge_count = 0;
-  bool adjacency_dirty = false;
+  // API 也接收含 inactive 稳定边 ID 的中间快照。初始 host CSR 包含这些
+  // 槽位，而 pair offsets 只统计活动度数；在首个 pair 任务前必须先压缩。
+  bool adjacency_dirty = result.initial_edges != edge_count;
   bool compact_csr_allocated = false;
   std::size_t pair_capacity = 0U;
   std::int64_t current_pair_count = 0;
@@ -5439,6 +5444,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     primal_dual_solver = std::make_unique<SparsePdhgCuda>(device);
   }
   bool lp_snapshot_ready = false;
+  bool point_prime_completed = false;
   std::uint64_t snapshot_sequence = 0U;
   result.resident_bytes += device_pending_fixed.bytes() + device_pending_degree.bytes() +
                            device_fixed_parent.bytes() + device_fixed_component_size.bytes() +
@@ -5804,11 +5810,15 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
         options.enable_pdlp ? options.incumbent_cost * denominator : 0;
     const auto* pair_reduced = options.enable_pdlp ? device_reduced_cost.get() : nullptr;
     const auto* pair_bound = options.enable_pdlp ? device_lower_bound.get() : nullptr;
+    // 同一不可变标志同时控制 proposal 和 replay；不能在预热完成后跳过 replay。
+    const bool prime_point = !pair_service_stage && !point_prime_completed &&
+                             options.point_prime_near && options.point_near_first;
+    const bool run_point_service = method == EliminationMethod::kLpBox &&
+                                   options.enable_point_nonpair &&
+                                   (pair_service_stage || prime_point);
     const bool collect_lp_path_closures =
-        (quick_hs_stage && lp_snapshot_ready) ||
-        (method == EliminationMethod::kLpBox && options.enable_point_nonpair && pair_service_stage);
-    const bool collect_point_path_end_closures =
-        method == EliminationMethod::kLpBox && options.enable_point_nonpair && pair_service_stage;
+        (quick_hs_stage && lp_snapshot_ready) || run_point_service;
+    const bool collect_point_path_end_closures = run_point_service;
     if (collect_lp_path_closures) {
       CheckCuda(cudaMemset(device_lp_path_closed_replies.get(), 0, sizeof(unsigned long long)),
                 "cudaMemset resident LP path closures");
@@ -6247,8 +6257,11 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
         CheckCuda(cudaDeviceSynchronize(), "resident LP pair filter timing");
         result.lp.pair_filter_ms += ElapsedMilliseconds(lp_phase_begin);
         lp_phase_begin = SteadyClock::now();
-        if (options.enable_point_nonpair && pair_service_stage) {
-          ++result.lp.point_service_sweeps;
+        if (run_point_service) {
+          if (prime_point)
+            ++result.lp.point_prime_sweeps;
+          else
+            ++result.lp.point_service_sweeps;
           const std::int64_t point_blocks = std::min<std::int64_t>(current_pair_count, 65535);
           // 两种寄存器预算编译为独立 kernel，搜索域/回复顺序完全相同。
           const auto launch_point = [&]<int MinBlocks>() {
@@ -6260,7 +6273,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
                 device_point_path_end_closed_replies.get(),
                 device_nonpair_proposal_counts.get() + 2,
                 options.point_near_first ? device_point_priority.get() : nullptr,
-                options.point_near_first ? device_point_priority_mask.get() : nullptr);
+                options.point_near_first ? device_point_priority_mask.get() : nullptr, prime_point);
           };
           if (options.point_cta_blocks == 4U) {
             launch_point.template operator()<4>();
@@ -6269,7 +6282,12 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
           }
           CheckCuda(cudaGetLastError(), "PointNonpairKernel launch");
           CheckCuda(cudaDeviceSynchronize(), "resident LP point timing");
-          result.lp.point_ms += ElapsedMilliseconds(lp_phase_begin);
+          const auto point_ms = ElapsedMilliseconds(lp_phase_begin);
+          result.lp.point_ms += point_ms;
+          if (prime_point) {
+            result.lp.point_prime_ms += point_ms;
+            point_prime_completed = true;
+          }
         }
       }
       CheckCuda(cudaDeviceSynchronize(), "resident PDLP proof synchronize");
@@ -6289,6 +6307,8 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
         result.lp_nonpair_committed += static_cast<std::size_t>(proposal_counts[0]);
         result.fixed_anchor_nonpair_committed += static_cast<std::size_t>(proposal_counts[1]);
         result.point_nonpair_committed += static_cast<std::size_t>(proposal_counts[2]);
+        if (prime_point)
+          result.lp.point_prime_proposals += proposal_counts[2];
       }
     } else {
       throw std::logic_error("resident run_epoch 收到不支持的方法");
@@ -6435,7 +6455,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
             device_nonpair_point_witness.get(), device_fixed.get(), device_nonpair_verified.get(),
             device_replay_counters.get(), device_replay_counters.get() + 1);
         CheckCuda(cudaGetLastError(), "ReplayLpNonpairKernel launch");
-        if (options.enable_point_nonpair && pair_service_stage) {
+        if (run_point_service) {
           const std::int64_t point_blocks = std::min<std::int64_t>(current_pair_count, 65535);
           ReplayPointNonpairKernel<<<static_cast<unsigned int>(point_blocks), kThreads>>>(
               current_pair_count, snapshot.graph, device_pair_offsets.get(),
@@ -6752,6 +6772,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
                 << " deleted=" << committed_count
                 << " nonpairs_added_total=" << result.nonpair_committed
                 << " point_sweeps=" << result.lp.point_service_sweeps
+                << " point_prime_sweeps=" << result.lp.point_prime_sweeps
                 << " proposal_ms=" << device_ms << '\n';
     }
     if (committed_count == 0U) {

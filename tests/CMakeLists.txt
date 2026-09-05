@@ -52,6 +52,9 @@ target_compile_options(cudaee_transaction_unit PRIVATE -Wall -Wextra -Wconversio
 add_test(NAME unit.resident_transaction COMMAND cudaee_transaction_unit)
 set_tests_properties(unit.resident_transaction PROPERTIES LABELS "correctness;transaction")
 if(CUDAEE_ENABLE_CUDA)
+  target_compile_definitions(cudaee_optimal_filters_unit PRIVATE CUDAEE_TEST_REQUIRE_GPU=1)
+  set_property(TEST exhaustive.fgpu_optimal_filters APPEND PROPERTY LABELS "gpu")
+  set_tests_properties(exhaustive.fgpu_optimal_filters PROPERTIES SKIP_RETURN_CODE 77)
   add_executable(cudaee_main_metric_unit unit/test_main_metric.cu)
   target_include_directories(cudaee_main_metric_unit PRIVATE "${PROJECT_SOURCE_DIR}/include")
   set_target_properties(cudaee_main_metric_unit PROPERTIES

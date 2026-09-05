@@ -38,6 +38,9 @@ struct FgpuLpMetrics {
   std::uint64_t point_initial_edge_frontier{};
   std::uint32_t point_service_sweeps{};
   std::uint32_t point_deferred_sweeps{};
+  std::uint32_t point_prime_sweeps{};
+  std::uint64_t point_prime_proposals{};
+  double point_prime_ms{}; // point_ms 的子集，不可重复计入端到端。
   bool point_deferred_initially{};
 };
 

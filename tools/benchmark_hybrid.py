@@ -89,6 +89,7 @@ def main():
     parser.add_argument("--leaf-permutation-cache", choices=("0", "1"), default="0")
     parser.add_argument("--point-near-first", choices=("0", "1"), default="0")
     parser.add_argument("--point-adaptive-start", choices=("0", "1"), default="0")
+    parser.add_argument("--point-prime-near", choices=("0", "1"), default="0")
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--allow-busy", action="store_true", help="只做开发观测，不能用于正式验收")
@@ -97,6 +98,8 @@ def main():
         parser.error("预热非负、完整重复次数为正")
     if args.full_metric == "1" and args.main_pair_cache == "0":
         parser.error("全度数 metric 需要条件 pair cache")
+    if args.point_prime_near == "1" and (args.point_adaptive_start != "1" or args.point_near_first != "1"):
+        parser.error("近点预热需要同时启用 point-adaptive-start 和 point-near-first")
     all_items = {x["name"]: x for x in records()}
     if len(set(args.instances)) != len(args.instances) or any(x not in all_items for x in args.instances):
         parser.error("实例必须来自冻结的四例且不得重复")
@@ -129,6 +132,7 @@ def main():
                        "--leaf-permutation-cache", args.leaf_permutation_cache,
                        "--point-near-first", args.point_near_first,
                        "--point-adaptive-start", args.point_adaptive_start,
+                       "--point-prime-near", args.point_prime_near,
                        "--output-edges", str(directory / "out.edg"), "--fixed", str(directory / "out.fix"),
                        "--nonpairs", str(directory / "out.nonpairs"), "--manifest", str(directory / "out.json")]
             stop = threading.Event()
@@ -189,7 +193,8 @@ def main():
                                  "main_pair_cache": args.main_pair_cache, "full_metric": args.full_metric,
                                  "leaf_permutation_cache": args.leaf_permutation_cache,
                                  "point_near_first": args.point_near_first,
-                                 "point_adaptive_start": args.point_adaptive_start}, "instances": {}}
+                                 "point_adaptive_start": args.point_adaptive_start,
+                                 "point_prime_near": args.point_prime_near}, "instances": {}}
     for name in args.instances:
         measured = [x for x in runs if x["instance"] == name and not x["warmup"]]
         clean = [x for x in measured if x["clean"]]

@@ -203,6 +203,7 @@ struct FgpuSolveOptions {
   bool leaf_permutation_cache{false};
   bool point_near_first{false};
   bool point_adaptive_start{false};
+  bool point_prime_near{false};
   int device{-1};
   FgpuSolveMode mode{FgpuSolveMode::kGpuSafe};
   bool serialize_certificate{false};
@@ -282,6 +283,7 @@ struct FgpuResidentConfig {
   bool leaf_permutation_cache{false};
   bool point_near_first{false};
   bool point_adaptive_start{false};
+  bool point_prime_near{false};
   int device{0};
   // 三个 max 字段取 0 时表示不设人为上限，运行到自然固定点。
   std::uint32_t max_hs_epochs{0U};

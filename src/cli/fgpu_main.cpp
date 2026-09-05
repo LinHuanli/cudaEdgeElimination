@@ -30,6 +30,7 @@ void PrintHelp() {
             << "    [--main-pair-cache 0|1] [--full-metric 0|1]（hybrid 全度数 metric）\n"
             << "    [--leaf-permutation-cache 0|1] [--point-near-first 0|1]（完整扫描的性能消融）\n"
             << "    [--point-adaptive-start 0|1]（按真实 frontier 推迟密图 Point，全量回扫）\n"
+            << "    [--point-prime-near 0|1]（延期前预热一次近点前缀，仍须全量回扫）\n"
             << "    [--lp-backend off|primal-dual-sec|sec-dual]（LP 关闭不关闭 pair/fix）\n"
             << "    [--point-leaf-kernel permutation|prescreen-permutation|prescreen-subset-dp]\n"
             << "    [--point-cta-blocks 2|4]（寄存器/驻留策略，不限制任务数量）\n"
@@ -404,7 +405,8 @@ void SolveCommand(const Arguments& arguments) {
                            "full-metric",
                            "leaf-permutation-cache",
                            "point-near-first",
-                           "point-adaptive-start"});
+                           "point-adaptive-start",
+                           "point-prime-near"});
   cudaee::FgpuSolveOptions options;
   const auto profile = Optional(arguments, "profile", "legacy");
   if (profile != "legacy" && profile != "hybrid-e2e")
@@ -416,10 +418,14 @@ void SolveCommand(const Arguments& arguments) {
   options.leaf_permutation_cache = OptionalBoolean(arguments, "leaf-permutation-cache", false);
   options.point_near_first = OptionalBoolean(arguments, "point-near-first", false);
   options.point_adaptive_start = OptionalBoolean(arguments, "point-adaptive-start", false);
+  options.point_prime_near = OptionalBoolean(arguments, "point-prime-near", false);
+  if (options.point_prime_near && (!options.point_adaptive_start || !options.point_near_first))
+    throw std::invalid_argument("近点预热需要同时启用 point-adaptive-start 和 point-near-first");
   if (!options.hybrid_e2e &&
       (arguments.contains("distance-cache") || arguments.contains("main-pair-cache") ||
        arguments.contains("full-metric") || arguments.contains("leaf-permutation-cache") ||
-       arguments.contains("point-near-first") || arguments.contains("point-adaptive-start"))) {
+       arguments.contains("point-near-first") || arguments.contains("point-adaptive-start") ||
+       arguments.contains("point-prime-near"))) {
     throw std::invalid_argument("hybrid cache/metric 消融参数仅适用于 hybrid-e2e");
   }
   if (options.hybrid_e2e && options.full_metric && !options.main_pair_cache)

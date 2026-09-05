@@ -21,6 +21,7 @@ struct ResidentGpuOptions {
   bool full_metric{false};
   bool point_near_first{false};
   bool point_adaptive_start{false};
+  bool point_prime_near{false};
   bool progress_log{false};
   int device{-1};
   // 0 表示不设人为轮数上限，直到该阶段自然达到固定点。
