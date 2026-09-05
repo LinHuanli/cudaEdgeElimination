@@ -19,6 +19,31 @@ SPEC.loader.exec_module(BENCH)
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_host_identity(self) -> None:
+        identity = BENCH.host_identity()
+        self.assertTrue(identity["hostname"])
+        self.assertTrue(identity["machine"])
+        self.assertGreater(identity["logical_cpus"], 0)
+
+    def test_hybrid_does_not_supply_labels(self) -> None:
+        inputs = {"instance": ROOT / "tests/data/pr299.tsp",
+                  "tour": ROOT / "tests/data/pr299.opt.tour"}
+        command = BENCH.solver_command(ROOT / ".tmp/solver", "hybrid-e2e", inputs,
+                                       ROOT / "artifacts/test", 48191, ["--lp-backend", "off"])
+        self.assertIn("hybrid-e2e", command)
+        self.assertNotIn(str(inputs["tour"]), command)
+        for argument in ("--tour", "--tour-role", "--expected-cost", "--input-edges", "48191"):
+            self.assertNotIn(argument, command)
+        inputs["input_edges"] = ROOT / "tests/data/pr299.edg"
+        with self.assertRaises(ValueError):
+            BENCH.solver_command(ROOT / ".tmp/solver", "hybrid-e2e", inputs,
+                                 ROOT / "artifacts/test", 48191, [])
+        legacy = BENCH.solver_command(ROOT / ".tmp/solver", "legacy", inputs,
+                                      ROOT / "artifacts/test", 48191, [])
+        self.assertIn("--tour", legacy)
+        self.assertIn("--input-edges", legacy)
+        self.assertNotIn("--profile", legacy)
+
     def test_boundary(self) -> None:
         self.assertEqual(BENCH.inside(ROOT / "artifacts/test"), ROOT / "artifacts/test")
         for path in [ROOT, ROOT.parent / "escaped", ROOT / ".." / "escaped"]:

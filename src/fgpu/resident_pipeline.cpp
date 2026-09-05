@@ -389,6 +389,14 @@ void WriteSolveManifest(const std::filesystem::path& path, const FgpuInput& inpu
          << "  \"main_pair_cache\": "
          << (options.hybrid_e2e && options.main_pair_cache ? "true" : "false") << ",\n"
          << "  \"main_pair_cache_bytes\": " << resident.main_pair_cache_bytes << ",\n"
+         << "  \"leaf_permutation_cache\": "
+         << (options.hybrid_e2e && options.leaf_permutation_cache ? "true" : "false") << ",\n"
+         << "  \"point_near_first\": "
+         << (options.hybrid_e2e && options.point_near_first ? "true" : "false") << ",\n"
+         << "  \"point_adaptive_start\": "
+         << (options.hybrid_e2e && options.point_adaptive_start ? "true" : "false") << ",\n"
+         << "  \"permutation_cache_bytes\": " << report.bootstrap.permutation_bytes << ",\n"
+         << "  \"permutation_build_replay_ms\": " << report.bootstrap.permutation_ms << ",\n"
          << "  \"full_degree_metric\": "
          << (options.hybrid_e2e && options.full_metric ? "true" : "false") << ",\n"
          << "  \"bootstrap_ms\": " << report.bootstrap.total_ms << ",\n"
@@ -469,6 +477,13 @@ void WriteSolveManifest(const std::filesystem::path& path, const FgpuInput& inpu
          << "  \"lp_solver_ms\": " << resident.lp.solver_ms << ",\n"
          << "  \"lp_cut_separation_ms\": " << resident.lp.cut_separation_ms << ",\n"
          << "  \"lp_point_ms\": " << resident.lp.point_ms << ",\n"
+         << "  \"point_initial_pairs\": " << resident.lp.point_initial_pairs << ",\n"
+         << "  \"point_initial_edge_frontier\": " << resident.lp.point_initial_edge_frontier
+         << ",\n"
+         << "  \"point_deferred_initially\": "
+         << (resident.lp.point_deferred_initially ? "true" : "false") << ",\n"
+         << "  \"point_service_sweeps\": " << resident.lp.point_service_sweeps << ",\n"
+         << "  \"point_deferred_sweeps\": " << resident.lp.point_deferred_sweeps << ",\n"
          << "  \"lp_fixing_ms\": " << resident.lp.fixing_ms << ",\n"
          << "  \"lp_pair_filter_ms\": " << resident.lp.pair_filter_ms << ",\n"
          << "  \"pdhg_model_ms\": " << resident.lp.pdhg_model_ms << ",\n"
@@ -538,6 +553,8 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   if (config.hybrid_e2e) {
     bootstrap = std::make_unique<detail::GpuBootstrap>(initial, config.device);
     bootstrap->BuildCompleteGraph(&initial);
+    if (config.leaf_permutation_cache)
+      bootstrap->BuildPermutationCatalog();
     if (config.enable_pdlp)
       bootstrap->GenerateIncumbent();
   }
@@ -557,10 +574,14 @@ FgpuResidentRunReport RunFgpuResidentElimination(const FgpuInput& input,
   detail::ResidentGpuOptions device_options;
   device_options.main_pair_cache = config.main_pair_cache;
   device_options.full_metric = config.full_metric;
+  device_options.point_near_first = config.point_near_first;
+  device_options.point_adaptive_start = config.point_adaptive_start;
+  device_options.progress_log = config.hybrid_e2e;
   device_options.device = config.device;
   if (bootstrap != nullptr) {
     device_options.device = bootstrap->device();
     device_options.triangular_distance = config.distance_cache ? bootstrap->distances() : nullptr;
+    device_options.permutation_orders = bootstrap->permutations();
     device_options.gpu_complete_graph = true;
   }
   device_options.max_hs_epochs = config.max_hs_epochs;
@@ -858,6 +879,9 @@ FgpuSolveReport RunFgpuElimination(const FgpuInput& input, const FgpuOutputPaths
   config.distance_cache = options.distance_cache;
   config.main_pair_cache = options.hybrid_e2e && options.main_pair_cache;
   config.full_metric = options.hybrid_e2e && options.full_metric;
+  config.leaf_permutation_cache = options.hybrid_e2e && options.leaf_permutation_cache;
+  config.point_near_first = options.hybrid_e2e && options.point_near_first;
+  config.point_adaptive_start = options.hybrid_e2e && options.point_adaptive_start;
   config.device = options.device;
   config.max_hs_epochs = 0U;
   config.max_jv_rounds = 0U;

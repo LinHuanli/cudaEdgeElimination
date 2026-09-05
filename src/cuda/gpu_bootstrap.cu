@@ -1,4 +1,5 @@
 #include "../fgpu/gpu_bootstrap.hpp"
+#include "../fgpu/permutation_catalog.hpp"
 #include "../fgpu/quick_hs_predicate.hpp"
 #include "device_workspace.cuh"
 
@@ -103,6 +104,54 @@ struct Choice {
   std::int64_t delta;
   std::int64_t ordinal;
 };
+
+__global__ void BuildPermutationKernel(const int nodes, std::uint8_t* const catalog) {
+  const int rank = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  const int rows = permutation_catalog::Factorial(nodes);
+  if (rank >= rows)
+    return;
+  int remaining_rank = rank;
+  unsigned available = (1U << nodes) - 1U;
+  const auto offset = permutation_catalog::Offset(nodes);
+  for (int position = 0; position < nodes; ++position) {
+    const int factorial = permutation_catalog::Factorial(nodes - position - 1);
+    int choice = remaining_rank / factorial;
+    remaining_rank %= factorial;
+    unsigned selected = available;
+    while (choice-- > 0)
+      selected &= selected - 1U;
+    const int vertex = __ffs(static_cast<int>(selected)) - 1;
+    catalog[offset + static_cast<std::size_t>(position) * rows + rank] = vertex;
+    available &= ~(1U << vertex);
+  }
+}
+
+__global__ void ReplayPermutationKernel(const int nodes, const std::uint8_t* const catalog,
+                                        int* const invalid) {
+  const int expected_rank = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  const int rows = permutation_catalog::Factorial(nodes);
+  if (expected_rank >= rows)
+    return;
+  const auto offset = permutation_catalog::Offset(nodes);
+  int rank = 0;
+  unsigned seen = 0U;
+  for (int position = 0; position < nodes; ++position) {
+    const unsigned vertex =
+        catalog[offset + static_cast<std::size_t>(position) * rows + expected_rank];
+    if (vertex >= static_cast<unsigned>(nodes) || (seen & (1U << vertex)) != 0U) {
+      atomicExch(invalid, 1);
+      return;
+    }
+    // 从输出排列重建 Lehmer rank，独立于候选的逐位选择算法。
+    int smaller = 0;
+    for (int next = position + 1; next < nodes; ++next)
+      smaller += catalog[offset + static_cast<std::size_t>(next) * rows + expected_rank] < vertex;
+    rank = rank * (nodes - position) + smaller;
+    seen |= 1U << vertex;
+  }
+  if (rank != expected_rank || seen != (1U << nodes) - 1U)
+    atomicExch(invalid, 1);
+}
 
 __device__ Choice Best(Choice local, Choice* shared) {
   const int tid = threadIdx.x;
@@ -292,11 +341,12 @@ struct GpuBootstrap::Impl {
   int device;
   quick_hs::GraphView view{};
   CudaWorkspace<std::int64_t> x, y, distance;
+  CudaWorkspace<std::uint8_t> permutations;
   GpuBootstrapMetrics metrics;
   std::vector<int> tour;
   Clock::time_point begin{Clock::now()};
   Impl(const GraphSnapshot& graph, int selected)
-      : device(selected), x(selected), y(selected), distance(selected) {
+      : device(selected), x(selected), y(selected), distance(selected), permutations(selected) {
     if (graph.dimension < 3 || graph.points.size() != static_cast<std::size_t>(graph.dimension) ||
         (!graph.integer_coordinates && graph.integer_coordinate_denominator != 2U) ||
         !graph.integer_distance_safe ||
@@ -347,9 +397,32 @@ GpuBootstrap::GpuBootstrap(const GraphSnapshot& graph, int device)
     : impl_(std::make_unique<Impl>(graph, ChooseDevice(device))) {}
 GpuBootstrap::~GpuBootstrap() = default;
 const std::int64_t* GpuBootstrap::distances() const { return impl_->distance.get(); }
+const std::uint8_t* GpuBootstrap::permutations() const { return impl_->permutations.get(); }
 int GpuBootstrap::device() const { return impl_->device; }
 const GpuBootstrapMetrics& GpuBootstrap::metrics() const { return impl_->metrics; }
 const std::vector<std::int32_t>& GpuBootstrap::tour() const { return impl_->tour; }
+
+void GpuBootstrap::BuildPermutationCatalog() {
+  CheckWorkspaceCuda(cudaSetDevice(impl_->device));
+  const auto start = Clock::now();
+  impl_->permutations.Reserve(permutation_catalog::kBytes);
+  CudaWorkspace<int> invalid(impl_->device);
+  invalid.Reserve(1);
+  CheckWorkspaceCuda(cudaMemset(invalid.get(), 0, sizeof(int)));
+  for (int nodes = 1; nodes <= permutation_catalog::kMaximumNodes; ++nodes) {
+    const int blocks = (permutation_catalog::Factorial(nodes) + kThreads - 1) / kThreads;
+    BuildPermutationKernel<<<blocks, kThreads>>>(nodes, impl_->permutations.get());
+    ReplayPermutationKernel<<<blocks, kThreads>>>(nodes, impl_->permutations.get(), invalid.get());
+    CheckWorkspaceCuda(cudaGetLastError());
+  }
+  int status{};
+  CheckWorkspaceCuda(cudaMemcpy(&status, invalid.get(), sizeof(int), cudaMemcpyDeviceToHost));
+  if (status != 0)
+    throw std::runtime_error("GPU 排列表未通过完整 rank/排列重放");
+  impl_->metrics.permutation_bytes = impl_->permutations.bytes();
+  impl_->metrics.permutation_ms = Milliseconds(start);
+  impl_->metrics.total_ms = Milliseconds(impl_->begin);
+}
 
 void GpuBootstrap::BuildCompleteGraph(GraphSnapshot* graph) {
   if (graph == nullptr || graph->dimension != impl_->view.dimension || !graph->edges.empty())

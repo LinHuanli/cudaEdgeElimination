@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 
-from benchmark_fgpu import inside, sha256
+from benchmark_fgpu import host_identity, inside, sha256
 from benchmark_hybrid import telemetry
 from prepare_hs2014_data import CONFIG, DATA, ROOT, records, validate
 
@@ -103,6 +103,7 @@ def main():
                 observer.join()
                 (directory / "telemetry.json").write_text(json.dumps(samples, indent=2) + "\n")
             record = {"instance": name, "iteration": iteration, "warmup": iteration < args.warmups,
+                      "host_identity": host_identity(),
                       "command": command, "cpu_core": args.cpu_core, "returncode": code,
                       "process_wall_seconds": wall, "executable_sha256": executable_hash,
                       "config_sha256": sha256(CONFIG), "options_sha256": sha256(options),

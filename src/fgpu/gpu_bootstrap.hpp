@@ -21,7 +21,9 @@ public:
   GpuBootstrap& operator=(const GpuBootstrap&) = delete;
   void BuildCompleteGraph(GraphSnapshot* graph);
   void GenerateIncumbent();
+  void BuildPermutationCatalog();
   [[nodiscard]] const std::int64_t* distances() const;
+  [[nodiscard]] const std::uint8_t* permutations() const;
   [[nodiscard]] int device() const;
   [[nodiscard]] const GpuBootstrapMetrics& metrics() const;
   [[nodiscard]] const std::vector<std::int32_t>& tour() const;

@@ -16,12 +16,27 @@ def compare(gpu_runs, cpu_runs, items):
     gpu_ids = {x["executable_sha256"] for x in gpu_runs}
     cpu_ids = {x["executable_sha256"] for x in cpu_runs}
     configurations = {(x["report"]["lp_backend"], x["report"]["distance_cache"],
-                       x["report"]["main_pair_cache"], x["report"]["full_degree_metric"])
+                       x["report"]["main_pair_cache"], x["report"]["full_degree_metric"],
+                       x["report"].get("leaf_permutation_cache", False),
+                       x["report"].get("point_near_first", False),
+                       x["report"].get("point_adaptive_start", False),
+                       x["report"].get("point_leaf_kernel", "permutation"),
+                       x["report"].get("point_cta_blocks", 4))
                       for x in gpu_runs if "report" in x}
     shared_config = len(gpu_ids) == len(cpu_ids) == len(configurations) == 1
     shared_config = shared_config and len({x.get("config_sha256") for x in gpu_runs + cpu_runs}) == 1
     shared_config = shared_config and len({x.get("options_sha256") for x in cpu_runs}) == 1
     shared_config = shared_config and len({x.get("cpu_core") for x in cpu_runs}) == 1
+    # hostname/CPU 型号均须一致；已有但缺失这些身份的 pilot 不提升为同机正式数据。
+    host_keys = {(x.get("host_identity", {}).get("hostname"),
+                  x.get("host_identity", {}).get("cpu_model")) for x in gpu_runs + cpu_runs}
+    same_machine = len(host_keys) == 1 and all(all(key) for key in host_keys)
+    gpu_models = {(x.get("report", {}).get("gpu_identity", {}).get("name"),
+                   x.get("report", {}).get("gpu_identity", {}).get("compute_major"),
+                   x.get("report", {}).get("gpu_identity", {}).get("compute_minor")) for x in gpu_runs}
+    same_gpu_model = len(gpu_models) == 1 and all(
+        key[0] and key[1] is not None and key[2] is not None for key in gpu_models)
+    shared_config = shared_config and same_machine and same_gpu_model
     for item in items:
         name = item["name"]
         gpu = [x for x in gpu_runs if x["instance"] == name]
@@ -47,7 +62,8 @@ def compare(gpu_runs, cpu_runs, items):
         ready = shared_config and repeatable and len(valid_gpu) >= 3 and len(valid_cpu) >= 3 and \
                 any(x["warmup"] and x.get("returncode") == 0 for x in gpu) and \
                 any(x["warmup"] and x.get("returncode") == 0 for x in cpu)
-        row = {"ready": ready, "gpu_clean_runs": len(valid_gpu), "cpu_clean_runs": len(valid_cpu),
+        row = {"ready": ready, "same_machine": same_machine, "same_gpu_model": same_gpu_model,
+               "gpu_clean_runs": len(valid_gpu), "cpu_clean_runs": len(valid_cpu),
                "passed": False}
         if ready:
             gpu_seconds = statistics.median(x["process_wall_seconds"] for x in valid_gpu)

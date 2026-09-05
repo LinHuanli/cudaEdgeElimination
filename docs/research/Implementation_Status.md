@@ -1,9 +1,17 @@
 # 实现状态（2026-09-06）
 
-最新检查点见 [无标签完整图与全度数 metric](73_FGPU_Hybrid_Bootstrap_and_FullMetric.md)。
+最新开发记录见 [Point 复用与真实 frontier 调度](74_FGPU_Point_Reuse_and_Frontier_Scheduling.md)。
+新增 GPU 全排列目录、完整近点优先回退、真实邻边对 frontier 计数与延后调度；
+修复大成本路径的强制连接代价界。CPU 37/37、CUDA 68/68（含 208 次小图完整求解）
+通过。完整 `pr299` 的单次同二进制调度对照为 200.95→175.08 s，剩余边同为 1,246；
+nonpair 终态不同，最优 tour 检查均通过，尚不是独占节点三次中位数。
+上个全度数 `pr1002` 已完成：501,501→5,002 条，3,176.233 s，仍比 2014 多 481 条。
+新配置 `pr1002` 和远程 L4 的 `vm1084` 已启动，硬件计时分开。四例验收仍未完成。
+
+上个检查点见 [无标签完整图与全度数 metric](73_FGPU_Hybrid_Bootstrap_and_FullMetric.md)。
 新增 GPU 完整图/距离/上界、半整数距离、LP-off pair/fixing、条件 pair 缓存和全度数
 metric；CPU 37/37、CUDA 67/67。旧低度 metric 的完整 `pr1002` pilot 为
-501501→5619 边、2778.532 s，仍比 2014 多 1098 条；新全度数版本正在完整预跑。
+501501→5619 边、2778.532 s，仍比 2014 多 1098 条；全度数版本的新结果见上段。
 `berlin52` 加强后 195→164 边，但该次 wall 从 10.18 增至 17.56 s。四实例目标、
 通用动态 cuts 和 6-path/10-reveal continuation 尚未完成。以下均为较早检查点，
 不得混用版本计时。

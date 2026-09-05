@@ -15,9 +15,13 @@ namespace cudaee::detail {
 struct ResidentGpuOptions {
   // 由同设备的 GpuBootstrap 持有；消除结束前不得释放。
   const std::int64_t* triangular_distance{};
+  const std::uint8_t* permutation_orders{};
   bool gpu_complete_graph{false};
   bool main_pair_cache{false};
   bool full_metric{false};
+  bool point_near_first{false};
+  bool point_adaptive_start{false};
+  bool progress_log{false};
   int device{-1};
   // 0 表示不设人为轮数上限，直到该阶段自然达到固定点。
   std::uint32_t max_hs_epochs{0U};

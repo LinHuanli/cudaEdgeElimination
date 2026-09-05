@@ -71,6 +71,89 @@ void TestDistances() {
   Check(cudaee::IntegerSqrtFloor(16) == 4, "isqrt(16)");
 }
 
+// 独立 oracle 不用负哨兵：只枚举实际包含全部外部连接的 Hamilton 路径，
+// 并直接比较非负内部成本。覆盖零成本、多解、非度量大权重和安全数值上界。
+void TestForcedPathConnections() {
+  namespace hs = cudaee::detail::quick_hs;
+  const std::array<std::array<int, 3>, 7> shapes{
+      {{{2, 2, 0}}, {{2, 3, 0}}, {{3, 3, 0}}, {{2, 4, 0}}, {{3, 4, 0}}, {{2, 3, 3}}, {{2, 4, 4}}}};
+  for (std::size_t sample = 0; sample < 56; ++sample) {
+    const auto sizes = shapes[sample % shapes.size()];
+    const int path_count = sizes[2] == 0 ? 2 : 3;
+    const int n = sizes[0] + sizes[1] + sizes[2];
+    std::vector<std::int64_t> distance(static_cast<std::size_t>(n * n));
+    const std::array<std::int64_t, 4> scales{0, 1, 1000000000LL,
+                                             std::numeric_limits<std::int64_t>::max() / 64 / 997};
+    for (int first = 0; first < n; ++first) {
+      for (int second = first + 1; second < n; ++second) {
+        const auto weight = static_cast<std::int64_t>(
+            (sample * 131 +
+             static_cast<std::size_t>(first * 47 + second * 89 + first * second * 17)) %
+            997);
+        distance[static_cast<std::size_t>(first * n + second)] =
+            distance[static_cast<std::size_t>(second * n + first)] =
+                weight * scales[sample / shapes.size() % scales.size()];
+      }
+    }
+    if (sample == 2) {
+      // 旧 INT_MIN/(n-1) 会接受遗漏 2--3 的假改进，正确结果应保持开放。
+      constexpr std::int64_t regression[6][6] = {{0, 62, 20, 14, 88, 31}, {62, 0, 19, 52, 83, 66},
+                                                 {20, 19, 0, 58, 33, 69}, {14, 52, 58, 0, 4, 2},
+                                                 {88, 83, 33, 4, 0, 65},  {31, 66, 69, 2, 65, 0}};
+      for (int first = 0; first < n; ++first)
+        for (int second = 0; second < n; ++second)
+          distance[static_cast<std::size_t>(first * n + second)] =
+              regression[first][second] * 100000000LL;
+    }
+    const hs::GraphView graph{.dimension = n, .distance = distance.data()};
+    hs::SmallPath paths[3]{};
+    int cursor = 0;
+    unsigned required = 0;
+    for (int path = 0; path < path_count; ++path) {
+      paths[path].size = sizes[path];
+      for (int index = 0; index < sizes[path]; ++index)
+        paths[path].node[index] = cursor++;
+      if (path + 1 < path_count)
+        required |= 1U << (cursor - 1);
+    }
+    std::int64_t original = 0;
+    for (int position = 0; position < n - 1; ++position)
+      if ((required & (1U << position)) == 0U)
+        original += distance[static_cast<std::size_t>(position * n + position + 1)];
+    std::vector<int> order(static_cast<std::size_t>(n));
+    std::iota(order.begin(), order.end(), 0);
+    bool expected = true;
+    do {
+      unsigned covered = 0;
+      std::int64_t candidate = 0;
+      for (int position = 0; position < n - 1; ++position) {
+        const int a = order[static_cast<std::size_t>(position)];
+        const int b = order[static_cast<std::size_t>(position + 1)];
+        const unsigned link = std::abs(a - b) == 1 ? 1U << std::min(a, b) : 0U;
+        if ((required & link) != 0U)
+          covered |= link;
+        else
+          candidate += distance[static_cast<std::size_t>(a * n + b)];
+      }
+      if (covered == required && candidate < original) {
+        expected = false;
+        break;
+      }
+    } while (std::next_permutation(order.begin() + 1, order.end() - 1));
+    const int permutation[3] = {0, 1, 2};
+    Check(hs::PathOrderIsOpt(graph, paths, path_count, permutation, 0U) == expected,
+          "path-order preserves forced links at all safe costs");
+    if (path_count == 2) {
+      std::iota(order.begin(), order.end(), 0);
+      Check(cudaee::detail::main_edge::CachedTwoPathOrderIsOpt(graph, order.data(), sizes[0], n,
+                                                               false) == expected,
+            "cached path-order preserves forced links at all safe costs");
+    }
+    if (sample == 2)
+      Check(expected, "forced-link regression must remain open");
+  }
+}
+
 void TestMetricPathDistanceCache() {
   constexpr std::int32_t dimension = 9;
   std::vector<std::int32_t> degree(static_cast<std::size_t>(dimension), dimension - 1);
@@ -382,7 +465,7 @@ void TestWholeCyclePathNormalization() {
       }
     }
     Check(!cudaee::detail::main_edge::CanEliminate(tied_view, edge[0], edge[1], potentials.data(),
-                                                  count),
+                                                   count),
           "Main Edge preserves every edge in the union of tied optimal tours");
   }
 }
@@ -668,6 +751,7 @@ void TestQuickHsWarpPathDifferential() {
 
 int main() {
   TestDistances();
+  TestForcedPathConnections();
   TestMetricPathDistanceCache();
   TestFixedAnchorNonpairTheorem();
   TestLpEpochAndExactBound();

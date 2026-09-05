@@ -80,13 +80,15 @@ CachedTwoPathOrderIsOpt(const quick_hs::GraphView& graph, const std::int32_t* co
           quick_hs::Distance(graph, nodes[first], nodes[second]);
     }
   }
-  const std::int64_t forced_cost = static_cast<std::int64_t>(INT_MIN) / (node_count - 1);
   std::int64_t original = CachedDistance(distances, node_count, 0, 1);
   for (std::int32_t position = 1; position < node_count - 1; ++position) {
-    original += position == first_path_size - 1
-                    ? forced_cost
-                    : CachedDistance(distances, node_count, position, position + 1);
+    if (position != first_path_size - 1) {
+      original += CachedDistance(distances, node_count, position, position + 1);
+    }
   }
+  // 与通用实现相同的严格支配界：遗漏外部连接的排列不能成为改进见证。
+  const std::int64_t forced_cost = -(original + 1);
+  original += forced_cost;
 
   const std::int32_t dynamic_nodes = node_count - 2;
   std::uint8_t order[kMaximumMetricPathNodes - 2]{};

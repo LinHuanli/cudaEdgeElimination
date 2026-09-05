@@ -1,6 +1,7 @@
 #include "../fgpu/resident_backend.hpp"
 
 #include "../fgpu/main_edge_predicate.hpp"
+#include "../fgpu/permutation_catalog.hpp"
 #include "../fgpu/quick_hs_predicate.hpp"
 #include "../fgpu/resident_lp_model.hpp"
 #include "../fgpu/sparse_pdhg.hpp"
@@ -22,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -860,6 +862,30 @@ __device__ bool SelectGeometryCandidatesAtPosition(
   return true;
 }
 
+__global__ void PointNearPriorityKernel(const int dimension, const GeometryKdNode* const tree,
+                                        const std::int64_t* const x, const std::int64_t* const y,
+                                        std::int32_t* const priority, std::uint32_t* const mask) {
+  const int center = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (center >= dimension)
+    return;
+  std::int32_t nodes[quick_hs::kMaxPotentialNodes]{};
+  double scores[quick_hs::kMaxPotentialNodes]{};
+  std::int32_t selected = 0;
+  if (!SelectGeometryCandidatesAtPosition(center, center, tree, 0, x, y, 1, 2,
+                                          quick_hs::kMaxPotentialNodes, nodes, scores, &selected)) {
+    selected = 0; // 排序不可用时完整扫描全部点，不缩小搜索域。
+  }
+  const std::size_t row_words = (static_cast<std::size_t>(dimension) + 31U) / 32U;
+  for (int rank = 0; rank < quick_hs::kMaxPotentialNodes; ++rank) {
+    priority[static_cast<std::size_t>(center) * quick_hs::kMaxPotentialNodes + rank] =
+        rank < selected ? nodes[rank] : -1;
+    if (rank < selected) {
+      mask[static_cast<std::size_t>(center) * row_words + nodes[rank] / 32] |=
+          1U << (nodes[rank] % 32);
+    }
+  }
+}
+
 __global__ void NearestDistanceKernel(const quick_hs::GraphView graph,
                                       std::int64_t* const nearest) {
   const std::int32_t node = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
@@ -1414,13 +1440,18 @@ PathOrderIsOptWarp(const quick_hs::GraphView graph, const quick_hs::SmallPath* c
   }
   __syncwarp(kFullWarp);
   const std::int32_t dynamic_nodes = total - 2;
-  const std::int64_t forced_cost = static_cast<std::int64_t>(INT_MIN) / (total - 1);
   std::int64_t original = WarpPathDistance(distance_cache, total, 0, 1);
+  std::int32_t outside_links = 0;
   for (std::int32_t position = 1; position < total - 1; ++position) {
-    original += fixed_after[position] != 0U
-                    ? forced_cost
-                    : WarpPathDistance(distance_cache, total, position, position + 1);
+    if (fixed_after[position] != 0U) {
+      ++outside_links;
+    } else {
+      original += WarpPathDistance(distance_cache, total, position, position + 1);
+    }
   }
+  // L+1 严格支配所有真实内部路径成本；大坐标也必须保留全部外部连接。
+  const std::int64_t forced_cost = -(original + 1);
+  original += static_cast<std::int64_t>(outside_links) * forced_cost;
 
   if (subset_dp_cache != nullptr) {
     // -e2 的 10 点谓词若直接枚举会为每个 path orientation 扫描 8! 个
@@ -1486,12 +1517,24 @@ PathOrderIsOptWarp(const quick_hs::GraphView graph, const quick_hs::SmallPath* c
   }
 
   const std::int32_t permutation_count = SmallFactorial(dynamic_nodes);
+  const auto permutation_offset = permutation_catalog::Offset(dynamic_nodes);
   for (std::int32_t window = 0; window < permutation_count; window += 32) {
     const std::int32_t rank = window + lane;
     bool improving = false;
     if (rank < permutation_count) {
       std::uint8_t dynamic_order[quick_hs::kMaxPathNodes - 2]{};
-      UnrankSmallPermutation(rank, dynamic_nodes, dynamic_order);
+      if (graph.permutation_orders != nullptr &&
+          dynamic_nodes <= permutation_catalog::kMaximumNodes) {
+        // position-major 布局使同一位置的相邻 permutation rank 由 warp 合并读取。
+        // 目录已在 bootstrap 独立检查；重放仍可从头计算，目录不缩减排列覆盖。
+        for (int position = 0; position < dynamic_nodes; ++position)
+          dynamic_order[position] =
+              graph.permutation_orders[permutation_offset +
+                                       static_cast<std::size_t>(position) * permutation_count +
+                                       rank];
+      } else {
+        UnrankSmallPermutation(rank, dynamic_nodes, dynamic_order);
+      }
       std::int64_t candidate = WarpPathDistance(distance_cache, total, dynamic_order[0] + 1, 0);
       for (std::int32_t position = 1; position < dynamic_nodes; ++position) {
         candidate += WarpPathTransitionCost(
@@ -3776,7 +3819,8 @@ __global__ __launch_bounds__(128, MinBlocks) void PointNonpairKernel(
     const std::int64_t* const reduced_cost, const Signed128* const lower_bound,
     const std::int64_t incumbent_numerator, unsigned long long* const lp_closed_replies,
     unsigned long long* const point_path_end_closed_replies,
-    unsigned long long* const proposal_count) {
+    unsigned long long* const proposal_count, const std::int32_t* const near_points,
+    const std::uint32_t* const near_mask) {
   __shared__ std::int32_t center;
   __shared__ std::int32_t first;
   __shared__ std::int32_t second;
@@ -3801,6 +3845,22 @@ __global__ __launch_bounds__(128, MinBlocks) void PointNonpairKernel(
         selected_point = -1;
       }
       __syncthreads();
+      if (near_points != nullptr) {
+        for (int rank = 0; rank < quick_hs::kMaxPotentialNodes; ++rank) {
+          const int point =
+              near_points[static_cast<std::size_t>(center) * quick_hs::kMaxPotentialNodes + rank];
+          if (point < 0)
+            break;
+          const bool proved = PointProvesNonpairCta(
+              graph, first, center, second, first_edge, second_edge, point, reduced_cost,
+              lower_bound, incumbent_numerator, lp_closed_replies, point_path_end_closed_replies);
+          if (threadIdx.x == 0U && proved)
+            selected_point = point;
+          __syncthreads();
+          if (selected_point >= 0)
+            break;
+        }
+      }
       // AND reply 数是 C(deg(point), 2)。按真实活动度数分桶后仍完整访问
       // 所有 point，但先尝试代价最低、最容易首成功的 witness；桶内保持
       // node-id 规范顺序，结果确定且不把启发式顺序当成完整性假设。
@@ -3810,8 +3870,15 @@ __global__ __launch_bounds__(128, MinBlocks) void PointNonpairKernel(
           const std::int32_t point_degree = graph.degree[point];
           const std::int32_t point_bucket =
               point_degree <= 2 ? 0 : (point_degree <= 4 ? 1 : (point_degree <= 8 ? 2 : 3));
+          const std::size_t near_row_words =
+              (static_cast<std::size_t>(graph.dimension) + 31U) / 32U;
+          const bool already_tried =
+              near_mask != nullptr &&
+              ((near_mask[static_cast<std::size_t>(center) * near_row_words + point / 32] >>
+                (point % 32)) &
+               1U) != 0U;
           const bool proved =
-              point_bucket == degree_bucket &&
+              !already_tried && point_bucket == degree_bucket &&
               PointProvesNonpairCta(graph, first, center, second, first_edge, second_edge, point,
                                     reduced_cost, lower_bound, incumbent_numerator,
                                     lp_closed_replies, point_path_end_closed_replies);
@@ -4818,7 +4885,8 @@ QuickHsPathDifferentialResult RunQuickHsPathDifferentialCuda(const int requested
                                      static_cast<std::uint64_t>(sample + 7U) *
                                          static_cast<std::uint64_t>(first + second + 1) * 13U) %
                                     997U;
-        const std::int64_t weight = static_cast<std::int64_t>(value + 1U);
+        const std::int64_t scale = sample % 4U == 0U ? 1000000000LL : 1LL;
+        const std::int64_t weight = static_cast<std::int64_t>(value + 1U) * scale;
         host_distance[matrix_begin + static_cast<std::size_t>(first) * kDimension +
                       static_cast<std::size_t>(second)] = weight;
         host_distance[matrix_begin + static_cast<std::size_t>(second) * kDimension +
@@ -5116,6 +5184,8 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   DeviceBuffer<std::uint8_t> device_committed(edge_count, device);
   DeviceBuffer<std::int32_t> device_first_witness(edge_count, device);
   DeviceBuffer<std::int32_t> device_second_witness(edge_count, device);
+  DeviceBuffer<std::int32_t> device_point_priority;
+  DeviceBuffer<std::uint32_t> device_point_priority_mask;
   DeviceBuffer<std::uint32_t> device_main_pair_cache;
   DeviceBuffer<unsigned long long> device_main_maximum_span(1U, device);
   std::size_t main_pair_cache_capacity{};
@@ -5326,7 +5396,21 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
                            .complete_graph = complete_graph,
                            .point_leaf_kernel = options.point_leaf_kernel,
                            .triangular_distance = options.triangular_distance,
-                           .coordinate_denominator = graph.integer_coordinate_denominator};
+                           .coordinate_denominator = graph.integer_coordinate_denominator,
+                           .permutation_orders = options.permutation_orders};
+  if (options.point_near_first) {
+    const auto mask_words = dimension * ((dimension + 31U) / 32U);
+    device_point_priority =
+        DeviceBuffer<std::int32_t>(dimension * quick_hs::kMaxPotentialNodes, device);
+    device_point_priority_mask = DeviceBuffer<std::uint32_t>(mask_words, device);
+    CheckCuda(cudaMemset(device_point_priority_mask.get(), 0, device_point_priority_mask.bytes()),
+              "clear Point priority mask");
+    PointNearPriorityKernel<<<vertex_blocks, kThreads>>>(
+        graph.dimension, device_geometry_kd.get(), device_x.get(), device_y.get(),
+        device_point_priority.get(), device_point_priority_mask.get());
+    CheckCuda(cudaGetLastError(), "PointNearPriorityKernel launch");
+    result.resident_bytes += device_point_priority.bytes() + device_point_priority_mask.bytes();
+  }
   CheckCuda(cudaMemset(device_invalid.get(), 0, sizeof(std::int32_t)),
             "cudaMemset resident metric validation");
   ValidateMetricKernel<<<all_edge_blocks, kThreads>>>(
@@ -5584,6 +5668,8 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
                              const bool pair_service_stage = true) -> std::size_t {
     rebuild_compact_adjacency();
     if (method == EliminationMethod::kLpBox) {
+      if (options.enable_point_nonpair && !pair_service_stage)
+        ++result.lp.point_deferred_sweeps;
       // P3：对当前紧凑 CSR 的全部邻边对执行 LP path-system
       // forced-one 授权。这些 bit 会被后续 Main/Quick-HS/HT reply 直接消费。
       BuildPairCountsKernel<<<offset_blocks, kThreads>>>(graph.dimension, device_degree.get(),
@@ -5753,7 +5839,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
             device_lp_path_closed_replies.get());
       }
     } else if (main_edge_stage) {
-      for (std::int32_t begin = 0; begin < work_count; begin += main_batch_size) {
+      for (std::int32_t begin = 0; begin < work_count;) {
         const auto batch_count = std::min(main_batch_size, work_count - begin);
         MainEdgeContinuationKernel<false><<<batch_count, kThreads>>>(
             batch_count, work_edge_ids + begin, device_edge_u.get(), device_edge_v.get(),
@@ -5766,6 +5852,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
             options.main_pair_cache ? device_main_pair_cache.get() : nullptr, main_pair_words,
             options.full_metric);
         CheckCuda(cudaGetLastError(), "Main cached proposal batch launch");
+        begin += batch_count;
       }
     } else if (method == EliminationMethod::kJv) {
       JvKernel<<<work_blocks, kThreads>>>(work_count, work_edge_ids, device_edge_u.get(),
@@ -6161,6 +6248,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
         result.lp.pair_filter_ms += ElapsedMilliseconds(lp_phase_begin);
         lp_phase_begin = SteadyClock::now();
         if (options.enable_point_nonpair && pair_service_stage) {
+          ++result.lp.point_service_sweeps;
           const std::int64_t point_blocks = std::min<std::int64_t>(current_pair_count, 65535);
           // 两种寄存器预算编译为独立 kernel，搜索域/回复顺序完全相同。
           const auto launch_point = [&]<int MinBlocks>() {
@@ -6170,7 +6258,9 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
                 device_nonpair_point_witness.get(), pair_reduced, pair_bound,
                 lp_incumbent_numerator, device_lp_path_closed_replies.get(),
                 device_point_path_end_closed_replies.get(),
-                device_nonpair_proposal_counts.get() + 2);
+                device_nonpair_proposal_counts.get() + 2,
+                options.point_near_first ? device_point_priority.get() : nullptr,
+                options.point_near_first ? device_point_priority_mask.get() : nullptr);
           };
           if (options.point_cta_blocks == 4U) {
             launch_point.template operator()<4>();
@@ -6397,7 +6487,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
               lp_replay_reduced_cost, lp_replay_bound, lp_incumbent_numerator);
         }
       } else if (main_edge_stage) {
-        for (std::int32_t begin = 0; begin < work_count; begin += main_batch_size) {
+        for (std::int32_t begin = 0; begin < work_count;) {
           const auto batch_count = std::min(main_batch_size, work_count - begin);
           MainEdgeContinuationKernel<true><<<batch_count, kThreads>>>(
               batch_count, work_edge_ids + begin, device_edge_u.get(), device_edge_v.get(),
@@ -6411,6 +6501,7 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
               options.main_pair_cache ? device_main_pair_cache.get() : nullptr, main_pair_words,
               options.full_metric);
           CheckCuda(cudaGetLastError(), "Main cached replay batch launch");
+          begin += batch_count;
         }
       } else if (method == EliminationMethod::kJv) {
         ReplayJvKernel<<<work_blocks, kThreads>>>(
@@ -6651,6 +6742,18 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
     CheckCuda(cudaMemcpy(&committed_count, device_committed_count.get(), sizeof(committed_count),
                          cudaMemcpyDeviceToHost),
               "cudaMemcpy resident committed count");
+    if (options.progress_log) {
+      // 只输出已有的阶段计数，不下载候选、不引入 CPU 判定；外部 wall 包含日志时间。
+      std::clog << "[hybrid] snapshot=" << snapshot.sequence << " phase="
+                << (extra_edge_stage  ? "extra-edge"
+                    : main_edge_stage ? "main-edge"
+                                      : ToString(method))
+                << " position=" << main_position << " edges=" << current_edges
+                << " deleted=" << committed_count
+                << " nonpairs_added_total=" << result.nonpair_committed
+                << " point_sweeps=" << result.lp.point_service_sweeps
+                << " proposal_ms=" << device_ms << '\n';
+    }
     if (committed_count == 0U) {
       return 0U;
     }
@@ -6752,14 +6855,33 @@ ResidentGpuResult RunResidentEliminationCuda(const GraphSnapshot& graph,
   // 一轮 Quick-HS 的候选展开量时直接进入联合固定点，避免稀疏图重复执行
   // Main/-e2；只有 pair frontier 更大时才先收敛 edge services。这里不丢弃
   // 任何 point/reply，也不设置规模上限，只用两个实际 frontier 决定顺序。
+  std::int64_t initial_pair_frontier = 0;
   if (options.enable_point_nonpair || options.enable_direct_fix) {
     rebuild_compact_adjacency();
+    // 此时尚未分配 nonpair mask，current_pair_count 仍为 0；它不是实际 frontier。
+    // 必须先在 GPU 上统计当前度数的全部 C(deg,2)，只回传调度所需的单个计数。
+    BuildPairCountsKernel<<<offset_blocks, kThreads>>>(graph.dimension, device_degree.get(),
+                                                       device_pair_counts.get());
+    CheckCuda(cudaGetLastError(), "initial Point frontier count launch");
+    CheckCuda(cub::DeviceScan::ExclusiveSum(device_pair_scan_temp.get(), pair_scan_temp_bytes,
+                                            device_pair_counts.get(),
+                                            device_pair_offsets_next.get(), graph.dimension + 1),
+              "initial Point frontier scan");
+    CheckCuda(cudaMemcpy(&initial_pair_frontier, device_pair_offsets_next.get() + graph.dimension,
+                         sizeof(initial_pair_frontier), cudaMemcpyDeviceToHost),
+              "initial Point frontier count download");
+    if (initial_pair_frontier < 0)
+      throw std::overflow_error("initial Point frontier 计数溢出");
   }
   const std::int64_t edge_frontier =
       static_cast<std::int64_t>(active_edge_count) *
       static_cast<std::int64_t>(std::max<std::uint32_t>(1U, options.quick_hs_candidates));
-  bool point_service_ready = (!options.enable_point_nonpair && !options.enable_direct_fix) ||
-                             current_pair_count <= edge_frontier;
+  bool point_service_ready = !options.point_adaptive_start ||
+                             (!options.enable_point_nonpair && !options.enable_direct_fix) ||
+                             initial_pair_frontier <= edge_frontier;
+  result.lp.point_initial_pairs = static_cast<std::uint64_t>(initial_pair_frontier);
+  result.lp.point_initial_edge_frontier = static_cast<std::uint64_t>(edge_frontier);
+  result.lp.point_deferred_initially = !point_service_ready;
   std::uint32_t orchestration = 0U;
   const bool pair_services =
       options.enable_point_nonpair || options.enable_direct_fix || options.enable_fixing;

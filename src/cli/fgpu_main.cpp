@@ -20,13 +20,16 @@ using Arguments = std::map<std::string, std::string>;
 void PrintHelp() {
   std::cout << "fgpu-elim：单 GPU、可重放证明的 TSP 边消除闭环\n\n"
             << "用法：\n"
-            << "  fgpu-elim solve --instance FILE [--input-edges FILE] --tour FILE\n"
+            << "  fgpu-elim solve --instance FILE [--input-edges FILE] [--tour FILE]\n"
             << "    [--mode gpu-safe|gpu-fast-raw] [--device auto|N]\n"
             << "    --output-edges FILE --fixed FILE --nonpairs FILE --manifest FILE\n"
             << "    [--certificate FILE] [--tour-role incumbent|known-optimum]\n"
             << "    [--expected-cost N]\n"
             << "    [--profile legacy|hybrid-e2e]（hybrid 仅接收坐标，GPU 自建上界）\n"
             << "    [--distance-cache 0|1]（hybrid 距离缓存消融）\n"
+            << "    [--main-pair-cache 0|1] [--full-metric 0|1]（hybrid 全度数 metric）\n"
+            << "    [--leaf-permutation-cache 0|1] [--point-near-first 0|1]（完整扫描的性能消融）\n"
+            << "    [--point-adaptive-start 0|1]（按真实 frontier 推迟密图 Point，全量回扫）\n"
             << "    [--lp-backend off|primal-dual-sec|sec-dual]（LP 关闭不关闭 pair/fix）\n"
             << "    [--point-leaf-kernel permutation|prescreen-permutation|prescreen-subset-dp]\n"
             << "    [--point-cta-blocks 2|4]（寄存器/驻留策略，不限制任务数量）\n"
@@ -379,12 +382,29 @@ void ResidentLocalCommand(const Arguments& arguments) {
 }
 
 void SolveCommand(const Arguments& arguments) {
-  ValidateKeys(
-      arguments,
-      {"instance",         "input-edges", "tour",           "tour-role",       "expected-cost",
-       "device",           "gpus",        "mode",           "output-edges",    "fixed",
-       "nonpairs",         "certificate", "manifest",       "lp-backend",      "point-leaf-kernel",
-       "point-cta-blocks", "profile",     "distance-cache", "main-pair-cache", "full-metric"});
+  ValidateKeys(arguments, {"instance",
+                           "input-edges",
+                           "tour",
+                           "tour-role",
+                           "expected-cost",
+                           "device",
+                           "gpus",
+                           "mode",
+                           "output-edges",
+                           "fixed",
+                           "nonpairs",
+                           "certificate",
+                           "manifest",
+                           "lp-backend",
+                           "point-leaf-kernel",
+                           "point-cta-blocks",
+                           "profile",
+                           "distance-cache",
+                           "main-pair-cache",
+                           "full-metric",
+                           "leaf-permutation-cache",
+                           "point-near-first",
+                           "point-adaptive-start"});
   cudaee::FgpuSolveOptions options;
   const auto profile = Optional(arguments, "profile", "legacy");
   if (profile != "legacy" && profile != "hybrid-e2e")
@@ -393,9 +413,13 @@ void SolveCommand(const Arguments& arguments) {
   options.distance_cache = OptionalBoolean(arguments, "distance-cache", true);
   options.main_pair_cache = OptionalBoolean(arguments, "main-pair-cache", true);
   options.full_metric = OptionalBoolean(arguments, "full-metric", true);
+  options.leaf_permutation_cache = OptionalBoolean(arguments, "leaf-permutation-cache", false);
+  options.point_near_first = OptionalBoolean(arguments, "point-near-first", false);
+  options.point_adaptive_start = OptionalBoolean(arguments, "point-adaptive-start", false);
   if (!options.hybrid_e2e &&
       (arguments.contains("distance-cache") || arguments.contains("main-pair-cache") ||
-       arguments.contains("full-metric"))) {
+       arguments.contains("full-metric") || arguments.contains("leaf-permutation-cache") ||
+       arguments.contains("point-near-first") || arguments.contains("point-adaptive-start"))) {
     throw std::invalid_argument("hybrid cache/metric 消融参数仅适用于 hybrid-e2e");
   }
   if (options.hybrid_e2e && options.full_metric && !options.main_pair_cache)

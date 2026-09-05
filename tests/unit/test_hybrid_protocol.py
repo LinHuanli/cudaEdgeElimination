@@ -19,11 +19,13 @@ class ProtocolTest(unittest.TestCase):
             for iteration in range(4):
                 common = {"instance": item["name"], "iteration": iteration,
                           "warmup": iteration == 0, "clean": True, "returncode": 0,
+                          "host_identity": {"hostname": "synthetic-node", "cpu_model": "synthetic-cpu-model"},
                           "config_sha256": "synthetic-config"}
                 self.gpu.append({**common, "executable_sha256": "synthetic-gpu",
                     "process_wall_seconds": 10.0,
                     "postcheck": {"known_optimum_conflicts": 0, "active_edges": item["paper_edges"] - 1},
                     "report": {"lp_backend": "off", "distance_cache": True, "main_pair_cache": True,
+                               "gpu_identity": {"name": "synthetic-gpu-model", "compute_major": 8, "compute_minor": 9},
                                "full_degree_metric": True, "termination": "fixed-point",
                                "gpu_replayed": True, "proof_rejected": 0, "profile": "hybrid-e2e",
                                "initial_edges": item["n"] * (item["n"] - 1) // 2,
@@ -73,6 +75,25 @@ class ProtocolTest(unittest.TestCase):
             self.assertFalse(compare(bad, self.cpu, self.items)["complete_acceptance"])
         self.gpu[1]["report"]["final_state_hash"] = "different"
         self.assertFalse(compare(self.gpu, self.cpu, self.items)["complete_acceptance"])
+
+    def test_point_configuration_must_be_shared(self):
+        for field, value in (("leaf_permutation_cache", True), ("point_near_first", True),
+                             ("point_adaptive_start", True),
+                             ("point_leaf_kernel", "subset-dp"), ("point_cta_blocks", 8)):
+            bad = copy.deepcopy(self.gpu)
+            bad[1]["report"][field] = value
+            self.assertFalse(compare(bad, self.cpu, self.items)["complete_acceptance"])
+
+    def test_cross_machine_and_gpu_rejected(self):
+        for host in ({}, {"hostname": "remote", "cpu_model": "synthetic-cpu-model"},
+                     {"hostname": "synthetic-node", "cpu_model": "other-cpu"}):
+            bad = copy.deepcopy(self.gpu)
+            bad[1]["host_identity"] = host
+            self.assertFalse(compare(bad, self.cpu, self.items)["complete_acceptance"])
+        for field, value in (("name", "different GPU"), ("compute_major", 9), ("compute_minor", 0)):
+            bad = copy.deepcopy(self.gpu)
+            bad[1]["report"]["gpu_identity"][field] = value
+            self.assertFalse(compare(bad, self.cpu, self.items)["complete_acceptance"])
 
 
 if __name__ == "__main__":

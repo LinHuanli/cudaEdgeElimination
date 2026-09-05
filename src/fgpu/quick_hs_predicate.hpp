@@ -54,6 +54,7 @@ struct GraphView {
   // 全实例不可变三角距离缓存，含已删除边；不能从稀疏 CSR 推断距离。
   const std::int64_t* triangular_distance{};
   std::uint32_t coordinate_denominator{1U};
+  const std::uint8_t* permutation_orders{};
 };
 
 struct Witness {
@@ -464,14 +465,21 @@ PathOrderIsOpt(const GraphView& graph, const SmallPath* const paths, const std::
   }
 
   const std::int32_t dynamic_nodes = total - 2;
-  // KH 用 INT_MIN/(N-1) 作为路径间固定连接的哨兵。这里提升为 int64
-  // 只为避免中间和溢出，比较结果与其 32 位安全输入一致。
-  const std::int64_t forced_cost = static_cast<std::int64_t>(INT_MIN) / (total - 1);
   std::int64_t original = Distance(graph, order[0], order[1]);
+  std::int32_t outside_links = 0;
   for (std::int32_t position = 1; position < total - 1; ++position) {
-    original += fixed_after[position] != 0U ? forced_cost
-                                            : Distance(graph, order[position], order[position + 1]);
+    if (fixed_after[position] != 0U) {
+      ++outside_links;
+    } else {
+      original += Distance(graph, order[position], order[position + 1]);
+    }
   }
+  // 真实内部路径成本为 L，所有距离非负。令每条外部强制连接成本为 -(L+1)，
+  // 则遗漏任意一条连接的排列都不可能严格优于原路径；不能沿用仅适用于
+  // 小成本输入的 32 位 INT_MIN 哨兵。入口的 max(cost)<=INT64_MAX/64
+  // 与至多 10 节点/3 路径保证这里的正负中间和均不溢出。
+  const std::int64_t forced_cost = -(original + 1);
+  original += static_cast<std::int64_t>(outside_links) * forced_cost;
 
   // 当前三路径 continuation 的内部点最多 8 个。旧实现为每个 CUDA 线程分配
   // subset×last 的 int64 Held--Karp 表，编译后产生约 3 KiB local stack，

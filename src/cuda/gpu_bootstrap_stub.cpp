@@ -11,7 +11,11 @@ void GpuBootstrap::BuildCompleteGraph(GraphSnapshot*) {
   throw std::runtime_error("GPU bootstrap 需要 CUDA 构建");
 }
 void GpuBootstrap::GenerateIncumbent() { throw std::runtime_error("GPU bootstrap 需要 CUDA 构建"); }
+void GpuBootstrap::BuildPermutationCatalog() {
+  throw std::runtime_error("GPU 组合缓存需要 CUDA 构建");
+}
 const std::int64_t* GpuBootstrap::distances() const { return nullptr; }
+const std::uint8_t* GpuBootstrap::permutations() const { return nullptr; }
 int GpuBootstrap::device() const { return -1; }
 const GpuBootstrapMetrics& GpuBootstrap::metrics() const {
   throw std::runtime_error("GPU bootstrap 需要 CUDA 构建");

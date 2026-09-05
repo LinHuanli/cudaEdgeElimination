@@ -20,6 +20,9 @@ def main():
     fixtures = [[(rng.randrange(40), rng.randrange(40)) for _ in range(n)] for n in range(3, 10)]
     fixtures += [[(0, 0)] * 5, [(0, 5), (9, 3), (5, 2), (5, 11), (1, 5)],
                  [(10 * x, 10 * y) for x in range(5) for y in range(2)],
+                 [(0, 0), (1000000000, 0), (2000000000, 1000000000),
+                  (1000000000, 2000000000), (0, 1000000000), (800000000, 1200000000)],
+                 [(x * 20000000, y * 20000000) for x, y in fixtures[-1]],
                  [(0, 0), (0.5, 0), (2.5, 3), (4, 2.5), (5, 3), (8.5, 0)]]
     fixtures.append(fixtures[-1])
     nonpair_off = 0
@@ -37,12 +40,23 @@ def main():
                     itertools.product(("off", "primal-dual-sec"), ("0", "1"))]
         variants += [(lp, "1", pair_cache, "0") for lp, pair_cache in
                      itertools.product(("off", "primal-dual-sec"), ("0", "1"))]
-        for lp, cache, pair_cache, full_metric in variants:
-            target = directory / f"{lp}-cache{cache}-pair{pair_cache}-metric{full_metric}"
+        variants = [(*v, "0", "0") for v in variants]
+        variants += [(lp, "1", "1", "1", permutation, near) for lp in ("off", "primal-dual-sec")
+                     for permutation, near in (("0", "1"), ("1", "0"), ("1", "1"))]
+        variants = [(*v, "0") for v in variants]
+        variants += [(lp, "1", "1", "1", "1", "1", "1") for lp in ("off", "primal-dual-sec")]
+        # 大成本路径的精确性与浮点 LP 量化域分开检查；不放宽 LP 的安全范围。
+        large_cost = max(max(abs(x), abs(y)) for x, y in points) >= 100000000
+        if large_cost:
+            variants = [v for v in variants if v[0] == "off"]
+        for lp, cache, pair_cache, full_metric, permutation, near, adaptive in variants:
+            target = directory / f"{lp}-cache{cache}-pair{pair_cache}-metric{full_metric}-perm{permutation}-near{near}-adaptive{adaptive}"
             target.mkdir(exist_ok=True)
             command = [str(exe), "solve", "--profile", "hybrid-e2e", "--instance", str(tsp),
                        "--device", "0", "--lp-backend", lp, "--distance-cache", cache,
                        "--main-pair-cache", pair_cache, "--full-metric", full_metric,
+                       "--leaf-permutation-cache", permutation, "--point-near-first", near,
+                       "--point-adaptive-start", adaptive,
                        "--output-edges", str(target / "out.edg"), "--fixed", str(target / "out.fix"),
                        "--nonpairs", str(target / "out.nonpairs"), "--manifest", str(target / "out.json")]
             result = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -64,15 +78,18 @@ def main():
                 assert report["incumbent_starts"] == min(128, n)
             assert report["main_pair_cache"] == (pair_cache == "1")
             assert report["full_degree_metric"] == (full_metric == "1")
+            assert report["leaf_permutation_cache"] == (permutation == "1")
+            assert report["point_near_first"] == (near == "1")
+            assert report["point_adaptive_start"] == (adaptive == "1")
             key = (lp, full_metric)
             if key in hashes:
-                assert hashes[key] == report["final_state_hash"], "距离/条件 pair 缓存改变了终态"
+                assert hashes[key] == report["final_state_hash"], "缓存或点顺序改变了终态"
             hashes[key] = report["final_state_hash"]
         # 普通非最优 incumbent 可被合法删除，不能因 final nonpair 冲突报错。
         bad_tour = directory / "nonoptimal.tour"
         candidate = next((p for p in itertools.permutations(range(n)) if
                           sum(distance(points[p[i]], points[p[(i+1) % n]], metric) for i in range(n)) > optimum), None)
-        if candidate is not None:
+        if candidate is not None and not large_cost:
             bad_tour.write_text(f"NAME: heuristic\nTYPE: TOUR\nDIMENSION: {n}\nTOUR_SECTION\n" +
                                 "\n".join(str(v + 1) for v in candidate) + "\n-1\nEOF\n")
             legacy = command.copy()
@@ -81,7 +98,8 @@ def main():
                                    ("--nonpairs", "out.nonpairs"), ("--manifest", "out.json")):
                 legacy[legacy.index(flag) + 1] = str(legacy_directory / filename)
             legacy[legacy.index("--profile") + 1] = "legacy"
-            for flag in ("--distance-cache", "--main-pair-cache", "--full-metric"):
+            for flag in ("--distance-cache", "--main-pair-cache", "--full-metric",
+                         "--leaf-permutation-cache", "--point-near-first", "--point-adaptive-start"):
                 offset = legacy.index(flag)
                 del legacy[offset:offset+2]
             legacy += ["--tour", str(bad_tour), "--tour-role", "incumbent"]

@@ -6,10 +6,12 @@ namespace cudaee {
 
 struct FgpuBootstrapMetrics {
   std::uint64_t distance_bytes{};
+  std::uint64_t permutation_bytes{};
   std::uint32_t starts{};
   std::uint64_t improvements{};
   std::int64_t incumbent_cost{-1};
   double distance_ms{};
+  double permutation_ms{};
   double incumbent_ms{};
   double total_ms{};
 };
@@ -32,6 +34,11 @@ struct FgpuLpMetrics {
   std::uint32_t point_registers{};
   std::uint32_t point_active_blocks_per_sm{};
   std::uint64_t point_local_bytes_per_thread{};
+  std::uint64_t point_initial_pairs{};
+  std::uint64_t point_initial_edge_frontier{};
+  std::uint32_t point_service_sweeps{};
+  std::uint32_t point_deferred_sweeps{};
+  bool point_deferred_initially{};
 };
 
 } // namespace cudaee

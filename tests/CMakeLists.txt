@@ -59,6 +59,7 @@ if(CUDAEE_ENABLE_CUDA)
   add_test(NAME unit.main_metric COMMAND cudaee_main_metric_unit)
   set_tests_properties(unit.main_metric PROPERTIES LABELS "correctness;gpu;metric" SKIP_RETURN_CODE 77)
   add_executable(cudaee_gpu_bootstrap_unit unit/test_gpu_bootstrap.cpp)
+  target_include_directories(cudaee_gpu_bootstrap_unit PRIVATE "${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
   target_link_libraries(cudaee_gpu_bootstrap_unit PRIVATE cudaee_core)
   add_test(NAME unit.gpu_bootstrap COMMAND cudaee_gpu_bootstrap_unit)
   set_tests_properties(unit.gpu_bootstrap PROPERTIES LABELS "correctness;gpu;bootstrap" SKIP_RETURN_CODE 77)
@@ -85,6 +86,11 @@ if(CUDAEE_ENABLE_CUDA)
         "$<TARGET_FILE:fgpu-elim>" "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-hybrid")
     set_tests_properties(exhaustive.fgpu_hybrid PROPERTIES
       LABELS "correctness;gpu;fgpu;exhaustive" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+    add_test(NAME exhaustive.fgpu_point_schedule
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/exhaustive/check_fgpu_point_schedule.py"
+        "$<TARGET_FILE:fgpu-elim>" "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-point-schedule")
+    set_tests_properties(exhaustive.fgpu_point_schedule PROPERTIES
+      LABELS "correctness;gpu;fgpu;exhaustive;schedule" ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     add_test(NAME exhaustive.fgpu_variants
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/exhaustive/check_fgpu_variants.py"
         "$<TARGET_FILE:fgpu-elim>" "${CMAKE_CURRENT_BINARY_DIR}/tmp/fgpu-variants")

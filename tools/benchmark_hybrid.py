@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 
-from benchmark_fgpu import inside, sha256
+from benchmark_fgpu import host_identity, inside, sha256
 from prepare_hs2014_data import CONFIG, DATA, ROOT, distance, records, validate
 
 
@@ -28,7 +28,11 @@ def telemetry(uuid):
 
 def check_outputs(directory, item):
     _, points, metric, tour = validate(item)
-    n = item["n"]
+    return check_outputs_against_tour(directory, points, metric, tour)
+
+
+def check_outputs_against_tour(directory, points, metric, tour, stem="out"):
+    n = len(points)
     def edges(path):
         rows = path.read_text().splitlines()
         dim, count = map(int, rows[0].split())
@@ -41,12 +45,12 @@ def check_outputs(directory, item):
                 raise ValueError("输出边编号、去重或距离校验失败")
             result.add((a, b))
         return result
-    active, fixed = edges(directory / "out.edg"), edges(directory / "out.fix")
+    active, fixed = edges(directory / f"{stem}.edg"), edges(directory / f"{stem}.fix")
     optimum_edges = {tuple(sorted((tour[i], tour[(i + 1) % n]))) for i in range(n)}
     optimum_pairs = {(tour[i], *sorted((tour[i - 1], tour[(i + 1) % n]))) for i in range(n)}
     if optimum_edges - active or fixed - optimum_edges:
         raise ValueError("已知最优 tour 与删边或 fixed 冲突")
-    tokens = iter(map(int, (directory / "out.nonpairs").read_text().split()))
+    tokens = iter(map(int, (directory / f"{stem}.nonpairs").read_text().split()))
     if next(tokens) != n:
         raise ValueError("nonpair 维度不符")
     expected = next(tokens)
@@ -82,6 +86,9 @@ def main():
     parser.add_argument("--distance-cache", choices=("0", "1"), default="1")
     parser.add_argument("--main-pair-cache", choices=("0", "1"), default="1")
     parser.add_argument("--full-metric", choices=("0", "1"), default="1")
+    parser.add_argument("--leaf-permutation-cache", choices=("0", "1"), default="0")
+    parser.add_argument("--point-near-first", choices=("0", "1"), default="0")
+    parser.add_argument("--point-adaptive-start", choices=("0", "1"), default="0")
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--allow-busy", action="store_true", help="只做开发观测，不能用于正式验收")
@@ -119,6 +126,9 @@ def main():
                        "--instance", str(DATA / f"{name}.tsp"), "--device", "0",
                        "--lp-backend", args.lp_backend, "--distance-cache", args.distance_cache,
                        "--main-pair-cache", args.main_pair_cache, "--full-metric", args.full_metric,
+                       "--leaf-permutation-cache", args.leaf_permutation_cache,
+                       "--point-near-first", args.point_near_first,
+                       "--point-adaptive-start", args.point_adaptive_start,
                        "--output-edges", str(directory / "out.edg"), "--fixed", str(directory / "out.fix"),
                        "--nonpairs", str(directory / "out.nonpairs"), "--manifest", str(directory / "out.json")]
             stop = threading.Event()
@@ -150,6 +160,7 @@ def main():
             # 其他卡训练也会争用 CPU/内存；保留开发样本但不称为独占节点 clean。
             node_busy = any(int(row.split(",")[1].strip()) != process.pid for sample in samples for row in sample["node_processes"])
             record = {"instance": name, "iteration": iteration, "warmup": iteration < args.warmups,
+                      "host_identity": host_identity(),
                       "command": command, "executable_sha256": identity, "config_sha256": sha256(CONFIG),
                       "returncode": code, "process_wall_seconds": wall, "telemetry_errors": errors,
                       "foreign_gpu_process": foreign, "other_node_gpu_process": node_busy,
@@ -160,6 +171,9 @@ def main():
             if code != 0:
                 raise RuntimeError(f"{name} 完整 solve 失败，日志保留于 {directory}")
             report = json.loads((directory / "out.json").read_text())
+            if report.get("gpu_identity", {}).get("uuid") != args.gpu_uuid or \
+                    report.get("build_identity", {}).get("executable_sha256") != identity:
+                raise ValueError("求解的 GPU/可执行文件身份不符")
             if report["profile"] != "hybrid-e2e" or report["initial_edges"] != item["n"] * (item["n"] - 1) // 2 or report["tour_sha256"] is not None:
                 raise ValueError("求解不是无标签完整图入口")
             if report["termination"] != "fixed-point" or not report["gpu_replayed"] or report["proof_rejected"]:
@@ -172,7 +186,10 @@ def main():
             print(f'{name} run={iteration} wall={wall:.3f}s edges={report["final_edges"]} fixed={report["fixed_edges"]} clean={record["clean"]}', flush=True)
     summary = {"complete_acceptance": False, "same_machine_reference": "not-yet-measured",
                "configuration": {"lp_backend": args.lp_backend, "distance_cache": args.distance_cache,
-                                 "main_pair_cache": args.main_pair_cache, "full_metric": args.full_metric}, "instances": {}}
+                                 "main_pair_cache": args.main_pair_cache, "full_metric": args.full_metric,
+                                 "leaf_permutation_cache": args.leaf_permutation_cache,
+                                 "point_near_first": args.point_near_first,
+                                 "point_adaptive_start": args.point_adaptive_start}, "instances": {}}
     for name in args.instances:
         measured = [x for x in runs if x["instance"] == name and not x["warmup"]]
         clean = [x for x in measured if x["clean"]]

@@ -1,6 +1,8 @@
 #include "../../src/fgpu/gpu_bootstrap.hpp"
+#include "../../src/fgpu/permutation_catalog.hpp"
 #include "../../src/fgpu/resident_backend.hpp"
 #include "cuda_edge_elimination/distance.hpp"
+#include <cuda_runtime.h>
 
 #include <algorithm>
 #include <iostream>
@@ -73,6 +75,28 @@ int main() try {
         if (n == 5)
           graph.points.assign(n, graph.points.front()); // 零距离、多最优解边界。
         cudaee::detail::GpuBootstrap bootstrap(graph, 0);
+        if (denominator == 1U && metric == cudaee::DistanceType::kEuc2D && n == 3) {
+          bootstrap.BuildPermutationCatalog();
+          using namespace cudaee::detail::permutation_catalog;
+          Require(bootstrap.metrics().permutation_bytes == kBytes, "排列目录大小错误");
+          std::vector<std::uint8_t> catalog(kBytes);
+          Require(cudaMemcpy(catalog.data(), bootstrap.permutations(), kBytes,
+                             cudaMemcpyDeviceToHost) == cudaSuccess,
+                  "下载测试排列目录失败");
+          for (int count = 1; count <= kMaximumNodes; ++count) {
+            std::vector<std::uint8_t> expected(count);
+            std::iota(expected.begin(), expected.end(), std::uint8_t{0});
+            int rank = 0;
+            do {
+              for (int position = 0; position < count; ++position)
+                Require(catalog[Offset(count) + position * Factorial(count) + rank] ==
+                            expected[position],
+                        "GPU 排列目录与 CPU next_permutation 不同");
+              ++rank;
+            } while (std::next_permutation(expected.begin(), expected.end()));
+            Require(rank == Factorial(count), "排列目录覆盖不完整");
+          }
+        }
         bootstrap.BuildCompleteGraph(&graph);
         Require(graph.edges.size() == static_cast<std::size_t>(n * (n - 1) / 2),
                 "GPU 完整图大小错误");
